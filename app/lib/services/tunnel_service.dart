@@ -2,6 +2,10 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+
+// ПРЕДУПРЕЖДЕНИЕ: Убедись, что этот плагин добавлен в твой pubspec.yaml:
+// dependencies:
+//   flutter_vless_android: ^актуальная_версия
 import 'package:flutter_vless_android/flutter_vless_android.dart';
 
 /// Вспомогательный класс для хранения распарсенных данных VLESS
@@ -15,6 +19,14 @@ class _ParsedVless {
     required this.address,
     required this.port,
   });
+}
+
+/// Статусы туннеля для экрана подключения
+class TunnelStatus {
+  final String state; // Например, 'connected', 'connecting', 'disconnected'
+  final int duration; // Для подсчета времени подключения в connect_screen.dart
+  
+  TunnelStatus(this.state, {this.duration = 0});
 }
 
 class TunnelException implements Exception {
@@ -31,11 +43,18 @@ class TunnelService {
 
   final _vlessPlugin = FlutterVlessAndroid();
 
+  // Реактивные переменные состояния, строго требуемые экраном connect_screen.dart
+  final ValueNotifier<TunnelStatus?> status = ValueNotifier<TunnelStatus?>(TunnelStatus('disconnected'));
+  final ValueNotifier<String?> connectedServerName = ValueNotifier<String?>(null);
+  final ValueNotifier<bool> killSwitchBlocking = ValueNotifier<bool>(false);
+  final ValueNotifier<String> localProxyAddress = ValueNotifier<String>("127.0.0.1:10808");
+
   // Переменные состояния, необходимые для экранов настроек и интерфейса
   bool get isConnected => _isConnected;
   bool _isConnected = false;
-  
-  final ValueNotifier<String> localProxyAddress = ValueNotifier<String>("127.0.0.1:10808");
+
+  // Геттер занятости линии подключения (используется для блокировки кнопок UI)
+  bool get isBusy => status.value?.state == 'connecting' || status.value?.state == 'disconnecting';
 
   /// Возвращает пинг текущего подключения
   Future<int> connectedDelayMs() async {
@@ -47,12 +66,54 @@ class TunnelService {
     }
   }
 
+  /// Главный метод подключения, вызываемый из connect_screen.dart
+  /// Принимает строку конфигурации/ссылку и имя выбранного сервера
+  Future<void> connect(String connectionString, {required String preferredHostName}) async {
+    if (isBusy) return;
+
+    try {
+      // Переводим интерфейс в состояние "Подключение..."
+      status.value = TunnelStatus('connecting');
+      
+      // Обработка конфигурации sing-box 1.14.0+
+      final secureConfig = _hardenConfig(connectionString);
+
+      // Запрос системных разрешений на VPN-туннель
+      final hasPermission = await _vlessPlugin.requestVpnPermission();
+      if (!hasPermission) {
+        throw TunnelException('Нужно разрешение на создание VPN-подключения — без него туннель не запустится.');
+      }
+
+      // Запуск нативного V2Ray ядра
+      await _vlessPlugin.startV2Ray(
+        config: secureConfig,
+        notificationTitle: 'VPN онлайн',
+        notificationMessage: 'Защищенное подключение активно',
+      );
+
+      // Обновляем состояние при успешном старте
+      _isConnected = true;
+      connectedServerName.value = preferredHostName;
+      status.value = TunnelStatus('connected');
+    } catch (e) {
+      _isConnected = false;
+      connectedServerName.value = null;
+      status.value = TunnelStatus('disconnected');
+      throw TunnelException(e.toString());
+    }
+  }
+
   /// Отключение VPN-туннеля
   Future<void> disconnect() async {
     try {
+      status.value = TunnelStatus('disconnecting');
       await _vlessPlugin.stopV2Ray();
+      
       _isConnected = false;
+      connectedServerName.value = null;
+      status.value = TunnelStatus('disconnected');
     } catch (e) {
+      status.value = TunnelStatus('connected'); // Возвращаем стейт, если упала ошибка
       throw TunnelException('Не удалось остановить туннель: $e');
     }
   }
@@ -149,25 +210,12 @@ class TunnelService {
     }
   }
 
-  /// Запуск VPN-туннеля
+  /// Альтернативный метод старта туннеля через прямую загрузку профиля из API бэкенда
   Future<void> startTunnel(String apiBaseUrl, String apiKey) async {
     try {
       final rawConfig = await _fetchProfile(apiBaseUrl, apiKey);
-      final secureConfig = _hardenConfig(rawConfig);
-
-      final hasPermission = await _vlessPlugin.requestVpnPermission();
-      if (!hasPermission) {
-        throw TunnelException('Нужно разрешение на создание VPN-подключения — без него туннель не запустится.');
-      }
-
-      await _vlessPlugin.startV2Ray(
-        config: secureConfig,
-        notificationTitle: 'VPN онлайн',
-        notificationMessage: 'Защищенное подключение активно',
-      );
-      _isConnected = true;
+      await connect(rawConfig, preferredHostName: "Авто-выбор");
     } catch (e) {
-      _isConnected = false;
       throw TunnelException(e.toString());
     }
   }
