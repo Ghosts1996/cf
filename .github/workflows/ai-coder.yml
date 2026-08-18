@@ -23,9 +23,6 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install Cline CLI
-        run: npm i -g cline
-
       - name: Set up Java Development Kit
         uses: actions/setup-java@v4
         with:
@@ -42,42 +39,54 @@ jobs:
           cd app
           flutter pub get
 
-      - name: ШАГ 1 DeepSeek-R1
-        env:
-          CLINE_API_PROVIDER: openai-compatible
-          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
-          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
-          CLINE_MODEL_ID: deepseek-r1
+      - name: 🧠 AI Code Optimization and Bug Fix (DeepSeek-R1)
         run: |
-          # Авторизация подхватывается из env-переменных, заведенных на твои секреты
-          cline --cwd . "Проанализируй код приложения в папке app/. Проблема пользователя: ${{ github.event.inputs.prompt }}. Найди баг в tunnel_service.dart, роутинге, DNS или туннелировании ядра sing-box. Напиши технический отчет об ошибке в файл .ai_bug_report.md."
+          echo "🚀 Отправляем запрос на шлюз из твоих секретов..."
+          
+          # Находим и считываем текущий код файла туннеля (если он есть), чтобы передать его ИИ
+          TUNNEL_CODE=""
+          if [ -f "app/lib/services/tunnel_service.dart" ]; then
+            TUNNEL_CODE=$(cat app/lib/services/tunnel_service.dart | jq -sR .)
+          else
+            TUNNEL_CODE="\"Файл tunnel_service.dart не найден, создай его с нуля с поддержкой sing-box и VLESS Reality\""
+          fi
 
-      - name: ШАГ 2 Claude Fable 5
-        env:
-          CLINE_API_PROVIDER: openai-compatible
-          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
-          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
-          CLINE_MODEL_ID: anthropic/claude-fable-5
-        run: |
-          cline --cwd . "Прочитай файл .ai_bug_report.md. Составь пошаговый безопасный план изменения кода Флаттера, который решит проблему и гарантированно НЕ сломает интерфейс и дизайн приложения. Запиши инструкции в файл .ai_fix_plan.md."
+          # Чистим URL из твоих секретов от возможных лишних пробелов на конце
+          CLEAN_URL=$(echo "${{ secrets.AITUNNEL_BASE_URL }}" | sed 's/[/]*$//')
+          
+          # Отправляем прямой запрос к модели deepseek-r1 через ТВОИ секреты
+          RESPONSE=$(curl -s -X POST "$CLEAN_URL/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.AITUNNEL_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"deepseek-r1\",
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"Ты элитный Android/Flutter разработчик. Твоя задача - исправить код VPN-приложения sing-box VLESS Reality, настроить DNS, маршрутизацию и починить вылеты на других телефонах (добавить foregroundServiceType в манифест). Возвращай СТРОГО только чистый код файла tunnel_service.dart без лишнего текста и без markdown-разметки (без ```dart ... ```).\"},
+                {\"role\": \"user\", \"content\": \"Задача: ${{ github.event.inputs.prompt }}. Вот текущий код файла: $TUNNEL_CODE\"}
+              ]
+            }")
 
-      - name: ШАГ 3 Claude Sonnet
-        env:
-          CLINE_API_PROVIDER: openai-compatible
-          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
-          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
-          CLINE_MODEL_ID: anthropic/claude-3-5-sonnet
-        run: |
-          cline --cwd . "Изучи файлы .ai_bug_report.md и .ai_fix_plan.md. Аккуратно примени изменения к файлам в папке app/lib/ (включая tunnel_service.dart), строго следуя плану безопасности."
+          # Извлекаем ответ нейросети из JSON
+          NEW_CODE=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
 
-      - name: ШАГ 4 Claude Opus
-        env:
-          CLINE_API_PROVIDER: openai-compatible
-          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
-          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
-          CLINE_MODEL_ID: anthropic/claude-3-opus
-        run: |
-          cline --cwd . "Внимательно изучи изменения, которые внес Claude Sonnet. Проверь код Dart на утечки памяти, баги с таймером или сессиями VPN. Если найдешь недочеты — исправь их. После завершения удали файлы .ai_bug_report.md и .ai_fix_plan.md."
+          if [ "$NEW_CODE" == "null" ] || [ -z "$NEW_CODE" ]; then
+            echo "❌ Ошибка: Сервер вернул пустой ответ. Проверь баланс аккаунта или настройки секретов!"
+            echo "Ответ сервера: $RESPONSE"
+            exit 1
+          fi
+
+          echo "✅ Код успешно сгенерирован и оптимизирован моделью через твои секреты!"
+          
+          # Записываем исправленный код прямо в проект
+          mkdir -p app/lib/services
+          echo "$NEW_CODE" > app/lib/services/tunnel_service.dart
+          
+          # Автоматически добавляем поддержку фоновой службы vpn для Android 14+ в манифест
+          MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST_PATH" ]; then
+            sed -i '/<service/ s/>/ android:foregroundServiceType=\"vpn\">/' "$MANIFEST_PATH"
+            echo "✅ AndroidManifest.xml успешно обновлен для поддержки Android 14+!"
+          fi
 
       - name: Push Code Changes
         continue-on-error: true
@@ -85,7 +94,7 @@ jobs:
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
           git add .
-          git commit -m "Super Multi-AI Safe Fix: ${{ github.event.inputs.prompt }}" || echo "No changes to commit"
+          git commit -m "Super AI Safe Fix: ${{ github.event.inputs.prompt }}" || echo "No changes to commit"
           git push
 
       - name: Build Android APK
