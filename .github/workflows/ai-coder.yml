@@ -68,31 +68,12 @@ jobs:
           PROMPT_TRIMMED="$(trim "$USER_PROMPT")"
           PROMPT_LOWER="$(printf '%s' "$PROMPT_TRIMMED" | tr '[:upper:]' '[:lower:]')"
 
-          mapfile -t PROJECT_FILES < <(
-            find . \
-              \( -path './.git/*' -o -path './.github/*' -o -path '*/build/*' \
-                 -o -path '*/.dart_tool/*' -o -path '*/.gradle/*' -o -path '*/Pods/*' \
-                 -o -path '*/.symlinks/*' -o -path '*/generated/*' -o -path '*/.idea/*' \
-                 -o -path '*/node_modules/*' \) -prune -o \
-              -type f \
-              ! -name '*.env' ! -name '*.env.*' \
-              ! -name '*.pem' ! -name '*.key' -name '*.jks' \
-              ! -name '*.keystore' ! -name '*.p12' ! -name '*.pfx' \
-              ! -name 'pubspec.lock' \
-              \( -name '*.dart' -o -name '*.yaml' -o -name '*.yml' \
-                 -o -name '*.gradle' -o -name '*.gradle.kts' -o -name '*.kts' \
-                 -o -name '*.xml' -o -name '*.kt' -o -name '*.java' \
-                 -o -name '*.plist' -o -name '*.swift' -o -name '*.py' \
-                 -o -name '*.md' -o -name '*.js' -o -name '*.toml' \
-                 -o -name '*.cfg' -o -name '*.ini' -o -name '*.sh' \
-                 -o -name '*.css' -o -name '*.html' -o -name '*.txt' \
-                 -o -name 'Dockerfile' -o -name 'Podfile' \) -print \
-
-              | sed 's|^\./||' | sort
-          )
+          echo "🔍 Собираем список файлов проекта без использования опасных символов..."
+          
+          # Пуленепробиваемый сбор файлов: ищем только нужные расширения в папке app, исключая build
+          mapfile -t PROJECT_FILES < <(find app -type f -name "*.dart" -o -name "*.xml" -o -name "*.yaml" -o -name "*.kt" -o -name "*.java" | grep -v "build/" || true)
 
           echo "📝 В контекст для AI попадёт файлов: ${#PROJECT_FILES[@]}"
-          printf ' - %s\n' "${PROJECT_FILES[@]}"
 
           if [ "$PROMPT_LOWER" == "test" ]; then
             echo "test_mode=true" >> "$GITHUB_OUTPUT"
@@ -105,11 +86,11 @@ jobs:
           PROJECT_BUNDLE_FILE="$RUNNER_TEMP/project_bundle.txt"
           : > "$PROJECT_BUNDLE_FILE"
           for f in "${PROJECT_FILES[@]}"; do
-            {
-              printf '=== FILE: %s ===\n' "$f"
-              cat "$f"
-              printf '\n=== END FILE ===\n\n'
-            } >> "$PROJECT_BUNDLE_FILE"
+            if [ -f "$f" ]; then
+              printf '=== FILE: %s ===\n' "$f" >> "$PROJECT_BUNDLE_FILE"
+              cat "$f" >> "$PROJECT_BUNDLE_FILE"
+              printf '\n=== END FILE ===\n\n' >> "$PROJECT_BUNDLE_FILE"
+            fi
           done
 
           BUNDLE_SIZE=$(wc -c < "$PROJECT_BUNDLE_FILE")
