@@ -197,10 +197,11 @@ class _MenuScreenState extends State<MenuScreen> {
 }
 
 class _MenuRow extends StatelessWidget {
-  const _MenuRow({required this.icon, required this.label, required this.onTap});
+  const _MenuRow({required this.icon, required this.label, required this.onTap, this.danger = false});
   final IconData icon;
   final String label;
   final VoidCallback onTap;
+  final bool danger;
 
   @override
   Widget build(BuildContext context) {
@@ -213,7 +214,7 @@ class _MenuRow extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 4),
           child: Row(
             children: [
-              RingIconBadge(icon: icon, danger: false, size: 40),
+              RingIconBadge(icon: icon, danger: danger, size: 40),
               const SizedBox(width: 12),
               Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
               const Icon(Icons.chevron_right_rounded, color: AppColors.textDim, size: 16),
