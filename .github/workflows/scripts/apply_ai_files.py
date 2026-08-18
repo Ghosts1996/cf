@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
 Парсит ответ AI (текст в формате блоков `=== FILE: <путь> === ... === END FILE ===`)
-и записывает КАЖДЫЙ файл на диск — но только если путь входит в allowlist.
+и записывает КАЖДЫЙ файл на диск — везде в репозитории, КРОМЕ:
+  - .github/**            — сам CI-пайплайн; скрипт, который сейчас выполняется,
+                             не должен мочь переписать самого себя;
+  - .git/**                — служебные данные git;
+  - файлов-секретов (*.env, *.pem, *.key, *.jks, *.keystore, *.p12, *.pfx);
+  - путей, выходящих за пределы репозитория (".." / абсолютные пути).
 
-Это осознанная граница безопасности: даже если AI предложит поменять что-то
-вне app/lib/, app/android/ или app/pubspec.yaml (например, файлы workflow
-в .github/, деплой-скрипты, секреты) — такие блоки будут проигнорированы
-и явно залогированы, а не применены молча.
+Это единственная сознательная граница безопасности. Всё остальное применяется
+без ограничений — в соответствии с тем, что пользователь дал AI полный доступ
+к репозиторию.
 
 Использование:
     python3 apply_ai_files.py <путь_к_ответу_ai.txt> <путь_к_логу_изменённых_файлов.txt>
@@ -15,8 +19,8 @@ import os
 import re
 import sys
 
-ALLOWED_PREFIXES = ("app/lib/", "app/android/")
-ALLOWED_EXACT = ("app/pubspec.yaml",)
+DENY_DIR_PREFIXES = (".github/", ".git/")
+DENY_EXTENSIONS = (".env", ".pem", ".key", ".jks", ".keystore", ".p12", ".pfx")
 
 FILE_BLOCK_RE = re.compile(
     r"^=== FILE: (?P<path>.+?) ===\n(?P<content>.*?)\n=== END FILE ===\s*$",
@@ -26,9 +30,22 @@ FILE_BLOCK_RE = re.compile(
 
 def is_allowed(path: str) -> bool:
     norm = os.path.normpath(path)
+
+    # Не даём выйти за пределы репозитория.
     if norm.startswith("..") or os.path.isabs(norm):
         return False
-    return norm.startswith(ALLOWED_PREFIXES) or norm in ALLOWED_EXACT
+
+    # Запрещённые каталоги (сам CI-пайплайн, служебные данные git).
+    norm_with_slash = norm + "/"
+    if any(norm_with_slash.startswith(p) or norm == p.rstrip("/") for p in DENY_DIR_PREFIXES):
+        return False
+
+    # Запрещённые файлы-секреты (по расширению или суффиксу вида *.env.local).
+    lower = norm.lower()
+    if lower.endswith(DENY_EXTENSIONS) or ".env." in os.path.basename(lower) or os.path.basename(lower) == ".env":
+        return False
+
+    return True
 
 
 def main() -> int:
@@ -69,8 +86,7 @@ def main() -> int:
 
     if skipped:
         print(
-            f"⚠️ Пропущено (вне разрешённых путей app/lib/, app/android/, "
-            f"app/pubspec.yaml): {len(skipped)}"
+            f"⚠️ Пропущено (запрещённые пути — .github/, .git/ или файлы-секреты): {len(skipped)}"
         )
         for p in skipped:
             print(f"   🚫 {p}")
