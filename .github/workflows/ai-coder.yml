@@ -43,21 +43,33 @@ jobs:
           flutter pub get
 
       - name: ШАГ 1 DeepSeek-R1
+        env:
+          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          OPENAI_BASE_URL: https://aitunnel.ru
         run: |
-          # Включаем openai-compatible режим и передаем эндпоинт, чтобы ключ не обрезался
-          cline --json --provider openai-compatible --baseurl "https://api.aitunnel.ru/v1/" --key "${{ secrets.AITUNNEL_API_KEY }}" --model deepseek-r1 --cwd . "Проанализируй код приложения в папке app/. Проблема пользователя: ${{ github.event.inputs.prompt }}. Найди баг в tunnel_service.dart, роутинге, DNS или туннелировании ядра sing-box. Напиши технический отчет об ошибке в файл .ai_bug_report.md."
+          # Передаем только поддерживаемые CLI-флаги. Авторизация подхватится из env
+          cline --json --provider openai --model deepseek-r1 --cwd . "Проанализируй код приложения в папке app/. Проблема пользователя: ${{ github.event.inputs.prompt }}. Найди баг в tunnel_service.dart, роутинге, DNS или туннелировании ядра sing-box. Напиши технический отчет об ошибке в файл .ai_bug_report.md."
 
       - name: ШАГ 2 Claude Fable 5
+        env:
+          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          OPENAI_BASE_URL: https://aitunnel.ru
         run: |
-          cline --json --provider openai-compatible --baseurl "https://api.aitunnel.ru/v1/" --key "${{ secrets.AITUNNEL_API_KEY }}" --model anthropic/claude-fable-5 --cwd . "Прочитай файл .ai_bug_report.md. Составь пошаговый безопасный план изменения кода Флаттера, который решит проблему и гарантированно НЕ сломает интерфейс и дизайн приложения. Запиши инструкции in файл .ai_fix_plan.md."
+          cline --json --provider openai --model anthropic/claude-fable-5 --cwd . "Прочитай файл .ai_bug_report.md. Составь пошаговый безопасный план изменения кода Флаттера, который решит проблему и гарантированно НЕ сломает интерфейс и дизайн приложения. Запиши инструкции в файл .ai_fix_plan.md."
 
       - name: ШАГ 3 Claude Sonnet
+        env:
+          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          OPENAI_BASE_URL: https://aitunnel.ru
         run: |
-          cline --json --provider openai-compatible --baseurl "https://api.aitunnel.ru/v1/" --key "${{ secrets.AITUNNEL_API_KEY }}" --model anthropic/claude-3-5-sonnet --cwd . "Изучи файлы .ai_bug_report.md и .ai_fix_plan.md. Аккуратно примени изменения к файлам в папке app/lib/ (включая tunnel_service.dart), строго следуя плану безопасности."
+          cline --json --provider openai --model anthropic/claude-3-5-sonnet --cwd . "Изучи файлы .ai_bug_report.md и .ai_fix_plan.md. Аккуратно примени изменения к файлам в папке app/lib/ (включая tunnel_service.dart), строго следуя плану безопасности."
 
       - name: ШАГ 4 Claude Opus
+        env:
+          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          OPENAI_BASE_URL: https://aitunnel.ru
         run: |
-          cline --json --provider openai-compatible --baseurl "https://api.aitunnel.ru/v1/" --key "${{ secrets.AITUNNEL_API_KEY }}" --model anthropic/claude-3-opus --cwd . "Внимательно изучи изменения, которые внес Claude Sonnet. Проверь код Dart на утечки памяти, баги с таймером или сессиями VPN. Если найдешь недочеты — исправь их. После завершения удали файлы .ai_bug_report.md и .ai_fix_plan.md."
+          cline --json --provider openai --model anthropic/claude-3-opus --cwd . "Внимательно изучи изменения, которые внес Claude Sonnet. Проверь код Dart на утечки памяти, баги с таймером или сессиями VPN. Если найдешь недочеты — исправь их. После завершения удали файлы .ai_bug_report.md и .ai_fix_plan.md."
 
       - name: Push Code Changes
         continue-on-error: true
