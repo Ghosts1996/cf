@@ -26,7 +26,7 @@ concurrency:
 jobs:
   super-ai-flow:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -53,7 +53,7 @@ jobs:
           cd app
           flutter pub get
 
-      - name: 🧠 AI Code Optimization and Bug Fix
+      - name: 🧠 AI Whole-Project Code Fix
         id: ai_optimize
         env:
           USER_PROMPT: ${{ github.event.inputs.prompt }}
@@ -62,11 +62,9 @@ jobs:
           AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
         run: |
           set -uo pipefail
-          # (без "set -e": мы сами проверяем каждый шаг и выходим с внятным
+          # (без "set -e": сами проверяем каждый шаг и выходим с внятным
           # сообщением, а не падаем "молча" на середине скрипта)
 
-          # Убираем пробелы по краям без xargs (xargs может споткнуться,
-          # если в prompt встретится непарная кавычка).
           trim() {
             local s="$1"
             s="${s#"${s%%[![:space:]]*}"}"
@@ -77,22 +75,32 @@ jobs:
           PROMPT_TRIMMED="$(trim "$USER_PROMPT")"
           PROMPT_LOWER="$(printf '%s' "$PROMPT_TRIMMED" | tr '[:upper:]' '[:lower:]')"
 
-          # Проверяем, не тестовый ли это запуск (слово "test" в поле prompt).
-          # Тестовый режим пробрасываем в следующие шаги через GITHUB_OUTPUT,
-          # т.к. переменные bash между шагами не сохраняются.
+          # Каталоги/файлы, которые AI разрешено ЧИТАТЬ (весь проект приложения)
+          # и — отдельно — куда разрешено ЗАПИСЫВАТЬ ответ (см. write allowlist
+          # ниже в шаге парсинга). Специально НЕ включаем .github/**, секреты,
+          # deploy-скрипты и т.п. — чтобы AI физически не мог переписать сам
+          # CI-пайплайн или что-то вне приложения, даже если сам об этом
+          # "попросит" в ответе.
+          mapfile -t PROJECT_FILES < <(
+            find app \
+              \( -path '*/build/*' -o -path '*/.dart_tool/*' -o -path '*/.gradle/*' \
+                 -o -path '*/Pods/*' -o -path '*/.symlinks/*' -o -path '*/generated/*' \
+                 -o -path '*/.idea/*' \) -prune -o \
+              -type f \( -name '*.dart' -o -name '*.yaml' -o -name '*.yml' \
+                         -o -name '*.gradle' -o -name '*.gradle.kts' -o -name '*.kts' \
+                         -o -name '*.xml' -o -name '*.kt' -o -name '*.java' \
+                         -o -name '*.plist' -o -name '*.swift' \) -print \
+              | grep -v 'pubspec.lock' | sort
+          )
+
+          echo "📂 В контекст для AI попадёт файлов: ${#PROJECT_FILES[@]}"
+          printf '   %s\n' "${PROJECT_FILES[@]}"
+
+          # Тестовый режим — пропускаем вызов AI API, ничего не меняем.
           if [ "$PROMPT_LOWER" == "test" ]; then
             echo "test_mode=true" >> "$GITHUB_OUTPUT"
             echo "🧪 ТЕСТОВЫЙ РЕЖИМ: пропускаем вызов AI API, кредиты не тратятся."
-            echo "Проверяем только сборку окружения (Java/Flutter/pub get), анализ и билд текущего кода."
-
-            if [ -f "app/lib/services/tunnel_service.dart" ]; then
-              CLEAN_CODE=$(cat app/lib/services/tunnel_service.dart)
-            else
-              CLEAN_CODE="// TEST MODE: файл отсутствовал на момент прогона, код не менялся"
-            fi
-
-            mkdir -p app/lib/services
-            printf '%s\n' "$CLEAN_CODE" > app/lib/services/tunnel_service.dart
+            echo "Проверяем только окружение (Java/Flutter/pub get), анализ и билд текущего кода как есть."
             exit 0
           fi
 
@@ -103,7 +111,6 @@ jobs:
             exit 1
           fi
 
-          # Выбор модели по карточкам aitunnel.ru/models.
           case "$MODEL_CHOICE" in
             claude)
               MODEL_ID="claude-sonnet-5"
@@ -113,102 +120,158 @@ jobs:
               ;;
           esac
 
-          echo "🚀 Модель: $MODEL_ID. Кодируем файл и отправляем запрос на шлюз..."
+          echo "🚀 Модель: $MODEL_ID. Собираем весь проект в один пакет для AI..."
 
-          if [ -f "app/lib/services/tunnel_service.dart" ]; then
-            TUNNEL_CODE_B64=$(base64 -w 0 < app/lib/services/tunnel_service.dart)
-          else
-            TUNNEL_CODE_B64=$(echo -n "Файл отсутствует, создай с нуля" | base64 -w 0)
+          # Собираем содержимое всех файлов в единый текстовый блок с явными
+          # маркерами начала/конца файла. Это надёжнее, чем просить модель
+          # вернуть валидный JSON с экранированием кавычек/переносов строк —
+          # на реальном Dart-коде модели часто ломают такой JSON.
+          PROJECT_BUNDLE_FILE="$RUNNER_TEMP/project_bundle.txt"
+          : > "$PROJECT_BUNDLE_FILE"
+          for f in "${PROJECT_FILES[@]}"; do
+            {
+              printf '=== FILE: %s ===\n' "$f"
+              cat "$f"
+              printf '\n=== END FILE ===\n\n'
+            } >> "$PROJECT_BUNDLE_FILE"
+          done
+
+          BUNDLE_SIZE=$(wc -c < "$PROJECT_BUNDLE_FILE")
+          echo "📦 Размер пакета с кодом: ${BUNDLE_SIZE} байт."
+          if [ "$BUNDLE_SIZE" -gt 900000 ]; then
+            echo "⚠️ Пакет очень большой (>900KB) — модель может обрезать ответ или не уместить весь проект в контекст."
           fi
+
+          SYSTEM_PROMPT='Ты старший Flutter/Android инженер, работающий с VPN-клиентом на sing-box (VLESS Reality).
+          Тебе передан весь релевантный исходный код проекта в виде блоков:
+          === FILE: <путь> ===
+          <содержимое файла>
+          === END FILE ===
+
+          ТВОЯ ЗАДАЧА описана пользователем в сообщении ниже. Выполни её ПОЛНОСТЬЮ и добросовестно:
+          - не игнорируй и не упрощай задачу пользователя, не подменяй её собственной версией;
+          - если задача указывает на конкретный баг/поведение — найди и исправь именно его во всех местах проекта, где он встречается, а не только в одном файле;
+          - если для решения задачи требуется поменять несколько файлов (например, dart-код и AndroidManifest.xml) — меняй все необходимые;
+          - если пользователь просит добавить новую функциональность (не только исправить баг) — реализуй её полностью, включая нужный UI, состояние, обработку ошибок и связь с существующим кодом, а не только "каркас".
+
+          КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
+          - оставлять заглушки, TODO, "// implement later", пустые функции-обёртки или фейковые/захардкоженные данные вместо реальной логики;
+          - писать код, который не компилируется или заведомо не будет работать в рантайме;
+          - урезать задачу до "минимально проходящего анализ" вместо реального решения — код должен реально работать, а не просто не выдавать ошибок статического анализа.
+          Любой код, который ты возвращаешь, должен быть готовым к использованию, а не наброском.
+
+          СТРОГИЙ ФОРМАТ ОТВЕТА:
+          - Отвечай ТОЛЬКО блоками вида:
+          === FILE: <путь, точно как во входных данных> ===
+          <полное новое содержимое файла>
+          === END FILE ===
+          - Никакого текста вне блоков. Никаких markdown-обёрток ```.
+          - Включай в ответ ТОЛЬКО те файлы, которые ты реально изменил. Не переписывай без необходимости файлы, которые не требуют правок.
+          - Не удаляй и не сокращай логику, не связанную с задачей.
+          - Новые файлы можно создавать, только если это необходимо для задачи, и только по пути внутри app/lib/ или app/android/.
+          - Если правок не требуется ни в одном файле — верни пустой ответ.'
+
+          USER_CONTENT_FILE="$RUNNER_TEMP/user_content.txt"
+          {
+            printf 'Задача: %s\n\n' "$USER_PROMPT"
+            printf 'Исходный код проекта:\n\n'
+            cat "$PROJECT_BUNDLE_FILE"
+          } > "$USER_CONTENT_FILE"
 
           CLEAN_URL=$(echo "$AITUNNEL_BASE_URL" | sed 's/[/]*$//')
 
-          SYSTEM_PROMPT='Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, настрой DNS, настрой маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать маркдаун-теги вроде ```dart или ```, пиши только сырой код файла.'
-
-          USER_CONTENT="Задача: ${USER_PROMPT}. Базовый код текущего файла в Base64 (декодируй перед анализом): ${TUNNEL_CODE_B64}"
-
-          # jq -n --arg сам корректно экранирует кавычки, переносы строк,
-          # обратные слэши и юникод — вручную строку JSON больше не собираем.
-          PAYLOAD=$(jq -n \
+          PAYLOAD_FILE="$RUNNER_TEMP/payload.json"
+          jq -n \
             --arg model "$MODEL_ID" \
             --arg sys "$SYSTEM_PROMPT" \
-            --arg usr "$USER_CONTENT" \
-            --argjson max_tokens 12000 \
-            '{model: $model, messages: [{role:"system", content:$sys}, {role:"user", content:$usr}], max_tokens: $max_tokens}')
+            --rawfile usr "$USER_CONTENT_FILE" \
+            --argjson max_tokens 32000 \
+            '{model: $model, messages: [{role:"system", content:$sys}, {role:"user", content:$usr}], max_tokens: $max_tokens}' \
+            > "$PAYLOAD_FILE"
 
-          RESPONSE=$(curl -sS --max-time 180 --retry 2 --retry-delay 5 -X POST "$CLEAN_URL/chat/completions" \
+          RESPONSE_FILE="$RUNNER_TEMP/response.json"
+          HTTP_CODE=$(curl -sS --max-time 600 --retry 2 --retry-delay 5 -X POST "$CLEAN_URL/chat/completions" \
             -H "Authorization: Bearer $AITUNNEL_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
+            -d @"$PAYLOAD_FILE" \
+            -o "$RESPONSE_FILE" \
+            -w '%{http_code}')
           CURL_STATUS=$?
 
           if [ "$CURL_STATUS" -ne 0 ]; then
             echo "❌ Ошибка сети при обращении к AITUNNEL (curl exit code $CURL_STATUS)."
             exit 1
           fi
-
-          NEW_CODE=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
-
-          if [ -z "$NEW_CODE" ]; then
-            echo "❌ Ошибка: сервер вернул пустой ответ или неожиданный формат."
-            echo "Ответ сервера: $RESPONSE"
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "❌ AITUNNEL вернул HTTP $HTTP_CODE:"
+            cat "$RESPONSE_FILE"
             exit 1
           fi
 
-          CLEAN_CODE=$(echo "$NEW_CODE" | sed '/^```/d')
+          NEW_CODE=$(jq -r '.choices[0].message.content // empty' "$RESPONSE_FILE" 2>/dev/null)
 
-          echo "✅ Код успешно сгенерирован моделью $MODEL_ID!"
+          if [ -z "$NEW_CODE" ]; then
+            echo "❌ Ошибка: сервер вернул пустой ответ или неожиданный формат."
+            echo "Ответ сервера:"
+            cat "$RESPONSE_FILE"
+            exit 1
+          fi
 
-          mkdir -p app/lib/services
-          printf '%s\n' "$CLEAN_CODE" > app/lib/services/tunnel_service.dart
+          AI_RAW_OUTPUT="$RUNNER_TEMP/ai_output.txt"
+          printf '%s' "$NEW_CODE" > "$AI_RAW_OUTPUT"
 
+          if ! grep -q '^=== FILE: ' "$AI_RAW_OUTPUT"; then
+            echo "ℹ️ Модель не вернула ни одного файла для изменения (или не выдержала формат). Изменений нет."
+            echo "changed_any=false" >> "$GITHUB_OUTPUT"
+            echo "----- RAW OUTPUT (для отладки) -----"
+            cat "$AI_RAW_OUTPUT"
+            exit 0
+          fi
+
+          # Разбираем ответ на отдельные файлы. Разрешаем запись ТОЛЬКО внутрь
+          # app/lib/ и app/android/ и в сам app/pubspec.yaml — это осознанная
+          # граница безопасности: даже если модель предложит поменять что-то
+          # в .github/**, скрипты деплоя или другие места, это будет
+          # проигнорировано и явно залогировано.
+          CHANGED_FILES_LOG="$RUNNER_TEMP/changed_files.txt"
+          : > "$CHANGED_FILES_LOG"
+
+          python3 .github/scripts/apply_ai_files.py "$AI_RAW_OUTPUT" "$CHANGED_FILES_LOG"
+
+          if [ ! -s "$CHANGED_FILES_LOG" ]; then
+            echo "ℹ️ После фильтрации по разрешённым путям изменений не осталось."
+            echo "changed_any=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "changed_any=true" >> "$GITHUB_OUTPUT"
+
+          # AndroidManifest.xml патч на foregroundServiceType сохраняем как
+          # дополнительную защиту, если модель сама забыла это поправить.
           MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST_PATH" ]; then
-            if grep -q 'android:foregroundServiceType="vpn"' "$MANIFEST_PATH"; then
-              echo "ℹ️ AndroidManifest.xml уже содержит foregroundServiceType, повторный патч пропущен."
-            else
-              # Патчим ИМЕННО VPN-сервис (по BIND_VPN_SERVICE), а не первый
-              # попавшийся <service> в манифесте — иначе можно случайно
-              # сломать декларацию другого сервиса (например, Firebase).
-              if perl -0777 -ne 'exit(!(/<service\b(?:(?!\/?>).)*?BIND_VPN_SERVICE/s))' "$MANIFEST_PATH"; then
-                perl -0777 -pi -e 's/(<service\b(?:(?!\/?>).)*?BIND_VPN_SERVICE(?:(?!\/?>).)*?)(\/?)>/$1 android:foregroundServiceType="vpn"$2>/s' "$MANIFEST_PATH"
-                echo "✅ AndroidManifest.xml пропатчен (найден <service> с BIND_VPN_SERVICE)."
-              else
-                echo "⚠️ Не найден <service> с BIND_VPN_SERVICE — AndroidManifest.xml не изменён, патч пропущен."
-              fi
+          if [ -f "$MANIFEST_PATH" ] && ! grep -q 'android:foregroundServiceType="vpn"' "$MANIFEST_PATH"; then
+            if perl -0777 -ne 'exit(!(/<service\b(?:(?!\/?>).)*?BIND_VPN_SERVICE/s))' "$MANIFEST_PATH"; then
+              perl -0777 -pi -e 's/(<service\b(?:(?!\/?>).)*?BIND_VPN_SERVICE(?:(?!\/?>).)*?)(\/?)>/$1 android:foregroundServiceType="vpn"$2>/s' "$MANIFEST_PATH"
+              echo "✅ AndroidManifest.xml дополнительно пропатчен (foregroundServiceType=vpn)."
+              echo "$MANIFEST_PATH" >> "$CHANGED_FILES_LOG"
             fi
           fi
+
+          # Пробрасываем список изменённых файлов в следующие шаги.
+          {
+            echo 'changed_files<<EOF'
+            cat "$CHANGED_FILES_LOG"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: 🔍 Validate Generated Code (static analysis)
         run: |
           set -uo pipefail
           cd app
-          echo "🔎 Проверяем сгенерированный код на ошибки компиляции и типов..."
+          echo "🔎 Проверяем весь проект на ошибки компиляции и типов..."
 
-          # dart compile kernel здесь не подходит: он требует функцию main()
-          # в файле, а tunnel_service.dart — сервисный класс без entry point.
-          # dart analyze делает то же самое (проверка типов/компиляции)
-          # без требования main().
-          #
-          # Важно: dart analyze и flutter analyze возвращают ненулевой код
-          # выхода даже на простых warning'ах (например, неиспользуемая
-          # переменная) — поэтому падаем не по exit-коду анализатора,
-          # а по наличию строк "error •" в его выводе. Warning'и не блокируют
-          # сохранение, реальные ошибки типов/компиляции — блокируют.
-          #
-          # Вывод пишем в $RUNNER_TEMP (за пределами репозитория), чтобы
-          # эти временные файлы не попали в "git add ." на шаге пуша.
-
-          dart analyze lib/services/tunnel_service.dart > "$RUNNER_TEMP/analyze_output.txt" 2>&1 || true
-          cat "$RUNNER_TEMP/analyze_output.txt"
-
-          if grep -q "error •" "$RUNNER_TEMP/analyze_output.txt"; then
-            echo "❌ Сгенерированный код содержит ошибки. Отменяем сохранение в репозиторий."
-            exit 1
-          fi
-
-          # flutter analyze дополнительно ловит ошибки типов и линт-предупреждения
-          # по всему проекту (не только по одному файлу)
+          # flutter analyze возвращает ненулевой код выхода даже на warning'ах —
+          # поэтому решаем по наличию строк "error •" в выводе, а не по exit-коду.
           flutter analyze --no-fatal-infos --no-fatal-warnings > "$RUNNER_TEMP/flutter_analyze_output.txt" 2>&1 || true
           cat "$RUNNER_TEMP/flutter_analyze_output.txt"
 
@@ -233,22 +296,26 @@ jobs:
           if-no-files-found: error
 
       - name: Push Code Changes
-        if: steps.ai_optimize.outputs.test_mode != 'true'
+        if: steps.ai_optimize.outputs.test_mode != 'true' && steps.ai_optimize.outputs.changed_any == 'true'
         env:
           USER_PROMPT: ${{ github.event.inputs.prompt }}
+          CHANGED_FILES: ${{ steps.ai_optimize.outputs.changed_files }}
         run: |
           set -euo pipefail
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
-          # Добавляем в коммит только те файлы, которые реально мог менять
-          # AI-шаг — а не "git add .", чтобы туда не попали случайные
+          # Коммитим ТОЛЬКО файлы из списка, который сформировал предыдущий
+          # шаг (то есть только реально изменённые AI и прошедшие allowlist
+          # по путям) — не "git add .", чтобы в коммит не попали случайные
           # артефакты сборки/анализа.
-          git add app/lib/services/tunnel_service.dart app/android/app/src/main/AndroidManifest.xml
+          echo "$CHANGED_FILES" | while IFS= read -r f; do
+            [ -n "$f" ] && git add -- "$f"
+          done
           git commit -m "Super AI Safe Fix: $USER_PROMPT" || echo "No changes to commit"
           git push
 
-      - name: 🧪 Test Mode Summary
-        if: steps.ai_optimize.outputs.test_mode == 'true'
+      - name: 🧪 Test Mode / No-Change Summary
+        if: steps.ai_optimize.outputs.test_mode == 'true' || steps.ai_optimize.outputs.changed_any != 'true'
         run: |
-          echo "Тестовый прогон завершён успешно. AI API не вызывался, коммит не создавался."
-          echo "Пайплайн (checkout → Java/Flutter setup → pub get → analyze → build APK) работает корректно."
+          echo "Коммит не создавался (тестовый режим или AI не предложил изменений)."
+          echo "Пайплайн (checkout → Java/Flutter setup → pub get → analyze → build APK) отработал корректно."
