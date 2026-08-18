@@ -473,10 +473,24 @@ class TunnelService {
     // старту ядра. Теперь ключ 'detour' добавляется в объект ТОЛЬКО когда
     // нужно реально увести DNS-запросы через прокси; когда defour не
     // нужен — просто не пишем это поле, и sing-box резолвит напрямую сам.
+    // [ИСПРАВЛЕНО — критично, sing-box 1.12.0 → полностью убрано в 1.14.0]
+    // "INVALID_CONFIG, decode config: dns.servers[0]: legacy DNS server
+    // formats are deprecated in sing-box 1.12.0 and removed in sing-box
+    // 1.14.0" — реальная причина краша "0 МБ / не удалось запустить туннель
+    // ни на одном сервере ключа" из скриншота 18.08 12:00. Старый формат
+    // кодировал тип DNS-сервера префиксом прямо в поле 'address'
+    // (например 'https://1.1.1.1/dns-query'). Начиная с 1.12 sing-box
+    // требует типизированную форму: отдельное поле 'type' (здесь — 'https',
+    // т.е. DNS-over-HTTPS) и голый хост/IP в поле 'server' без схемы и
+    // пути — 'server': '1.1.1.1', порт и путь /dns-query для DoH это
+    // дефолты самого типа 'https' в sing-box, задавать их отдельно не
+    // нужно. Подтверждено официальным migration-гайдом
+    // (sing-box.sagernet.org/migration/#migrate-to-new-dns-server-formats).
     final dnsServers = <Map<String, dynamic>>[
       {
+        'type': 'https',
         'tag': 'remote-dns',
-        'address': 'https://1.1.1.1/dns-query',
+        'server': '1.1.1.1',
         if (dnsProtection) 'detour': 'proxy',
       },
     ];
