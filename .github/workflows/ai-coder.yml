@@ -1,4 +1,4 @@
-name: Claude Fable Autonomous Builder
+name: Super Multi-AI Safe Builder
 on:
   workflow_dispatch:
     inputs:
@@ -11,7 +11,7 @@ permissions:
   actions: write
 
 jobs:
-  ai-agent-run:
+  super-ai-flow:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -33,35 +33,59 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Run Cline Agent Core
+      - name: 🧠 ШАГ 1: DeepSeek-R1 — Глубокий аудит сети (Без изменения файлов)
         run: |
-          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid anthropic/claude-fable-5 --cwd . "${{ github.event.inputs.task_prompt }}"
+          echo "🔍 DeepSeek-R1 ищет скрытую причину блокировки трафика и нулевой отдачи..."
+          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid deepseek-r1 --cwd . \
+          "Проанализируй код VPN-сервиса. Проблема: ${{ github.event.inputs.task_prompt }}. Найди баг в роутинге, DNS или туннелировании интерфейса. Напиши подробный технический отчет об уязвимости и сохрани его в файл .ai_bug_report.md в корне проекта. Файлы кода НЕ изменяй."
 
-      - name: Commit and Push changes
+      - name: 🛡 ШАГ 2: Claude Fable 5 — Архитектурный контроль и Безопасность
+        run: |
+          echo "📐 Claude Fable 5 проверяет риски и планирует безопасную интеграцию..."
+          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid anthropic/claude-fable-5 --cwd . \
+          "Прочитай файл .ai_bug_report.md. Сопоставь его с архитектурой проекта. Составь пошаговый безопасный план изменения кода, который решит проблему и гарантированно НЕ сломает интерфейс, таймеры и другие модули приложения. Запиши инструкции в файл .ai_fix_plan.md. Строго запрещено трогать build.gradle и AndroidManifest.xml."
+
+      - name: ⚡ ШАГ 3: Claude Sonnet — Аккуратное внедрение правок
+        run: |
+          echo "✍️ Claude Sonnet выполняет точечную перезапись файлов по инструкциям..."
+          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid anthropic/claude-3-5-sonnet --cwd . \
+          "Изучи файлы .ai_bug_report.md and .ai_fix_plan.md. Аккуратно примени изменения к исходному коду проекта (Kotlin/Java), строго следуя плану безопасности от Claude Fable 5. Не удаляй существующую важную логику."
+
+      - name: 👑 ШАГ 4: Claude Opus — Экспертный Code Review и Оптимизация
+        run: |
+          echo "🧐 Подключаем Claude Opus для финального контроля качества и исправления скрытых багов..."
+          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid anthropic/claude-3-opus --cwd . \
+          "Внимательно изучи изменения, которые только что внес Claude Sonnet для решения проблемы: ${{ github.event.inputs.task_prompt }}. Проверь код на утечки памяти, зависания потоков, баги с таймером или сессиями. Если найдешь недочеты — исправь их. После завершения удали временные файлы .ai_bug_report.md и .ai_fix_plan.md."
+
+      - name: 🚦 Авто-проверка проекта (Синтаксический контроль)
+        run: |
+          GRADLEW_PATH=$(find . -name gradlew -print -quit)
+          PROJECT_DIR=$(dirname "$GRADLEW_PATH")
+          cd "$PROJECT_DIR"
+          chmod +x gradlew
+          echo "Проверяем корректность кода перед коммитом..."
+          ./gradlew compileDebugSources --no-daemon
+
+      - name: Push Code Changes
         continue-on-error: true
         run: |
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
           git add .
-          git commit -m "Claude Fable Auto-fix: ${{ github.event.inputs.task_prompt }}" || echo "No changes to commit"
+          git commit -m "Super Multi-AI Safe Fix: ${{ github.event.inputs.task_prompt }}" || echo "No changes to commit"
           git push
 
       - name: Build Android APK (Auto-detect folder)
         run: |
-          # Находим, в какой папке лежит gradlew
           GRADLEW_PATH=$(find . -name gradlew -print -quit)
-          
           if [ -z "$GRADLEW_PATH" ]; then
-            echo "❌ Ошибка: Файл gradlew не найден ни в одной папке репозитория!"
+            echo "❌ Ошибка: Файл gradlew не найден!"
             exit 1
           fi
-          
           PROJECT_DIR=$(dirname "$GRADLEW_PATH")
-          echo "✅ Проект найден в папке: $PROJECT_DIR"
-          
-          # Переходим в папку проекта, даем права и собираем
           cd "$PROJECT_DIR"
           chmod +x gradlew
+          echo "🚀 Запуск компиляции финального APK..."
           ./gradlew assembleDebug
 
       - name: Upload Finished APK
