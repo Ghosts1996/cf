@@ -43,30 +43,30 @@ jobs:
         run: |
           echo "🚀 Безопасно кодируем файл и отправляем запрос на AITUNNEL..."
           
-          # Читаем код и кодируем его в Base64 для 100% защиты от багов в JSON
+          # Читаем код и кодируем его в Base64 для защиты от багов в JSON
           if [ -f "app/lib/services/tunnel_service.dart" ]; then
             TUNNEL_CODE_B64=\$(cat app/lib/services/tunnel_service.dart | base64 -w 0)
           else
             TUNNEL_CODE_B64=\$(echo -n "Файл отсутствует, создай с нуля" | base64 -w 0)
           fi
 
-          # Чистим URL из секретов
+          # Очищаем URL из секретов от лишних слэшей на конце
           CLEAN_URL=\$(echo "\({{ secrets.AITUNNEL_BASE_URL }}" \vert{} sed 's/[/]*\)//')
           
-          # Отправляем запрос, передавая промпт и закодированный файл
+          # Отправляем прямой POST запрос к DeepSeek-R1 через баланс AITUNNEL
           RESPONSE=(curl -s -X POST "CLEAN_URL/chat/completions" \
             -H "Authorization: Bearer \${{ secrets.AITUNNEL_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d "{
               \"model\": \"deepseek-r1\",
               \"messages\": [
-                {\"role\": \"system\", \"content\": \"Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, настрой DNS, маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать markdown-теги вроде \`\`\`dart или \`\`\`, пиши только сырой код файла.\"},
+                {\"role\": \"system\", \"content\": \"Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, настроить DNS, маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать markdown-теги вроде \`\`\`dart или \`\`\`, пиши только сырой код файла.\"},
                 {\"role\": \"user\", \"content\": \"Задача:  github.event.inputs.prompt . Базовый код текущего файла в Base64 (декодируй перед анализом): TUNNEL_CODE_B64\"}
               ]
             }")
 
           # Извлекаем контент ответа
-          NEW_CODE=(echo "RESPONSE" | jq -r '.choices[0].message.content // .choices.message.content')
+          NEW_CODE=(echo "RESPONSE" | jq -r '.choices[0].message.content')
 
           if [ "\(NEW_CODE" == "null" ] \vert{}\vert{} [ -z "\)NEW_CODE" ]; then
             echo "❌ Ошибка: Сервер вернул пустой ответ."
@@ -74,7 +74,7 @@ jobs:
             exit 1
           fi
 
-          # Очищаем от случайных markdown-тегов, если ИИ их все-таки добавил
+          # Очищаем от случайных markdown-тегов, если ИИ их добавил
           CLEAN_CODE=(echo "NEW_CODE" | sed '/^```/d')
 
           echo "✅ Код успешно сгенерирован моделью DeepSeek-R1!"
@@ -83,7 +83,7 @@ jobs:
           mkdir -p app/lib/services
           echo "$CLEAN_CODE" > app/lib/services/tunnel_service.dart
           
-          # Безопасно обновляем манифест для Android 14+
+          # Обновляем манифест для Android 14+
           MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST_PATH" ]; then
             sed -i '/<service/ s/>/ android:foregroundServiceType=\"vpn\">/' "$MANIFEST_PATH"
