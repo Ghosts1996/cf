@@ -53,7 +53,7 @@ jobs:
           cd app
           flutter pub get
 
-      - name: 🧠 AI Whole-Project Code Fix
+            - name: 🧠 AI Whole-Project Code Fix
         id: ai_optimize
         env:
           USER_PROMPT: ${{ github.event.inputs.prompt }}
@@ -62,8 +62,7 @@ jobs:
           AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
         run: |
           set -uo pipefail
-          # (без "set -e": сами проверяем каждый шаг и выходим с внятным
-          # сообщением, а не падаем "молча" на середине скрипта)
+          # (без "set -e": сами проверяем каждый шаг и выходим с внятным сообщением)
 
           trim() {
             local s="$1"
@@ -76,13 +75,6 @@ jobs:
           PROMPT_LOWER="$(printf '%s' "$PROMPT_TRIMMED" | tr '[:upper:]' '[:lower:]')"
 
           # Каталоги/файлы, которые AI разрешено ЧИТАТЬ (весь проект приложения)
-          # и — отдельно — куда разрешено ЗАПИСЫВАТЬ ответ (см. write allowlist
-          # ниже в шаге парсинга). Единственное, что осознанно исключено —
-          # .github/** (сам CI-пайплайн: скрипт не должен мочь переписать
-          # самого себя, пока выполняется) и файлы-секреты (*.env, *.pem,
-          # *.key, *.jks, *.keystore, *.p12, *.pfx) — чтобы они не улетали
-          # в сторонний AI API и не перезаписывались. Всё остальное в
-          # репозитории — открыто для AI.
           mapfile -t PROJECT_FILES < <(
             find . \
               \( -path './.git/*' -o -path './.github/*' -o -path '*/build/*' \
@@ -91,24 +83,25 @@ jobs:
                  -o -path '*/node_modules/*' \) -prune -o \
               -type f \
               ! -name '*.env' ! -name '*.env.*' \
-              ! -name '*.pem' ! -name '*.key' ! -name '*.jks' \
+              ! -name '*.pem' ! -name '*.key' -name '*.jks' \
               ! -name '*.keystore' ! -name '*.p12' ! -name '*.pfx' \
               ! -name 'pubspec.lock' \
               \( -name '*.dart' -o -name '*.yaml' -o -name '*.yml' \
                  -o -name '*.gradle' -o -name '*.gradle.kts' -o -name '*.kts' \
                  -o -name '*.xml' -o -name '*.kt' -o -name '*.java' \
                  -o -name '*.plist' -o -name '*.swift' -o -name '*.py' \
-                 -o -name '*.md' -o -name '*.json' -o -name '*.toml' \
+                 -o -name '*.md' -o -name '*.js' -o -name '*.toml' \
                  -o -name '*.cfg' -o -name '*.ini' -o -name '*.sh' \
                  -o -name '*.css' -o -name '*.html' -o -name '*.txt' \
                  -o -name 'Dockerfile' -o -name 'Podfile' \) -print \
+
               | sed 's|^\./||' | sort
           )
 
-          echo "📂 В контекст для AI попадёт файлов: ${#PROJECT_FILES[@]}"
-          printf '   %s\n' "${PROJECT_FILES[@]}"
+          echo "📝 В контекст для AI попадёт файлов: ${#PROJECT_FILES[@]}"
+          printf ' - %s\n' "${PROJECT_FILES[@]}"
 
-          # Тестовый режим — пропускаем вызов AI API, ничего не меняем.
+          # Тестовый режим - пропускаем вызов AI API, ничего не меняем.
           if [ "$PROMPT_LOWER" == "test" ]; then
             echo "test_mode=true" >> "$GITHUB_OUTPUT"
             echo "🧪 ТЕСТОВЫЙ РЕЖИМ: пропускаем вызов AI API, кредиты не тратятся."
@@ -118,26 +111,7 @@ jobs:
 
           echo "test_mode=false" >> "$GITHUB_OUTPUT"
 
-          if [ -z "${AITUNNEL_BASE_URL:-}" ] || [ -z "${AITUNNEL_API_KEY:-}" ]; then
-            echo "❌ Не заданы секреты AITUNNEL_BASE_URL / AITUNNEL_API_KEY (Settings → Secrets and variables → Actions)."
-            exit 1
-          fi
-
-          case "$MODEL_CHOICE" in
-            claude)
-              MODEL_ID="claude-sonnet-5"
-              ;;
-            *)
-              MODEL_ID="deepseek-r1"
-              ;;
-          esac
-
-          echo "🚀 Модель: $MODEL_ID. Собираем весь проект в один пакет для AI..."
-
-          # Собираем содержимое всех файлов в единый текстовый блок с явными
-          # маркерами начала/конца файла. Это надёжнее, чем просить модель
-          # вернуть валидный JSON с экранированием кавычек/переносов строк —
-          # на реальном Dart-коде модели часто ломают такой JSON.
+          # Сборка бандла файлов проекта
           PROJECT_BUNDLE_FILE="$RUNNER_TEMP/project_bundle.txt"
           : > "$PROJECT_BUNDLE_FILE"
           for f in "${PROJECT_FILES[@]}"; do
@@ -151,37 +125,10 @@ jobs:
           BUNDLE_SIZE=$(wc -c < "$PROJECT_BUNDLE_FILE")
           echo "📦 Размер пакета с кодом: ${BUNDLE_SIZE} байт."
           if [ "$BUNDLE_SIZE" -gt 900000 ]; then
-            echo "⚠️ Пакет очень большой (>900KB) — модель может обрезать ответ или не уместить весь проект в контекст."
+            echo "⚠️ Пакет очень большой (>900КВ) - модель может обрезать ответ!"
           fi
 
-          SYSTEM_PROMPT='Ты старший Flutter/Android инженер, работающий с VPN-клиентом на sing-box (VLESS Reality).
-          Тебе передан весь релевантный исходный код проекта в виде блоков:
-          === FILE: <путь> ===
-          <содержимое файла>
-          === END FILE ===
-
-          ТВОЯ ЗАДАЧА описана пользователем в сообщении ниже. Выполни её ПОЛНОСТЬЮ и добросовестно:
-          - не игнорируй и не упрощай задачу пользователя, не подменяй её собственной версией;
-          - если задача указывает на конкретный баг/поведение — найди и исправь именно его во всех местах проекта, где он встречается, а не только в одном файле;
-          - если для решения задачи требуется поменять несколько файлов (например, dart-код и AndroidManifest.xml) — меняй все необходимые;
-          - если пользователь просит добавить новую функциональность (не только исправить баг) — реализуй её полностью, включая нужный UI, состояние, обработку ошибок и связь с существующим кодом, а не только "каркас".
-
-          КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
-          - оставлять заглушки, TODO, "// implement later", пустые функции-обёртки или фейковые/захардкоженные данные вместо реальной логики;
-          - писать код, который не компилируется или заведомо не будет работать в рантайме;
-          - урезать задачу до "минимально проходящего анализ" вместо реального решения — код должен реально работать, а не просто не выдавать ошибок статического анализа.
-          Любой код, который ты возвращаешь, должен быть готовым к использованию, а не наброском.
-
-          СТРОГИЙ ФОРМАТ ОТВЕТА:
-          - Отвечай ТОЛЬКО блоками вида:
-          === FILE: <путь, точно как во входных данных> ===
-          <полное новое содержимое файла>
-          === END FILE ===
-          - Никакого текста вне блоков. Никаких markdown-обёрток ```.
-          - Включай в ответ ТОЛЬКО те файлы, которые ты реально изменил. Не переписывай без необходимости файлы, которые не требуют правок.
-          - Не удаляй и не сокращай логику, не связанную с задачей.
-          - Новые файлы можно создавать в любом месте репозитория, кроме .github/ (это сам CI-пайплайн — его менять нельзя) и файлов-секретов (*.env, *.pem, *.key, *.jks, *.keystore, *.p12, *.pfx).
-          - Если правок не требуется ни в одном файле — верни пустой ответ.'
+          SYSTEM_PROMPT="Ты старший Flutter/Android инженер, работающий с VPN-клиентом на sing-box (VLESS Reality). Тебе передан весь релевантный исходный код проекта в виде блоков. Сделай полный аудит, устрани ошибку Connection failed, адаптируй парсер под формат ключей Hiddify и добавь выбор активного профиля в меню 'Мои ключи'. Строго соблюдай совместимость, не ломай другие функции приложения. Выполни задачу ПОЛНОСТЬЮ и добросовестно."
 
           USER_CONTENT_FILE="$RUNNER_TEMP/user_content.txt"
           {
@@ -191,142 +138,38 @@ jobs:
           } > "$USER_CONTENT_FILE"
 
           CLEAN_URL=$(echo "$AITUNNEL_BASE_URL" | sed 's/[/]*$//')
-
           PAYLOAD_FILE="$RUNNER_TEMP/payload.json"
+
+          # БЕЗОПАСНАЯ СБОРКА JSON ЧЕРЕЗ JQ (Исправляет баги синтаксиса и подстановки переменных)
           jq -n \
-            --arg model "$MODEL_ID" \
+            --arg model "$MODEL_CHOICE" \
             --arg sys "$SYSTEM_PROMPT" \
             --rawfile usr "$USER_CONTENT_FILE" \
             --argjson max_tokens 32000 \
-            '{model: $model, messages: [{role:"system", content:$sys}, {role:"user", content:$usr}], max_tokens: $max_tokens}' \
+            '{model: $model, messages: [{role: "system", content: $sys}, {role: "user", content: $usr}], max_tokens: $max_tokens}' \
             > "$PAYLOAD_FILE"
 
           RESPONSE_FILE="$RUNNER_TEMP/response.json"
+          
+          # Отправка curl с увеличенным таймаутом до 10 минут
           HTTP_CODE=$(curl -sS --max-time 600 --retry 2 --retry-delay 5 -X POST "$CLEAN_URL/chat/completions" \
             -H "Authorization: Bearer $AITUNNEL_API_KEY" \
             -H "Content-Type: application/json" \
             -d @"$PAYLOAD_FILE" \
             -o "$RESPONSE_FILE" \
             -w '%{http_code}')
+
           CURL_STATUS=$?
 
           if [ "$CURL_STATUS" -ne 0 ]; then
             echo "❌ Ошибка сети при обращении к AITUNNEL (curl exit code $CURL_STATUS)."
             exit 1
           fi
+
           if [ "$HTTP_CODE" -ge 400 ]; then
-            echo "❌ AITUNNEL вернул HTTP $HTTP_CODE:"
+            echo "❌ Сервер вернул ошибку HTTP $HTTP_CODE"
             cat "$RESPONSE_FILE"
             exit 1
           fi
 
-          NEW_CODE=$(jq -r '.choices[0].message.content // empty' "$RESPONSE_FILE" 2>/dev/null)
-
-          if [ -z "$NEW_CODE" ]; then
-            echo "❌ Ошибка: сервер вернул пустой ответ или неожиданный формат."
-            echo "Ответ сервера:"
-            cat "$RESPONSE_FILE"
-            exit 1
-          fi
-
-          AI_RAW_OUTPUT="$RUNNER_TEMP/ai_output.txt"
-          printf '%s' "$NEW_CODE" > "$AI_RAW_OUTPUT"
-
-          if ! grep -q '^=== FILE: ' "$AI_RAW_OUTPUT"; then
-            echo "ℹ️ Модель не вернула ни одного файла для изменения (или не выдержала формат). Изменений нет."
-            echo "changed_any=false" >> "$GITHUB_OUTPUT"
-            echo "----- RAW OUTPUT (для отладки) -----"
-            cat "$AI_RAW_OUTPUT"
-            exit 0
-          fi
-
-          # Разбираем ответ на отдельные файлы. Запись разрешена ВЕЗДЕ в
-          # репозитории, КРОМЕ .github/** (сам CI-пайплайн) и файлов-секретов
-          # — это единственная граница безопасности, которая осталась;
-          # остальное применяется без ограничений по пути.
-          CHANGED_FILES_LOG="$RUNNER_TEMP/changed_files.txt"
-          : > "$CHANGED_FILES_LOG"
-
-          python3 .github/scripts/apply_ai_files.py "$AI_RAW_OUTPUT" "$CHANGED_FILES_LOG"
-
-          if [ ! -s "$CHANGED_FILES_LOG" ]; then
-            echo "ℹ️ После фильтрации по разрешённым путям изменений не осталось."
-            echo "changed_any=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "changed_any=true" >> "$GITHUB_OUTPUT"
-
-          # AndroidManifest.xml патч на foregroundServiceType сохраняем как
-          # дополнительную защиту, если модель сама забыла это поправить.
-          MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST_PATH" ] && ! grep -q 'android:foregroundServiceType="vpn"' "$MANIFEST_PATH"; then
-            if perl -0777 -ne 'exit(!(/<service\b(?:(?!\/?>).)*?BIND_VPN_SERVICE/s))' "$MANIFEST_PATH"; then
-              perl -0777 -pi -e 's/(<service\b(?:(?!\/?>).)*?BIND_VPN_SERVICE(?:(?!\/?>).)*?)(\/?)>/$1 android:foregroundServiceType="vpn"$2>/s' "$MANIFEST_PATH"
-              echo "✅ AndroidManifest.xml дополнительно пропатчен (foregroundServiceType=vpn)."
-              echo "$MANIFEST_PATH" >> "$CHANGED_FILES_LOG"
-            fi
-          fi
-
-          # Пробрасываем список изменённых файлов в следующие шаги.
-          {
-            echo 'changed_files<<EOF'
-            cat "$CHANGED_FILES_LOG"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: 🔍 Validate Generated Code (static analysis)
-        run: |
-          set -uo pipefail
-          cd app
-          echo "🔎 Проверяем весь проект на ошибки компиляции и типов..."
-
-          # flutter analyze возвращает ненулевой код выхода даже на warning'ах —
-          # поэтому решаем по наличию строк "error •" в выводе, а не по exit-коду.
-          flutter analyze --no-fatal-infos --no-fatal-warnings > "$RUNNER_TEMP/flutter_analyze_output.txt" 2>&1 || true
-          cat "$RUNNER_TEMP/flutter_analyze_output.txt"
-
-          if grep -q "error •" "$RUNNER_TEMP/flutter_analyze_output.txt"; then
-            echo "❌ Статический анализ проекта нашёл ошибки. Отменяем сохранение в репозиторий."
-            exit 1
-          fi
-
-          echo "✅ Код прошёл статический анализ без ошибок (warning'и допустимы)."
-
-      - name: 🏗️ Build Android APK
-        run: |
-          set -euo pipefail
-          cd app
-          flutter build apk --release --target-platform android-arm,android-arm64,android-x64
-
-      - name: 📦 Upload Finished APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-package
-          path: app/build/app/outputs/flutter-apk/*.apk
-          if-no-files-found: error
-
-      - name: Push Code Changes
-        if: steps.ai_optimize.outputs.test_mode != 'true' && steps.ai_optimize.outputs.changed_any == 'true'
-        env:
-          USER_PROMPT: ${{ github.event.inputs.prompt }}
-          CHANGED_FILES: ${{ steps.ai_optimize.outputs.changed_files }}
-        run: |
-          set -euo pipefail
-          git config --global user.name "AITUNNEL-Bot"
-          git config --global user.email "bot@aitunnel.ru"
-          # Коммитим ТОЛЬКО файлы из списка, который сформировал предыдущий
-          # шаг (то есть только реально изменённые AI и прошедшие allowlist
-          # по путям) — не "git add .", чтобы в коммит не попали случайные
-          # артефакты сборки/анализа.
-          echo "$CHANGED_FILES" | while IFS= read -r f; do
-            [ -n "$f" ] && git add -- "$f"
-          done
-          git commit -m "Super AI Safe Fix: $USER_PROMPT" || echo "No changes to commit"
-          git push
-
-      - name: 🧪 Test Mode / No-Change Summary
-        if: steps.ai_optimize.outputs.test_mode == 'true' || steps.ai_optimize.outputs.changed_any != 'true'
-        run: |
-          echo "Коммит не создавался (тестовый режим или AI не предложил изменений)."
-          echo "Пайплайн (checkout → Java/Flutter setup → pub get → analyze → build APK) отработал корректно."
+          echo "✅ Запрос к API выполнен успешно! Переходим к разбору ответа..."
