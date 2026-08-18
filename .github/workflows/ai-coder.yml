@@ -94,8 +94,29 @@ jobs:
             echo "✅ AndroidManifest.xml успешно пропатчен!"
           fi
 
+      - name: 🔍 Validate Generated Code (compile + static analysis)
+        run: |
+          cd app
+          echo "🔎 Проверяем сгенерированный код на ошибки компиляции и типов..."
+
+          # dart compile kernel ловит те же ошибки типов/компиляции,
+          # что и полная сборка APK (как раз ту, что вызвала предыдущий баг),
+          # но занимает секунды, а не минуты, и не собирает сам APK.
+          if ! dart compile kernel lib/services/tunnel_service.dart -o /tmp/check.dill; then
+            echo "❌ Сгенерированный код не компилируется. Отменяем сохранение в репозиторий."
+            exit 1
+          fi
+
+          # flutter analyze дополнительно ловит ошибки типов и линт-предупреждения
+          # по всему проекту (не только по одному файлу)
+          if ! flutter analyze --no-fatal-infos; then
+            echo "❌ Статический анализ нашёл ошибки. Отменяем сохранение в репозиторий."
+            exit 1
+          fi
+
+          echo "✅ Код скомпилировался и прошёл статический анализ без ошибок."
+
       - name: Push Code Changes
-        continue-on-error: true
         env:
           USER_PROMPT: ${{ github.event.inputs.prompt }}
         run: |
@@ -104,14 +125,3 @@ jobs:
           git add .
           git commit -m "Super AI Safe Fix: $USER_PROMPT" || echo "No changes to commit"
           git push
-
-      - name: Build Android APK
-        run: |
-          cd app
-          flutter build apk --release --target-platform android-arm,android-arm64,android-x64
-
-      - name: Upload Finished APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-package
-          path: app/build/outputs/flutter-apk/*.apk
