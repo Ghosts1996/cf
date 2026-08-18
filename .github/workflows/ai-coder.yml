@@ -53,7 +53,7 @@ jobs:
           cd app
           flutter pub get
 
-            - name: 🧠 AI Whole-Project Code Fix
+      - name: 🧠 AI Whole-Project Code Fix
         id: ai_optimize
         env:
           USER_PROMPT: ${{ github.event.inputs.prompt }}
