@@ -1,0 +1,58 @@
+name: AI Autonomous Developer and Builder
+on:
+  workflow_dispatch:
+    inputs:
+      task_prompt:
+        description: 'Что нужно исправить или улучшить в коде?'
+        required: true
+
+jobs:
+  ai-agent-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-size: 22
+
+      - name: Install Cline CLI
+        run: npm i -g cline
+
+      - name: Set up Java & Android SDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Run Cline Agent Core
+        env:
+          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+        run: |
+          # Запуск автономного агента в headless-режиме (без интерфейса)
+          # Он использует модель по умолчанию (например, deepseek-coder) для изменения файлов
+          cline --json --provider openai "${{ github.event.inputs.task_prompt }}"
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "AITUNNEL-Bot"
+          git config --global user.email "bot@aitunnel.ru"
+          git add .
+          git commit -m "AI Auto-fix: ${{ github.event.inputs.task_prompt }}" || echo "No changes to commit"
+          git push
+
+      - name: Build Android APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload Finished APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-release
+          path: app/build/outputs/apk/debug/app-debug.apk
