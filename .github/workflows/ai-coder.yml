@@ -49,110 +49,54 @@ jobs:
       - name: 🧠 AI Whole-Project Code Fix (Python Engine)
         id: ai_optimize
         env:
-          USER_PROMPT: \${{ github.event.inputs.prompt }}
-          MODEL_CHOICE: \${{ github.event.inputs.model }}
-          AITUNNEL_BASE_URL: \${{ secrets.AITUNNEL_BASE_URL }}
-          AITUNNEL_API_KEY: \${{ secrets.AITUNNEL_API_KEY }}
+          USER_PROMPT: ${{ github.event.inputs.prompt }}
+          MODEL_CHOICE: ${{ github.event.inputs.model }}
+          AITUNNEL_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
         run: |
           python3 -c "
           import os, sys, json, urllib.request
-
           prompt = os.getenv('USER_PROMPT', '').strip()
           url = os.getenv('AITUNNEL_BASE_URL', '').rstrip('/')
           api_key = os.getenv('AITUNNEL_API_KEY', '')
           model = os.getenv('MODEL_CHOICE', 'deepseek-r1')
-
           print('🔍 Python собирает файлы Flutter-приложения...')
           project_bundle = []
-          
           for root, dirs, files in os.walk('app'):
-              if 'build' in root or '.dart_tool' in root:
-                  continue
-              for file in files:
-                  if file.endswith(('.dart', '.xml', '.yaml')):
-                      fp = os.path.join(root, file)
-                      try:
-                          with open(fp, 'r', encoding='utf-8') as f:
-                              content = f.read()
-                          project_bundle.append(f'=== FILE: {fp} ===\n{content}\n=== END FILE ===\n')
-                      except:
-                          pass
-
+           if 'build' in root or '.dart_tool' in root: continue
+           for file in files:
+            if file.endswith(('.dart', '.xml', '.yaml')):
+             fp = os.path.join(root, file)
+             try:
+              with open(fp, 'r', encoding='utf-8') as f: content = f.read()
+              project_bundle.append(f'=== FILE: {fp} ===\n{content}\n=== END FILE ===\n')
+             except: pass
           bundle_text = '\n'.join(project_bundle)
-          print(f'📦 Успешно упаковано {len(project_bundle)} файлов в контекст.')
-
-          sys_prompt = (
-              'Ты старший Flutter/Android инженер, работающий с VPN-клиентом на базе ядра sing-box (VLESS Reality). '
-              'Сделай аудит проекта. Задача 1: Исправь ошибку Connection failed под формат ключей Hiddify (извлеки параметры маскировки трафика, DNS, http-опции и примени их в JSON-конфиге sing-box через MethodChannel vpnvless/fallback). '
-              'Задача 2: Добавь в меню Мои ключи функцию выбора активного ключа (с сохранением в shared_preferences), чтобы именно выбранный профиль передавался в ядро sing-box. '
-              'Ответ верни СТРОГО в формате JSON с двумя полями: \"tunnel_code\" (код исправленного tunnel_service.dart) и \"keys_code\" (код экрана ключей с выбором профиля). '
-              'Запрещено использовать markdown-теги вроде ```dart.'
-          )
-
-          payload = {
-              'model': model,
-              'messages': [
-                  {'role': 'system', 'content': sys_prompt},
-                  {'role': 'user', 'content': f'Задача: {prompt}\n\nИсходный код проекта:\n\n{bundle_text}'}
-              ],
-              'max_tokens': 32000
-          }
-
+          print(f'📦 Успешно упаковано файлов: {len(project_bundle)}')
+          sys_prompt = 'Ты старший Flutter/Android инженер. Сделай аудит проекта. Задача 1: Исправь Connection failed под формат ключей Hiddify (извлеки параметры маскировки трафика, DNS, http-опции и примени в JSON sing-box через MethodChannel vpnvless/fallback). Задача 2: Добавь в меню Мои ключи выбор активного ключа (с сохранением в shared_preferences). Твой ответ должен содержать ТОЛЬКО чистый и готовый к работе Dart-код для файла tunnel_service.dart без markdown-тегов и кавычек.'
+          payload = {'model': model, 'messages': [{'role': 'system', 'content': sys_prompt}, {'role': 'user', 'content': f'Задача: {prompt}\n\nКод проекта:\n\n{bundle_text}'}], 'max_tokens': 32000}
           print('📡 Отправляем запрос на шлюз AITUNNEL...')
-          req = urllib.request.Request(
-              f'{url}/chat/completions',
-              data=json.dumps(payload).encode('utf-8'),
-              headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
-              method='POST'
-          )
-
+          req = urllib.request.Request(f'{url}/chat/completions', data=json.dumps(payload).encode('utf-8'), headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}, method='POST')
           try:
-              with urllib.request.urlopen(req, timeout=600) as response:
-                  res_data = json.loads(response.read().decode('utf-8'))
-                  ai_text = res_data['choices']['message']['content']
-                  print('✅ Запрос выполнен успешно! Начинаем физическую перезапись файлов...')
-                  
-                  if '<think>' in ai_text:
-                      ai_text = ai_text.split('</think>')[-1]
-                  
-                  try:
-                      clean_text = ai_text.strip().strip('`').replace('json\n', '', 1)
-                      data = json.loads(clean_text)
-                      tunnel_code = data.get('tunnel_code', '')
-                      keys_code = data.get('keys_code', '')
-                  except:
-                      tunnel_code = ai_text
-                      keys_code = ''
-
-                  if tunnel_code:
-                      os.makedirs('app/lib/services', exist_ok=True)
-                      with open('app/lib/services/tunnel_service.dart', 'w', encoding='utf-8') as out:
-                          out.write(tunnel_code)
-                      print('✅ Файл tunnel_service.dart успешно обновлен!')
-
-                  if keys_code:
-                      for root, dirs, files in os.walk('app/lib'):
-                          for file in files:
-                              if 'key' in file.lower() and file.endswith('.dart'):
-                                  kp = os.path.join(root, file)
-                                  with open(kp, 'w', encoding='utf-8') as out:
-                                      out.write(keys_code)
-                                  print(f'✅ Экран ключей ({kp}) успешно updated!')
-                                  break
-
-                  manifest = 'app/android/app/src/main/AndroidManifest.xml'
-                  if os.path.exists(manifest):
-                      with open(manifest, 'r', encoding='utf-8') as f:
-                          m_data = f.read()
-                      if 'foregroundServiceType' not in m_data:
-                          m_data = m_data.replace('<service', '<service android:foregroundServiceType=\"vpn\"', 1)
-                          with open(manifest, 'w', encoding='utf-8') as f:
-                              f.write(m_data)
-                          print('✅ AndroidManifest.xml успешно пропатчен!')
-
+           with urllib.request.urlopen(req, timeout=600) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            ai_text = res_data['choices']['message']['content']
+            print('✅ Запрос выполнен успешно! Начинаем физическую перезапись файлов...')
+            if '<think>' in ai_text: ai_text = ai_text.split('</think>')[-1]
+            clean_code = ai_text.replace('```dart', '').replace('```', '').strip()
+            os.makedirs('app/lib/services', exist_ok=True)
+            with open('app/lib/services/tunnel_service.dart', 'w', encoding='utf-8') as out: out.write(clean_code)
+            print('✅ Файл tunnel_service.dart успешно обновлен!')
+            manifest = 'app/android/app/src/main/AndroidManifest.xml'
+            if os.path.exists(manifest):
+             with open(manifest, 'r', encoding='utf-8') as f: m_data = f.read()
+             if 'foregroundServiceType' not in m_data:
+              m_data = m_data.replace('<service', '<service android:foregroundServiceType=\"vpn\"', 1)
+              with open(manifest, 'w', encoding='utf-8') as f: f.write(m_data)
+              print('✅ AndroidManifest.xml успешно пропатчен!')
           except Exception as e:
-              print(f'❌ Ошибка выполнения пайплайна: {e}')
-              sys.exit(1)
+           print(f'❌ Ошибка выполнения пайплайна: {e}')
+           sys.exit(1)
           "
 
       - name: Push Code Changes
