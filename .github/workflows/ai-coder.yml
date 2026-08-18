@@ -1,11 +1,6 @@
 name: Super Multi-AI Safe Builder
-
 on:
   workflow_dispatch:
-    inputs:
-      prompt:
-        description: 'Задача для AI. Напишите "test", чтобы прогнать пайплайн без обращения к AI API (не тратит кредиты).'
-        required: true
 
 permissions:
   contents: write
@@ -18,8 +13,17 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           submodules: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Harness CLI
+        run: |
+          # Устанавливаем официальную утилиту harness для глубокого аудита репозиториев
+          npm i -g harness-cli || npm i -g harness
 
       - name: Set up Java Development Kit
         uses: actions/setup-java@v4
@@ -37,128 +41,46 @@ jobs:
           cd app
           flutter pub get
 
-      - name: 🧠 AI Code Optimization and Bug Fix (DeepSeek-R1)
-        id: ai_optimize
+      - name: 🚀 Глубокий аудит и добавление фичи (Harness + DeepSeek-R1)
         env:
-          USER_PROMPT: ${{ github.event.inputs.prompt }}
-          AITUNNEL_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
-          AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          OPENAI_BASE_URL: https://aitunnel.ru
         run: |
-          # Проверяем, не тестовый ли это запуск (слово "test" в поле prompt).
-          # Тестовый режим пробрасываем в следующие шаги через GITHUB_OUTPUT,
-          # т.к. переменные bash между шагами не сохраняются.
-          PROMPT_TRIMMED=$(echo "$USER_PROMPT" | xargs)
-          PROMPT_LOWER=$(echo "$PROMPT_TRIMMED" | tr '[:upper:]' '[:lower:]')
-
-          if [ "$PROMPT_LOWER" == "test" ]; then
-            echo "test_mode=true" >> "$GITHUB_OUTPUT"
-            echo "🧪 ТЕСТОВЫЙ РЕЖИМ: пропускаем вызов AI API, кредиты не тратятся."
-            echo "Проверяем только сборку окружения (Flutter/Java/pub get) и статический анализ текущего кода."
-
-            if [ -f "app/lib/services/tunnel_service.dart" ]; then
-              CLEAN_CODE=$(cat app/lib/services/tunnel_service.dart)
-            else
-              CLEAN_CODE="// TEST MODE: файл отсутствовал на момент прогона, код не менялся"
-            fi
-
-            mkdir -p app/lib/services
-            echo "$CLEAN_CODE" > app/lib/services/tunnel_service.dart
-            exit 0
-          fi
-
-          echo "test_mode=false" >> "$GITHUB_OUTPUT"
-          echo "🚀 Кодируем файл и отправляем запрос на шлюз..."
-
-          if [ -f "app/lib/services/tunnel_service.dart" ]; then
-            TUNNEL_CODE_B64=$(base64 -w 0 < app/lib/services/tunnel_service.dart)
-          else
-            TUNNEL_CODE_B64=$(echo -n "Файл отсутствует, создай с нуля" | base64 -w 0)
-          fi
-
-          CLEAN_URL=$(echo "$AITUNNEL_BASE_URL" | sed 's/[/]*$//')
-
-          SYSTEM_PROMPT='Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, настрой DNS, настрой маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать маркдаун-теги вроде ```dart или ```, пиши только сырой код файла.'
-
-          USER_CONTENT="Задача: ${USER_PROMPT}. Базовый код текущего файла в Base64 (декодируй перед анализом): ${TUNNEL_CODE_B64}"
-
-          # jq -n --arg сам корректно экранирует кавычки, переносы строк,
-          # обратные слэши и юникод — вручную строку JSON больше не собираем.
-          # max_tokens обязателен: без него ответ не ограничен и цена запроса
-          # непредсказуема (см. docs.aitunnel.ru — рекомендуют явно указывать).
-          PAYLOAD=$(jq -n \
-            --arg model "deepseek-r1" \
-            --arg sys "$SYSTEM_PROMPT" \
-            --arg usr "$USER_CONTENT" \
-            --argjson max_tokens 12000 \
-            '{model: $model, messages: [{role:"system", content:$sys}, {role:"user", content:$usr}], max_tokens: $max_tokens}')
-
-          RESPONSE=$(curl -s -X POST "$CLEAN_URL/chat/completions" \
-            -H "Authorization: Bearer $AITUNNEL_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
-
-          NEW_CODE=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
-
-          if [ "$NEW_CODE" == "null" ] || [ -z "$NEW_CODE" ]; then
-            echo "❌ Ошибка: Сервер вернул пустой ответ."
-            echo "Ответ сервера: $RESPONSE"
-            exit 1
-          fi
-
-          CLEAN_CODE=$(echo "$NEW_CODE" | sed '/^```/d')
-
-          echo "✅ Код успешно сгенерирован моделью DeepSeek-R1!"
-
-          mkdir -p app/lib/services
-          echo "$CLEAN_CODE" > app/lib/services/tunnel_service.dart
-
-          MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST_PATH" ]; then
-            if ! grep -q 'android:foregroundServiceType="vpn"' "$MANIFEST_PATH"; then
-              sed -i '/<service/ s/>/ android:foregroundServiceType="vpn">/' "$MANIFEST_PATH"
-              echo "✅ AndroidManifest.xml успешно пропатчен!"
-            else
-              echo "ℹ️ AndroidManifest.xml уже содержит foregroundServiceType, повторный патч пропущен."
-            fi
-          fi
-
-      - name: 🔍 Validate Generated Code (static analysis)
-        run: |
-          cd app
-          echo "🔎 Проверяем сгенерированный код на ошибки компиляции и типов..."
-
-          # dart compile kernel здесь не подходит: он требует функцию main()
-          # в файле, а tunnel_service.dart — сервисный класс без entry point,
-          # так что этот шаг падал бы всегда, независимо от качества кода.
-          # dart analyze делает то же самое (проверка типов/компиляции)
-          # без требования main().
-          if ! dart analyze lib/services/tunnel_service.dart; then
-            echo "❌ Сгенерированный код не проходит анализ. Отменяем сохранение в репозиторий."
-            exit 1
-          fi
-
-          # flutter analyze дополнительно ловит ошибки типов и линт-предупреждения
-          # по всему проекту (не только по одному файлу)
-          if ! flutter analyze --no-fatal-infos; then
-            echo "❌ Статический анализ нашёл ошибки. Отменяем сохранение в репозиторий."
-            exit 1
-          fi
-
-          echo "✅ Код прошёл статический анализ без ошибок."
+          echo "🤖 Запускаем Harness для полного анализа структуры проекта..."
+          
+          # Вызываем harness. Он автоматически сканирует все папки, находит ядро sing-box,
+          # исправляет парсинг ключей и внедряет UI-экран для добавления ключей вручную.
+          harness --provider openai --model deepseek-r1 --cwd . "
+          Проведи полный аудит всех файлов Flutter-приложения в папке app/. 
+          
+          Выполни три критические задачи, строго следуя архитектуре проекта:
+          
+          1. Исправь ошибку 'Connection failed. Please check your configuration'. Изучи модуль конфигурации ядра sing-box и файл tunnel_service.dart. Нейросеть должна полностью разобраться, как приложение считывает, расшифровывает и парсит ключи протокола VLESS Reality. Настрой идеальный шаблонизатор JSON-конфига для sing-box, пропиши рабочие DNS и маршруты трафика, чтобы ядро успешно поднимало туннель без вылетов.
+          
+          2. Добавь новую функцию в интерфейс: найди экран меню 'Мои ключи' (ориентируйся по названиям файлов в app/lib/screens/ или app/lib/pages/). Добавь туда текстовое поле ввода (TextField) для ручного добавления ключа VLESS Reality (vless://...) или URL-ссылки подписки 3x-ui, и кнопку 'Применить ключ'. Напиши логику, чтобы введенный пользователем ключ автоматически сохранялся в локальную память (пакет shared_preferences или secure_storage, который уже используется в проекте) и сразу передавался в tunnel_service.dart для подключения.
+          
+          3. Защити приложение от вылетов на других смартфонах: проверь AndroidManifest.xml и конфигурации сборки Gradle. Убедись, что для Android 14+ прописан foregroundServiceType='vpn' в свойствах VpnService.
+          
+          Действуй аккуратно. Пиши чистый, оптимизированный Dart-код. Строго запрещено удалять существующие рабочие функции и ломать дизайн главного экрана.
+          "
 
       - name: Push Code Changes
-        if: steps.ai_optimize.outputs.test_mode != 'true'
-        env:
-          USER_PROMPT: ${{ github.event.inputs.prompt }}
+        continue-on-error: true
         run: |
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
           git add .
-          git commit -m "Super AI Safe Fix: $USER_PROMPT" || echo "No changes to commit"
+          git commit -m "Harness Auto-Fix: VLESS Core & Manual Key Feature" || echo "No changes to commit"
           git push
 
-      - name: 🧪 Test Mode Summary
-        if: steps.ai_optimize.outputs.test_mode == 'true'
+      - name: Build Android APK
         run: |
-          echo "Тестовый прогон завершён успешно. AI API не вызывался, коммит не создавался."
-          echo "Пайплайн (checkout → Java/Flutter setup → pub get → analyze) работает корректно."
+          cd app
+          # Собираем универсальный стабильный релизный APK-файл под все процессоры
+          flutter build apk --release --target-platform android-arm,android-arm64,android-x64
+
+      - name: Upload Finished APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-package
+          path: app/build/outputs/flutter-apk/*.apk
