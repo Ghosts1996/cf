@@ -27,41 +27,76 @@ jobs:
       - name: Install Cline CLI
         run: npm i -g cline
 
-      - name: Set up Java & Android SDK
+      - name: Set up Java Development Kit
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Run Cline Agent Core
-        run: |
-          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid anthropic/claude-3-5-sonnet --cwd . "${{ github.event.inputs.task_prompt }}"
+      - name: Set up Flutter SDK (Необходимо для сборки твоего проекта)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
 
-      - name: Commit and Push changes
+      - name: Install Flutter Dependencies
+        run: |
+          # Переходим в папку с Flutter-приложением и подгружаем пакеты
+          cd app
+          flutter pub get
+
+      - name: 🧠 ШАГ 1: DeepSeek-R1 — Глубокий аудит сети (Без изменения файлов)
+        env:
+          CLINE_API_PROVIDER: openai
+          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          CLINE_MODEL_ID: deepseek-r1
+        run: |
+          cline --cwd . "Проанализируй код приложения в папке app/. Проблема пользователя: ${{ github.event.inputs.task_prompt }}. Найди баг в tunnel_service.dart, роутинге, DNS или туннелировании ядра sing-box. Напиши технический отчет об ошибке в файл .ai_bug_report.md."
+
+      - name: 🛡 ШАГ 2: Claude Fable 5 — Архитектурный контроль и Безопасность
+        env:
+          CLINE_API_PROVIDER: openai
+          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          CLINE_MODEL_ID: anthropic/claude-fable-5
+        run: |
+          cline --cwd . "Прочитай файл .ai_bug_report.md. Составь пошаговый безопасный план изменения кода Флаттера, который решит проблему и гарантированно НЕ сломает интерфейс и дизайн приложения. Запиши инструкции в файл .ai_fix_plan.md."
+
+      - name: ⚡ ШАГ 3: Claude Sonnet — Аккуратное внедрение правок
+        env:
+          CLINE_API_PROVIDER: openai
+          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          CLINE_MODEL_ID: anthropic/claude-3-5-sonnet
+        run: |
+          cline --cwd . "Изучи файлы .ai_bug_report.md и .ai_fix_plan.md. Аккуратно примени изменения к файлам в папке app/lib/ (включая tunnel_service.dart), строго следуя плану безопасности."
+
+      - name: 👑 ШАГ 4: Claude Opus — Экспертный Code Review и Оптимизация
+        env:
+          CLINE_API_PROVIDER: openai
+          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          CLINE_MODEL_ID: anthropic/claude-3-opus
+        run: |
+          cline --cwd . "Внимательно изучи изменения, которые внес Claude Sonnet. Проверь код Dart на утечки памяти, баги с таймером или сессиями VPN. Если найдешь недочеты — исправь их. После завершения удали файлы .ai_bug_report.md и .ai_fix_plan.md."
+
+      - name: Push Code Changes
         continue-on-error: true
         run: |
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
           git add .
-          git commit -m "AI Auto-fix: ${{ github.event.inputs.task_prompt }}" || echo "No changes to commit"
+          git commit -m "Super Multi-AI Safe Fix: ${{ github.event.inputs.task_prompt }}" || echo "No changes to commit"
           git push
 
-      - name: Build Android APK
+      - name: Build Android APK (через официальный Flutter-сборщик)
         run: |
-          GRADLEW_PATH=$(find . -name gradlew -print -quit)
-          if [ -z "$GRADLEW_PATH" ]; then
-            echo "❌ Ошибка: Файл gradlew не найден!"
-            exit 1
-          fi
-          PROJECT_DIR=$(dirname "$GRADLEW_PATH")
-          cd "$PROJECT_DIR"
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          cd app
+          # Собираем чистый релизный APK-файл
+          flutter build apk --release
 
       - name: Upload Finished APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-release
-          path: |
-            **/build/outputs/apk/debug/*.apk
-            **/build/outputs/apk/release/*.apk
+          path: app/build/outputs/flutter-apk/*.apk
