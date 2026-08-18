@@ -18,7 +18,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-size: 22
+          node-version: 22
 
       - name: Install Cline CLI
         run: npm i -g cline
@@ -34,9 +34,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
         run: |
-          # Запуск автономного агента в headless-режиме (без интерфейса)
-          # Он использует модель по умолчанию (например, deepseek-coder) для изменения файлов
-          cline --json --provider openai "${{ github.event.inputs.task_prompt }}"
+          # Запуск автономного агента в режиме openai-compatible
+          # Явно передаем провайдер и модель для корректной авторизации на AITUNNEL
+          cline --json --provider openai-compatible --model deepseek-coder "${{ github.event.inputs.task_prompt }}"
 
       - name: Commit and Push changes
         run: |
