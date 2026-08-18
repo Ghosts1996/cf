@@ -20,11 +20,6 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install Harness CLI
-        run: |
-          # Устанавливаем официальную утилиту harness для глубокого аудита репозиториев
-          npm i -g harness-cli || npm i -g harness
-
       - name: Set up Java Development Kit
         uses: actions/setup-java@v4
         with:
@@ -41,16 +36,15 @@ jobs:
           cd app
           flutter pub get
 
-      - name: 🚀 Глубокий аудит и добавление фичи (Harness + DeepSeek-R1)
+      - name: 🚀 Глубокий аудит и добавление фичи (Harness via npx + DeepSeek-R1)
         env:
           OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
           OPENAI_BASE_URL: https://aitunnel.ru
         run: |
-          echo "🤖 Запускаем Harness для полного анализа структуры проекта..."
+          echo "🤖 Запускаем Harness через npx для полного анализа структуры проекта..."
           
-          # Вызываем harness. Он автоматически сканирует все папки, находит ядро sing-box,
-          # исправляет парсинг ключей и внедряет UI-экран для добавления ключей вручную.
-          harness --provider openai --model deepseek-r1 --cwd . "
+          # Используем npx для обхода ошибки command not found. Пакет скачается и запустится сам.
+          npx harness-ai --provider openai --model deepseek-r1 --cwd . "
           Проведи полный аудит всех файлов Flutter-приложения в папке app/. 
           
           Выполни три критические задачи, строго следуя архитектуре проекта:
@@ -76,7 +70,6 @@ jobs:
       - name: Build Android APK
         run: |
           cd app
-          # Собираем универсальный стабильный релизный APK-файл под все процессоры
           flutter build apk --release --target-platform android-arm,android-arm64,android-x64
 
       - name: Upload Finished APK
