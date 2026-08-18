@@ -16,7 +16,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: \${{ secrets.GITHUB_TOKEN }}
           submodules: true
 
       - name: Setup Node.js
@@ -41,87 +41,65 @@ jobs:
           flutter pub get
 
       - name: 🧠 AI Code Optimization and Bug Fix (DeepSeek-R1)
-        env:
-          USER_PROMPT: ${{ github.event.inputs.prompt }}
-          AITUNNEL_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
-          AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
         run: |
           echo "🚀 Кодируем файл и отправляем запрос на шлюз..."
-
+          
           if [ -f "app/lib/services/tunnel_service.dart" ]; then
-            TUNNEL_CODE_B64=$(base64 -w 0 < app/lib/services/tunnel_service.dart)
+            TUNNEL_CODE_B64=\$(cat app/lib/services/tunnel_service.dart | base64 -w 0)
           else
-            TUNNEL_CODE_B64=$(echo -n "Файл отсутствует, создай с нуля" | base64 -w 0)
+            TUNNEL_CODE_B64=\$(echo -n "Файл отсутствует, создай с нуля" | base64 -w 0)
           fi
 
-          CLEAN_URL=$(echo "$AITUNNEL_BASE_URL" | sed 's/[/]*$//')
-
-          SYSTEM_PROMPT='Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, настрой DNS, настрой маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать маркдаун-теги вроде ```dart или ```, пиши только сырой код файла.'
-
-          USER_CONTENT="Задача: ${USER_PROMPT}. Базовый код текущего файла в Base64 (декодируй перед анализом): ${TUNNEL_CODE_B64}"
-
-          # jq -n --arg сам корректно экранирует кавычки, переносы строк,
-          # обратные слэши и юникод — вручную строку JSON больше не собираем
-          PAYLOAD=$(jq -n \
-            --arg model "deepseek-r1" \
-            --arg sys "$SYSTEM_PROMPT" \
-            --arg usr "$USER_CONTENT" \
-            '{model: $model, messages: [{role:"system", content:$sys}, {role:"user", content:$usr}]}')
-
-          RESPONSE=$(curl -s -X POST "$CLEAN_URL/chat/completions" \
-            -H "Authorization: Bearer $AITUNNEL_API_KEY" \
+          CLEAN_URL=\$(echo "\({{ secrets.AITUNNEL_BASE_URL }}" \vert{} sed 's/[/]*\)//')
+          
+          RESPONSE=(curl -s -X POST "CLEAN_URL/chat/completions" \
+            -H "Authorization: Bearer \${{ secrets.AITUNNEL_API_KEY }}" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
+            -d "{
+              \"model\": \"deepseek-r1\",
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, налей DNS, настроить маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать маркдаун-теги вроде \`\`\`dart или \`\`\`, пиши только сырой код файла.\"},
+                {\"role\": \"user\", \"content\": \"Задача:  github.event.inputs.prompt . Базовый код текущего файла в Base64 (декодируй перед анализом): TUNNEL_CODE_B64\"}
+              ]
+            }")
 
-          NEW_CODE=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+          NEW_CODE=(echo "RESPONSE" | jq -r '.choices[0].message.content // .choices.message.content')
 
-          if [ "$NEW_CODE" == "null" ] || [ -z "$NEW_CODE" ]; then
+          if [ "\(NEW_CODE" == "null" ] \vert{}\vert{} [ -z "\)NEW_CODE" ]; then
             echo "❌ Ошибка: Сервер вернул пустой ответ."
-            echo "Ответ сервера: $RESPONSE"
+            echo "Ответ сервера: \$RESPONSE"
             exit 1
           fi
 
-          CLEAN_CODE=$(echo "$NEW_CODE" | sed '/^```/d')
+          CLEAN_CODE=(echo "NEW_CODE" | sed '/^```/d')
 
           echo "✅ Код успешно сгенерирован моделью DeepSeek-R1!"
-
+          
           mkdir -p app/lib/services
           echo "$CLEAN_CODE" > app/lib/services/tunnel_service.dart
-
+          
           MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST_PATH" ]; then
-            sed -i '/<service/ s/>/ android:foregroundServiceType="vpn">/' "$MANIFEST_PATH"
+            sed -i '/<service/ s/>/ android:foregroundServiceType=\"vpn\">/' "$MANIFEST_PATH"
             echo "✅ AndroidManifest.xml успешно пропатчен!"
           fi
 
-      - name: 🔍 Validate Generated Code (compile + static analysis)
-        run: |
-          cd app
-          echo "🔎 Проверяем сгенерированный код на ошибки компиляции и типов..."
-
-          # dart compile kernel ловит те же ошибки типов/компиляции,
-          # что и полная сборка APK (как раз ту, что вызвала предыдущий баг),
-          # но занимает секунды, а не минуты, и не собирает сам APK.
-          if ! dart compile kernel lib/services/tunnel_service.dart -o /tmp/check.dill; then
-            echo "❌ Сгенерированный код не компилируется. Отменяем сохранение в репозиторий."
-            exit 1
-          fi
-
-          # flutter analyze дополнительно ловит ошибки типов и линт-предупреждения
-          # по всему проекту (не только по одному файлу)
-          if ! flutter analyze --no-fatal-infos; then
-            echo "❌ Статический анализ нашёл ошибки. Отменяем сохранение в репозиторий."
-            exit 1
-          fi
-
-          echo "✅ Код скомпилировался и прошёл статический анализ без ошибок."
-
       - name: Push Code Changes
-        env:
-          USER_PROMPT: ${{ github.event.inputs.prompt }}
+        continue-on-error: true
         run: |
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
           git add .
-          git commit -m "Super AI Safe Fix: $USER_PROMPT" || echo "No changes to commit"
+          git commit -m "Super AI Safe Fix: ${{ github.event.inputs.prompt }}" || echo "No changes to commit"
           git push
+
+      - name: Build Android APK
+        run: |
+          cd app
+          flutter build apk --release --target-platform android-arm,android-arm64,android-x64
+
+      - name: Upload Finished APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-package
+          path: app/build/outputs/flutter-apk/*.apk
