@@ -21,7 +21,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: \${{ secrets.GITHUB_TOKEN }}
           submodules: true
 
       - name: Setup Node.js
@@ -44,118 +44,123 @@ jobs:
 
       - name: Install Flutter Dependencies
         run: |
-          set -uo pipefail
           cd app
           flutter pub get
 
-      - name: 🧠 AI Whole-Project Code Fix
+      - name: 🧠 AI Whole-Project Code Fix (Python Engine)
         id: ai_optimize
         env:
-          USER_PROMPT: ${{ github.event.inputs.prompt }}
-          MODEL_CHOICE: ${{ github.event.inputs.model }}
-          AITUNNEL_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
-          AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          USER_PROMPT: \${{ github.event.inputs.prompt }}
+          MODEL_CHOICE: \${{ github.event.inputs.model }}
+          AITUNNEL_BASE_URL: \${{ secrets.AITUNNEL_BASE_URL }}
+          AITUNNEL_API_KEY: \${{ secrets.AITUNNEL_API_KEY }}
         run: |
-          set -uo pipefail
+          python3 -c "
+          import os, sys, json, urllib.request
 
-          trim() {
-            local s="$1"
-            s="${s#"${s%%[![:space:]]*}"}"
-            s="${s%"${s##*[![:space:]]}"}"
-            printf '%s' "$s"
+          prompt = os.getenv('USER_PROMPT', '').strip()
+          url = os.getenv('AITUNNEL_BASE_URL', '').rstrip('/')
+          api_key = os.getenv('AITUNNEL_API_KEY', '')
+          model = os.getenv('MODEL_CHOICE', 'deepseek-r1')
+
+          print('🔍 Python собирает файлы Flutter-приложения...')
+          project_bundle = []
+          
+          # Находим все файлы Dart, XML и YAML в проекте
+          for root, dirs, files in os.walk('app'):
+              if 'build' in root or '.dart_tool' in root:
+                  continue
+              for file in files:
+                  if file.endswith(('.dart', '.xml', '.yaml')):
+                      fp = os.path.join(root, file)
+                      try:
+                          with open(fp, 'r', encoding='utf-8') as f:
+                              content = f.read()
+                          project_bundle.append(f'=== FILE: {fp} ===\n{content}\n=== END FILE ===\n')
+                      except:
+                          pass
+
+          bundle_text = '\n'.join(project_bundle)
+          print(f'📦 Успешно упаковано {len(project_bundle)} файлов в контекст.')
+
+          sys_prompt = (
+              'Ты старший Flutter/Android инженер, работающий с VPN-клиентом на базе ядра sing-box (VLESS Reality). '
+              'Сделай аудит проекта. Задача 1: Исправь ошибку Connection failed под формат ключей Hiddify (извлеки параметры маскировки трафика, DNS, http-опции и примени их в JSON-конфиге sing-box через MethodChannel vpnvless/fallback). '
+              'Задача 2: Добавь в меню Мои ключи функцию выбора активного ключа (с сохранением в shared_preferences), чтобы именно выбранный профиль передавался в ядро sing-box. '
+              'Ответ верни СТРОГО в формате JSON с двумя полями: \"tunnel_code\" (код исправленного tunnel_service.dart) и \"keys_code\" (код экрана ключей с выбором профиля). '
+              'Запрещено использовать markdown-теги вроде ```dart.'
+          )
+
+          payload = {
+              'model': model,
+              'messages': [
+                  {'role': 'system', 'content': sys_prompt},
+                  {'role': 'user', 'content': f'Задача: {prompt}\n\nИсходный код проекта:\n\n{bundle_text}'}
+              ],
+              'max_tokens': 32000
           }
 
-          PROMPT_TRIMMED="$(trim "$USER_PROMPT")"
-          PROMPT_LOWER="$(printf '%s' "$PROMPT_TRIMMED" | tr '[:upper:]' '[:lower:]')"
+          print('📡 Отправляем запрос на шлюз AITUNNEL...')
+          req = urllib.request.Request(
+              f'{url}/chat/completions',
+              data=json.dumps(payload).encode('utf-8'),
+              headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+              method='POST'
+          )
 
-          echo "🔍 Собираем список файлов проекта..."
-          mapfile -t PROJECT_FILES < <(find app -type f -name "*.dart" -o -name "*.xml" -o -name "*.yaml" -o -name "*.kt" -o -name "*.java")
+          try:
+              with urllib.request.urlopen(req, timeout=600) as response:
+                  res_data = json.loads(response.read().decode('utf-8'))
+                  ai_text = res_data['choices'][0]['message']['content']
+                  print('✅ Запрос выполнен успешно! Начинаем физическую перезапись файлов...')
+                  
+                  # Очищаем от монолога рассуждений <think> если это DeepSeek
+                  if '<think>' in ai_text:
+                      ai_text = ai_text.split('</think>')[-1]
+                  
+                  # Извлекаем JSON поля из ответа ИИ
+                  try:
+                      clean_text = ai_text.strip().strip('`').replace('json\n', '', 1)
+                      data = json.loads(clean_text)
+                      tunnel_code = data.get('tunnel_code', '')
+                      keys_code = data.get('keys_code', '')
+                  except:
+                      tunnel_code = ai_text
+                      keys_code = ''
 
-          if [ "$PROMPT_LOWER" == "test" ]; then
-            echo "🧪 ТЕСТОВЫЙ РЕЖИМ: Пропускаем запрос к ИИ."
-            exit 0
-          fi
+                  # Физически перезаписываем файлы кода в репозитории
+                  if tunnel_code:
+                      os.makedirs('app/lib/services', exist_ok=True)
+                      with open('app/lib/services/tunnel_service.dart', 'w', encoding='utf-8') as out:
+                          out.write(tunnel_code)
+                      print('✅ Файл tunnel_service.dart успешно обновлен!')
 
-          PROJECT_BUNDLE_FILE="$RUNNER_TEMP/project_bundle.txt"
-          : > "$PROJECT_BUNDLE_FILE"
-          for f in "${PROJECT_FILES[@]}"; do
-            if [ -f "$f" ]; then
-              printf '=== FILE: %s ===\n' "$f" >> "$PROJECT_BUNDLE_FILE"
-              cat "$f" >> "$PROJECT_BUNDLE_FILE"
-              printf '\n=== END FILE ===\n\n' >> "$PROJECT_BUNDLE_FILE"
-            fi
-          done
+                  # Автоматически ищем экран ключей и обновляем его
+                  if keys_code:
+                      for root, dirs, files in os.walk('app/lib'):
+                          for file in files:
+                              if 'key' in file.lower() and file.endswith('.dart'):
+                                  kp = os.path.join(root, file)
+                                  with open(kp, 'w', encoding='utf-8') as out:
+                                      out.write(keys_code)
+                                  print(f'✅ Экран ключей ({kp}) успешно обновлен!')
+                                  break
 
-          SYSTEM_PROMPT="Ты старший Flutter/Android инженер, работающий с VPN-клиентом на sing-box (VLESS Reality). Сделай аудит проекта. Задача 1: Исправь ошибку Connection failed под формат ключей Hiddify (извлеки параметры маскировки трафика, DNS, http-опции и примени их в JSON-конфиге sing-box). Задача 2: Добавь в меню 'Мои ключи' функцию выбора активного ключа (с сохранением в shared_preferences), чтобы именно выбранный профиль передавался в ядро sing-box. Ответ верни строго в формате JSON с двумя полями: 'tunnel_code' (код исправленного tunnel_service.dart) и 'keys_code' (код экрана ключей с выбором профиля). Запрещено использовать markdown-теги ```dart."
+                  # Патчим манифест для Android 14+
+                  manifest = 'app/android/app/src/main/AndroidManifest.xml'
+                  if os.path.exists(manifest):
+                      with open(manifest, 'r', encoding='utf-8') as f:
+                          m_data = f.read()
+                      if 'foregroundServiceType' not in m_data:
+                          m_data = m_data.replace('<service', '<service android:foregroundServiceType=\"vpn\"', 1)
+                          with open(manifest, 'w', encoding='utf-8') as f:
+                              f.write(m_data)
+                          print('✅ AndroidManifest.xml успешно пропатчен!')
 
-          USER_CONTENT_FILE="\$RUNNER_TEMP/user_content.txt"
-          {
-            printf 'Задача: %s\n\n' "\$USER_PROMPT"
-            printf 'Исходный код проекта:\n\n'
-            cat "\$PROJECT_BUNDLE_FILE"
-          } > "\$USER_CONTENT_FILE"
-
-          CLEAN_URL="\${AITUNNEL_BASE_URL%/}"
-          PAYLOAD_FILE="\$RUNNER_TEMP/payload.json"
-
-          jq -n \
-            --arg model "\$MODEL_CHOICE" \
-            --arg sys "\$SYSTEM_PROMPT" \
-            --rawfile usr "\$USER_CONTENT_FILE" \
-            --argjson max_tokens 32000 \
-            '{model: \(model, messages: [{role: "system", content: \)sys}, {role: "user", content: \(usr}], max_tokens:\)max_tokens}' \
-            > "\$PAYLOAD_FILE"
-
-          RESPONSE_FILE="\$RUNNER_TEMP/response.json"
-          
-          HTTP_CODE=(curl -sS --max-time 600 --retry 2 --retry-delay 5 -X POST "CLEAN_URL/chat/completions" \
-            -H "Authorization: Bearer \$AITUNNEL_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d @"\$PAYLOAD_FILE" \
-            -o "\$RESPONSE_FILE" \
-            -w '%{http_code}')
-
-          if [ "\$HTTP_CODE" -ge 400 ]; then
-            echo "❌ Сервер вернул ошибку HTTP \$HTTP_CODE"
-            cat "\$RESPONSE_FILE"
-            exit 1
-          fi
-
-          echo "✅ Запрос к API выполнен успешно! Начинаем физическую перезапись файлов..."
-
-          # Физически извлекаем сгенерированный код из ответа ИИ
-          AI_CONTENT=\((jq -r '.choices[0].message.content // empty' "\)RESPONSE_FILE")
-          
-          # Очищаем от мыслительного блока <think>...</think>, если используется deepseek-r1
-          CLEAN_CONTENT=(echo "AI_CONTENT" | sed -e 's/<think>.*<\/think>//g')
-
-          # Пробуем распарсить JSON поля, если ИИ вернул структурированный ответ
-          NEW_TUNNEL=(echo "CLEAN_CONTENT" | jq -r '.tunnel_code // empty' 2>/dev/null || true)
-          NEW_KEYS=(echo "CLEAN_CONTENT" | jq -r '.keys_code // empty' 2>/dev/null || true)
-
-          # Если ИИ выдал просто сырой код без JSON-структуры, пишем его в tunnel_service.dart
-          if [ -z "\$NEW_TUNNEL" ]; then
-            NEW_TUNNEL=(echo "CLEAN_CONTENT" | sed '/^```/d')
-          fi
-
-          # Перезаписываем файлы в репозитории
-          mkdir -p app/lib/services
-          echo "$NEW_TUNNEL" > app/lib/services/tunnel_service.dart
-          echo "✅ Файл tunnel_service.dart успешно перезаписан новым сетевым кодом sing-box!"
-
-          # Ищем и обновляем экран ключей
-          KEYS_FILE=$(find app/lib/ -name "*key*.dart" -print -quit || true)
-          if [ -n "$NEW_KEYS" ] && [ "$NEW_KEYS" != "null" ] && [ -n "$KEYS_FILE" ]; then
-            echo "$NEW_KEYS" > "$KEYS_FILE"
-            echo "✅ Экран ключей ($KEYS_FILE) успешно обновлен: добавлен выбор активного профиля!"
-          fi
-
-          # Прописываем поддержку фонового VPN-сервиса для Android 14+
-          MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST_PATH" ]; then
-            sed -i '/<service/ s/>/ android:foregroundServiceType=\"vpn\">/' "$MANIFEST_PATH"
-            echo "✅ AndroidManifest.xml успешно пропатчен!"
-          fi
+          except Exception as e:
+              print(f'❌ Ошибка выполнения пайплайна: {e}')
+              sys.exit(1)
+          "
 
       - name: Push Code Changes
         continue-on-error: true
