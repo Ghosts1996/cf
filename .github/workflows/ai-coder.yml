@@ -21,7 +21,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          token: \${{ secrets.GITHUB_TOKEN }}
           submodules: true
 
       - name: Setup Node.js
@@ -66,7 +65,6 @@ jobs:
           print('🔍 Python собирает файлы Flutter-приложения...')
           project_bundle = []
           
-          # Находим все файлы Dart, XML и YAML в проекте
           for root, dirs, files in os.walk('app'):
               if 'build' in root or '.dart_tool' in root:
                   continue
@@ -111,14 +109,12 @@ jobs:
           try:
               with urllib.request.urlopen(req, timeout=600) as response:
                   res_data = json.loads(response.read().decode('utf-8'))
-                  ai_text = res_data['choices'][0]['message']['content']
+                  ai_text = res_data['choices']['message']['content']
                   print('✅ Запрос выполнен успешно! Начинаем физическую перезапись файлов...')
                   
-                  # Очищаем от монолога рассуждений <think> если это DeepSeek
                   if '<think>' in ai_text:
                       ai_text = ai_text.split('</think>')[-1]
                   
-                  # Извлекаем JSON поля из ответа ИИ
                   try:
                       clean_text = ai_text.strip().strip('`').replace('json\n', '', 1)
                       data = json.loads(clean_text)
@@ -128,14 +124,12 @@ jobs:
                       tunnel_code = ai_text
                       keys_code = ''
 
-                  # Физически перезаписываем файлы кода в репозитории
                   if tunnel_code:
                       os.makedirs('app/lib/services', exist_ok=True)
                       with open('app/lib/services/tunnel_service.dart', 'w', encoding='utf-8') as out:
                           out.write(tunnel_code)
                       print('✅ Файл tunnel_service.dart успешно обновлен!')
 
-                  # Автоматически ищем экран ключей и обновляем его
                   if keys_code:
                       for root, dirs, files in os.walk('app/lib'):
                           for file in files:
@@ -143,10 +137,9 @@ jobs:
                                   kp = os.path.join(root, file)
                                   with open(kp, 'w', encoding='utf-8') as out:
                                       out.write(keys_code)
-                                  print(f'✅ Экран ключей ({kp}) успешно обновлен!')
+                                  print(f'✅ Экран ключей ({kp}) успешно updated!')
                                   break
 
-                  # Патчим манифест для Android 14+
                   manifest = 'app/android/app/src/main/AndroidManifest.xml'
                   if os.path.exists(manifest):
                       with open(manifest, 'r', encoding='utf-8') as f:
