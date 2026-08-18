@@ -41,27 +41,37 @@ jobs:
           flutter pub get
 
       - name: 🧠 AI Code Optimization and Bug Fix (DeepSeek-R1)
+        env:
+          USER_PROMPT: ${{ github.event.inputs.prompt }}
+          AITUNNEL_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
         run: |
           echo "🚀 Кодируем файл и отправляем запрос на шлюз..."
 
           if [ -f "app/lib/services/tunnel_service.dart" ]; then
-            TUNNEL_CODE_B64=$(cat app/lib/services/tunnel_service.dart | base64 -w 0)
+            TUNNEL_CODE_B64=$(base64 -w 0 < app/lib/services/tunnel_service.dart)
           else
             TUNNEL_CODE_B64=$(echo -n "Файл отсутствует, создай с нуля" | base64 -w 0)
           fi
 
-          CLEAN_URL=$(echo "${{ secrets.AITUNNEL_BASE_URL }}" | sed 's/[/]*$//')
+          CLEAN_URL=$(echo "$AITUNNEL_BASE_URL" | sed 's/[/]*$//')
+
+          SYSTEM_PROMPT='Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, настрой DNS, настрой маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать маркдаун-теги вроде ```dart или ```, пиши только сырой код файла.'
+
+          USER_CONTENT="Задача: ${USER_PROMPT}. Базовый код текущего файла в Base64 (декодируй перед анализом): ${TUNNEL_CODE_B64}"
+
+          # jq -n --arg сам корректно экранирует кавычки, переносы строк,
+          # обратные слэши и юникод — вручную строку JSON больше не собираем
+          PAYLOAD=$(jq -n \
+            --arg model "deepseek-r1" \
+            --arg sys "$SYSTEM_PROMPT" \
+            --arg usr "$USER_CONTENT" \
+            '{model: $model, messages: [{role:"system", content:$sys}, {role:"user", content:$usr}]}')
 
           RESPONSE=$(curl -s -X POST "$CLEAN_URL/chat/completions" \
-            -H "Authorization: Bearer ${{ secrets.AITUNNEL_API_KEY }}" \
+            -H "Authorization: Bearer $AITUNNEL_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"model\": \"deepseek-r1\",
-              \"messages\": [
-                {\"role\": \"system\", \"content\": \"Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, настрой DNS, настрой маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать маркдаун-теги вроде \`\`\`dart или \`\`\`, пиши только сырой код файла.\"},
-                {\"role\": \"user\", \"content\": \"Задача: ${{ github.event.inputs.prompt }}. Базовый код текущего файла в Base64 (декодируй перед анализом): $TUNNEL_CODE_B64\"}
-              ]
-            }")
+            -d "$PAYLOAD")
 
           NEW_CODE=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
 
@@ -86,11 +96,13 @@ jobs:
 
       - name: Push Code Changes
         continue-on-error: true
+        env:
+          USER_PROMPT: ${{ github.event.inputs.prompt }}
         run: |
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
           git add .
-          git commit -m "Super AI Safe Fix: ${{ github.event.inputs.prompt }}" || echo "No changes to commit"
+          git commit -m "Super AI Safe Fix: $USER_PROMPT" || echo "No changes to commit"
           git push
 
       - name: Build Android APK
