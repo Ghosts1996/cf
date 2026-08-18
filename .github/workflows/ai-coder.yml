@@ -6,6 +6,11 @@ on:
         description: 'Что нужно исправить или улучшить в коде?'
         required: true
 
+# Права на запись кода в репозиторий
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   ai-agent-run:
     runs-on: ubuntu-latest
@@ -31,10 +36,11 @@ jobs:
 
       - name: Run Cline Agent Core
         run: |
-          # Запуск флагманского агента через Claude Fable 5 и шлюз AITUNNEL
-          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid anthropic/claude-fable-5 "${{ github.event.inputs.task_prompt }}"
+          # Запуск агента, который правит код прямо в текущей директории
+          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid anthropic/claude-fable-5 --cwd . "${{ github.event.inputs.task_prompt }}"
 
       - name: Commit and Push changes
+        continue-on-error: true # Если гит выдаст ошибку, скрипт НЕ упадет, а пойдет собирать APK
         run: |
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
@@ -44,6 +50,7 @@ jobs:
 
       - name: Build Android APK
         run: |
+          # Даем права на запуск сборщика и собираем отладочный APK
           chmod +x gradlew
           ./gradlew assembleDebug
 
