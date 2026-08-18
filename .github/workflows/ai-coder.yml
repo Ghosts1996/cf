@@ -77,20 +77,32 @@ jobs:
 
           # Каталоги/файлы, которые AI разрешено ЧИТАТЬ (весь проект приложения)
           # и — отдельно — куда разрешено ЗАПИСЫВАТЬ ответ (см. write allowlist
-          # ниже в шаге парсинга). Специально НЕ включаем .github/**, секреты,
-          # deploy-скрипты и т.п. — чтобы AI физически не мог переписать сам
-          # CI-пайплайн или что-то вне приложения, даже если сам об этом
-          # "попросит" в ответе.
+          # ниже в шаге парсинга). Единственное, что осознанно исключено —
+          # .github/** (сам CI-пайплайн: скрипт не должен мочь переписать
+          # самого себя, пока выполняется) и файлы-секреты (*.env, *.pem,
+          # *.key, *.jks, *.keystore, *.p12, *.pfx) — чтобы они не улетали
+          # в сторонний AI API и не перезаписывались. Всё остальное в
+          # репозитории — открыто для AI.
           mapfile -t PROJECT_FILES < <(
-            find app \
-              \( -path '*/build/*' -o -path '*/.dart_tool/*' -o -path '*/.gradle/*' \
-                 -o -path '*/Pods/*' -o -path '*/.symlinks/*' -o -path '*/generated/*' \
-                 -o -path '*/.idea/*' \) -prune -o \
-              -type f \( -name '*.dart' -o -name '*.yaml' -o -name '*.yml' \
-                         -o -name '*.gradle' -o -name '*.gradle.kts' -o -name '*.kts' \
-                         -o -name '*.xml' -o -name '*.kt' -o -name '*.java' \
-                         -o -name '*.plist' -o -name '*.swift' \) -print \
-              | grep -v 'pubspec.lock' | sort
+            find . \
+              \( -path './.git/*' -o -path './.github/*' -o -path '*/build/*' \
+                 -o -path '*/.dart_tool/*' -o -path '*/.gradle/*' -o -path '*/Pods/*' \
+                 -o -path '*/.symlinks/*' -o -path '*/generated/*' -o -path '*/.idea/*' \
+                 -o -path '*/node_modules/*' \) -prune -o \
+              -type f \
+              ! -name '*.env' ! -name '*.env.*' \
+              ! -name '*.pem' ! -name '*.key' ! -name '*.jks' \
+              ! -name '*.keystore' ! -name '*.p12' ! -name '*.pfx' \
+              ! -name 'pubspec.lock' \
+              \( -name '*.dart' -o -name '*.yaml' -o -name '*.yml' \
+                 -o -name '*.gradle' -o -name '*.gradle.kts' -o -name '*.kts' \
+                 -o -name '*.xml' -o -name '*.kt' -o -name '*.java' \
+                 -o -name '*.plist' -o -name '*.swift' -o -name '*.py' \
+                 -o -name '*.md' -o -name '*.json' -o -name '*.toml' \
+                 -o -name '*.cfg' -o -name '*.ini' -o -name '*.sh' \
+                 -o -name '*.css' -o -name '*.html' -o -name '*.txt' \
+                 -o -name 'Dockerfile' -o -name 'Podfile' \) -print \
+              | sed 's|^\./||' | sort
           )
 
           echo "📂 В контекст для AI попадёт файлов: ${#PROJECT_FILES[@]}"
@@ -168,7 +180,7 @@ jobs:
           - Никакого текста вне блоков. Никаких markdown-обёрток ```.
           - Включай в ответ ТОЛЬКО те файлы, которые ты реально изменил. Не переписывай без необходимости файлы, которые не требуют правок.
           - Не удаляй и не сокращай логику, не связанную с задачей.
-          - Новые файлы можно создавать, только если это необходимо для задачи, и только по пути внутри app/lib/ или app/android/.
+          - Новые файлы можно создавать в любом месте репозитория, кроме .github/ (это сам CI-пайплайн — его менять нельзя) и файлов-секретов (*.env, *.pem, *.key, *.jks, *.keystore, *.p12, *.pfx).
           - Если правок не требуется ни в одном файле — верни пустой ответ.'
 
           USER_CONTENT_FILE="$RUNNER_TEMP/user_content.txt"
@@ -228,11 +240,10 @@ jobs:
             exit 0
           fi
 
-          # Разбираем ответ на отдельные файлы. Разрешаем запись ТОЛЬКО внутрь
-          # app/lib/ и app/android/ и в сам app/pubspec.yaml — это осознанная
-          # граница безопасности: даже если модель предложит поменять что-то
-          # в .github/**, скрипты деплоя или другие места, это будет
-          # проигнорировано и явно залогировано.
+          # Разбираем ответ на отдельные файлы. Запись разрешена ВЕЗДЕ в
+          # репозитории, КРОМЕ .github/** (сам CI-пайплайн) и файлов-секретов
+          # — это единственная граница безопасности, которая осталась;
+          # остальное применяется без ограничений по пути.
           CHANGED_FILES_LOG="$RUNNER_TEMP/changed_files.txt"
           : > "$CHANGED_FILES_LOG"
 
@@ -292,7 +303,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-release-package
-          path: app/build/outputs/flutter-apk/*.apk
+          path: app/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
 
       - name: Push Code Changes
