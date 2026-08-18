@@ -44,31 +44,40 @@ jobs:
 
       - name: ШАГ 1 DeepSeek-R1
         env:
-          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
-          OPENAI_BASE_URL: https://aitunnel.ru
+          CLINE_API_PROVIDER: openai-compatible
+          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          CLINE_MODEL_ID: deepseek-r1
         run: |
-          cline --json --provider openai --model deepseek-r1 --cwd . "Проанализируй код приложения в папке app/. Проблема пользователя: ${{ github.event.inputs.prompt }}. Найди баг в tunnel_service.dart, роутинге, DNS или туннелировании ядра sing-box. Напиши технический отчет об ошибке в файл .ai_bug_report.md."
+          # Авторизация подхватывается из env-переменных, заведенных на твои секреты
+          cline --cwd . "Проанализируй код приложения в папке app/. Проблема пользователя: ${{ github.event.inputs.prompt }}. Найди баг в tunnel_service.dart, роутинге, DNS или туннелировании ядра sing-box. Напиши технический отчет об ошибке в файл .ai_bug_report.md."
 
       - name: ШАГ 2 Claude Fable 5
         env:
-          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
-          OPENAI_BASE_URL: https://aitunnel.ru
+          CLINE_API_PROVIDER: openai-compatible
+          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          CLINE_MODEL_ID: anthropic/claude-fable-5
         run: |
-          cline --json --provider openai --model anthropic/claude-fable-5 --cwd . "Прочитай файл .ai_bug_report.md. Составь пошаговый безопасный план изменения кода Флаттера, который решит проблему и гарантированно НЕ сломает интерфейс и дизайн приложения. Запиши инструкции в файл .ai_fix_plan.md."
+          cline --cwd . "Прочитай файл .ai_bug_report.md. Составь пошаговый безопасный план изменения кода Флаттера, который решит проблему и гарантированно НЕ сломает интерфейс и дизайн приложения. Запиши инструкции в файл .ai_fix_plan.md."
 
       - name: ШАГ 3 Claude Sonnet
         env:
-          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
-          OPENAI_BASE_URL: https://aitunnel.ru
+          CLINE_API_PROVIDER: openai-compatible
+          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          CLINE_MODEL_ID: anthropic/claude-3-5-sonnet
         run: |
-          cline --json --provider openai --model anthropic/claude-3-5-sonnet --cwd . "Изучи файлы .ai_bug_report.md и .ai_fix_plan.md. Аккуратно примени изменения к файлам в папке app/lib/ (включая tunnel_service.dart), строго следуя плану безопасности."
+          cline --cwd . "Изучи файлы .ai_bug_report.md и .ai_fix_plan.md. Аккуратно примени изменения к файлам в папке app/lib/ (включая tunnel_service.dart), строго следуя плану безопасности."
 
       - name: ШАГ 4 Claude Opus
         env:
-          OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
-          OPENAI_BASE_URL: https://aitunnel.ru
+          CLINE_API_PROVIDER: openai-compatible
+          CLINE_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          CLINE_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          CLINE_MODEL_ID: anthropic/claude-3-opus
         run: |
-          cline --json --provider openai --model anthropic/claude-3-opus --cwd . "Внимательно изучи изменения, которые внес Claude Sonnet. Проверь код Dart на утечки памяти, баги с таймером или сессиями VPN. Если найдешь недочеты — исправь их. После завершения удали файлы .ai_bug_report.md и .ai_fix_plan.md."
+          cline --cwd . "Внимательно изучи изменения, которые внес Claude Sonnet. Проверь код Dart на утечки памяти, баги с таймером или сессиями VPN. Если найдешь недочеты — исправь их. После завершения удали файлы .ai_bug_report.md и .ai_fix_plan.md."
 
       - name: Push Code Changes
         continue-on-error: true
@@ -82,7 +91,8 @@ jobs:
       - name: Build Android APK
         run: |
           cd app
-          flutter build apk --release
+          # Собираем универсальный стабильный релизный APK-файл под все процессоры
+          flutter build apk --release --target-platform android-arm,android-arm64,android-x64
 
       - name: Upload Finished APK
         uses: actions/upload-artifact@v4
