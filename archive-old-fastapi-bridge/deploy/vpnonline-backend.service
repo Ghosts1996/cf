@@ -1,0 +1,28 @@
+[Unit]
+Description=VPN onLine API bridge (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+# Поставь реального непривилегированного пользователя (не root!) —
+# например: sudo useradd --system --no-create-home vpnonline-api
+User=vpnonline-api
+Group=vpnonline-api
+WorkingDirectory=/opt/vpnonline-backend
+EnvironmentFile=/opt/vpnonline-backend/.env
+ExecStart=/opt/vpnonline-backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8081 --workers 2
+Restart=on-failure
+RestartSec=3
+
+# Харденинг systemd — процесс не должен иметь причин писать куда-либо,
+# кроме своего рабочего каталога, и не должен видеть остальную ФС.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/vpnonline-backend
+# Если DATABASE_URL указывает на sqlite-файл бота в другом каталоге —
+# добавь его явно в ReadWritePaths, иначе ProtectSystem=strict запретит запись.
+
+[Install]
+WantedBy=multi-user.target

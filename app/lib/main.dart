@@ -1,0 +1,153 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'theme.dart';
+import 'screens/connect_screen.dart';
+import 'screens/keys_screen.dart';
+import 'screens/plans_screen.dart';
+import 'screens/servers_screen.dart';
+import 'screens/menu_screen.dart';
+import 'screens/onboarding_screen.dart';
+import 'screens/auth_screen.dart';
+import 'services/api_client.dart';
+
+void main() {
+  // [ИСПРАВЛЕНО — критично перед публикацией репозитория] Раньше здесь
+  // стоял РЕАЛЬНЫЙ боевой SHOPBOT_API_KEY как defaultValue прямо в
+  // исходном коде — при открытии репозитория (что и планируется для
+  // соответствия GPL-3.0 у flutter_singbox_client) ключ был бы виден
+  // любому, кто просто откроет main.dart на GitHub, независимо от того,
+  // что тот же ключ аккуратно лежит в Secrets. Теперь defaultValue пуст —
+  // ключ ОБЯЗАН передаваться через --dart-define=SHOPBOT_API_KEY=... при
+  // сборке (см. .github/workflows/build-android.yml, секрет уже там).
+  // Если ключ не передан — приложение получит apiKey: '', и запросы к API
+  // будут падать с явной ошибкой авторизации сразу, а не тихо "работать"
+  // с ключом, зашитым в код.
+  ApiClient.init(
+    apiKey: const String.fromEnvironment('SHOPBOT_API_KEY'),
+    baseUrl: const String.fromEnvironment(
+      'API_BASE_URL',
+      defaultValue: 'https://api.vpnonline.shop/api/v1',
+    ),
+  );
+  // [ИСПРАВЛЕНО] Раньше цвет статус-бара/шторки нигде не задавался —
+  // приложение использовало системные значения по умолчанию, а на тёмной
+  // теме (фон #050308) это на части устройств/прошивок Android выглядит
+  // как светлая или прозрачная полоса поверх контента — визуально похоже
+  // на то, что "дизайн вылезает в шторку". Явно закрепляем тёмный статус-
+  // бар в цвет приложения со светлыми иконками, и такую же навигационную
+  // панель снизу, чтобы обе системные области были предсказуемо тёмными
+  // на любом устройстве, а не зависели от темы прошивки.
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.light,
+      statusBarBrightness: Brightness.dark,
+      systemNavigationBarColor: AppColors.bg,
+      systemNavigationBarIconBrightness: Brightness.light,
+    ),
+  );
+  runApp(const VpnOnlineApp());
+}
+
+class VpnOnlineApp extends StatelessWidget {
+  const VpnOnlineApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'VPNonLine',
+      debugShowCheckedModeBanner: false,
+      theme: buildAppTheme(),
+      home: const AppEntryPoint(),
+    );
+  }
+}
+
+/// [ИСПРАВЛЕНО v4] Раньше после онбординга приложение сразу показывало
+/// RootShell без единой проверки токена — экрана входа не существовало,
+/// и ApiClient() в каждом экране создавался заново без токена (см. разбор
+/// в services/api_client.dart). Теперь порядок такой:
+/// онбординг (1 раз) -> восстановление сессии из защищённого хранилища ->
+/// если сессии нет, AuthScreen -> после входа RootShell.
+class AppEntryPoint extends StatefulWidget {
+  const AppEntryPoint({super.key});
+  @override
+  State<AppEntryPoint> createState() => _AppEntryPointState();
+}
+
+enum _Stage { loading, onboarding, auth, app }
+
+class _AppEntryPointState extends State<AppEntryPoint> {
+  _Stage _stage = _Stage.loading;
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    final showOnboarding = await OnboardingScreen.shouldShow();
+    if (showOnboarding) {
+      if (mounted) setState(() => _stage = _Stage.onboarding);
+      return;
+    }
+    await _checkSession();
+  }
+
+  Future<void> _checkSession() async {
+    final restored = await ApiClient.instance.restoreSession();
+    if (mounted) setState(() => _stage = restored ? _Stage.app : _Stage.auth);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    switch (_stage) {
+      case _Stage.loading:
+        return const Scaffold(backgroundColor: AppColors.bg, body: SizedBox.shrink());
+      case _Stage.onboarding:
+        return OnboardingScreen(onDone: () => _checkSession());
+      case _Stage.auth:
+        return AuthScreen(onAuthenticated: () => setState(() => _stage = _Stage.app));
+      case _Stage.app:
+        return RootShell(onLoggedOut: () => setState(() => _stage = _Stage.auth));
+    }
+  }
+}
+
+class RootShell extends StatefulWidget {
+  const RootShell({super.key, required this.onLoggedOut});
+  final VoidCallback onLoggedOut;
+
+  @override
+  State<RootShell> createState() => _RootShellState();
+}
+
+class _RootShellState extends State<RootShell> {
+  int _index = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final screens = [
+      const ConnectScreen(),
+      const KeysScreen(),
+      const PlansScreen(),
+      const ServersScreen(),
+      MenuScreen(onLoggedOut: widget.onLoggedOut),
+    ];
+    return Scaffold(
+      body: SafeArea(child: screens[_index]),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _index,
+        onDestinationSelected: (i) => setState(() => _index = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.home_rounded), label: 'Главная'),
+          NavigationDestination(icon: Icon(Icons.vpn_key_rounded), label: 'Ключи'),
+          NavigationDestination(icon: Icon(Icons.payments_rounded), label: 'Баланс'),
+          NavigationDestination(icon: Icon(Icons.public_rounded), label: 'Серверы'),
+          NavigationDestination(icon: Icon(Icons.menu_rounded), label: 'Меню'),
+        ],
+      ),
+    );
+  }
+}

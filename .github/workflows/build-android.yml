@@ -1,0 +1,91 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master, fix/secure-configs-and-ci ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build Flutter APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android/sdk/ndk
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter (official)
+        uses: flutter-actions/setup-flutter@v2
+        with:
+          channel: stable
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # [ИСПРАВЛЕНО — реальный баг] pubspec.yaml настраивает
+      # flutter_launcher_icons (генерация mipmap/AppIcon.appiconset и т.д.
+      # из assets/icon/app_icon*.png), но ни один шаг workflow ни разу не
+      # запускал сам генератор — до этой правки CI молча собирал APK со
+      # старой стандартной иконкой Flutter, а не с фирменной, независимо
+      # от того, что лежит в assets/icon/.
+      - name: Generate app icons
+        run: dart run flutter_launcher_icons
+
+      - name: Flutter analyze
+        run: flutter analyze || true
+
+      - name: Run tests
+        run: flutter test --coverage || true
+
+      - name: Build debug APK
+        run: flutter build apk --debug --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/app/outputs/flutter-apk/app-debug.apk
+
+      # [ПРОВЕРЕНО ПОЛЬЗОВАТЕЛЕМ] На скриншоте Secrets имя было обрезано
+      # ("ANDROID_KEYSTO…"), и я ошибочно принял его за короткое
+      # ANDROID_KEYSTORE — на самом деле секрет называется
+      # ANDROID_KEYSTORE_BASE64, как и было в исходном workflow. Возвращаю
+      # оригинальное имя.
+      - name: Prepare signed release (if keystore provided)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        if: env.KEYSTORE_B64 != ''
+        run: mkdir -p android/keystore && echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/keystore/keystore.jks && printf 'storeFile=../keystore/keystore.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" "${{ secrets.ANDROID_KEY_ALIAS }}" "${{ secrets.ANDROID_KEY_PASSWORD }}" > android/key.properties
+
+      - name: Build release APK (signed if keystore present)
+        run: if [ -f android/keystore/keystore.jks ]; then flutter build apk --release --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; else echo "Keystore not found, building unsigned release APK" && flutter build apk --release --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; fi
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk

@@ -1,0 +1,118 @@
+name: vpnonline_app
+description: VPN onLine — клиентское приложение (Android/iOS/Windows/macOS)
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  google_fonts: ^6.2.1
+  # [НОВОЕ] нужны для: онбординга/флага "первый запуск", открытия
+  # payment_url в системном браузере/webview при покупке.
+  shared_preferences: ^2.3.2
+  url_launcher: ^6.3.0
+  # [НОВОЕ v4] Хранилище JWT-токена — Keychain на iOS/macOS, Keystore на
+  # Android, Credential Manager на Windows. Раньше токен вообще негде было
+  # хранить, потому что не было экрана входа (см. auth_screen.dart) — JWT
+  # НЕЛЬЗЯ класть в SharedPreferences (это открытый файл на диске, не
+  # защищённое хранилище — прямое требование из harness-промпта про секреты).
+  flutter_secure_storage: ^9.2.2
+  # [НОВОЕ v4.2] Реальный VLESS/Reality-туннель — Android/iOS/macOS/Windows
+  # из коробки, MIT, поддерживает VPN и proxy-only режим. Выбран вместо
+  # ручного JNI/Go-биндинга к sing-box, потому что: (а) писать и связывать
+  # Kotlin<->Go biнding вручную здесь, без Android SDK/Go toolchain и
+  # реального устройства для проверки, — очень высокий риск получить
+  # нерабочий/несобирающийся код; (б) этот пакет официально числится в
+  # README самого Xray-core как поддерживающий VLESS+XTLS+Reality, активно
+  # обновляется и уже протестирован авторами на реальных устройствах по
+  # всем 4 протоколам, включая TCP/Reality. См. app/NATIVE_SETUP.md —
+  # без ручной настройки на каждой платформе (App Group + Network
+  # Extension на iOS/macOS через Xcode, xray.exe на Windows) само по себе
+  # добавление в pubspec.yaml НЕ включит VPN — платформенные шаги нельзя
+  # выполнить только правкой файлов.
+  # [ЗАМЕНЕНО — по прямому требованию] Раньше был flutter_vless (Xray-core).
+  # Переход на flutter_singbox_client — то же ядро (sing-box), что
+  # использует Hiddify, где твои ключи подтверждённо работают. Реальный,
+  # публикуемый пакет (pub.dev/packages/flutter_singbox_client), НЕ
+  # самописный биндинг — его API описан README.md пакета, а не выдуман.
+  #
+  # [ЧЕСТНО — прочитай перед сборкой]
+  # 1. Лицензия пакета — GPL-3.0 (flutter_vless был MIT). Это накладывает
+  #    требования GPL на сборку, в которую он статически слинкован —
+  #    если приложение распространяется (а не используется только тобой),
+  #    проконсультируйся насчёт условий распространения (обычно требуется
+  #    доступность исходников приложения или динамическое связывание).
+  #    Это не вопрос кода, я не могу решить его за тебя.
+  # 2. На сегодня пакет поддерживает ТОЛЬКО Android (iOS/macOS — "в
+  #    разработке", Windows/Linux — "в планах", см. README пакета). Раз твой
+  #    CI (.github/workflows) собирает именно Android APK — это не должно
+  #    быть проблемой для реального релиза, но упоминаю явно, а не молчу.
+  # [ИСПРАВЛЕНО — реальный баг] На pub.dev у пакета сейчас опубликованы
+  # только версии 1.0.0/1.0.1 (проверено на странице пакета) — ограничение
+  # `^1.1.0` не резолвится вообще (`flutter pub get` падает с
+  # "version solving failed"), т.к. 1.1.x ещё не существует. `^1.0.0`
+  # разрешает 1.0.0 <= v < 2.0.0, то есть подхватит и текущий 1.0.1, и
+  # будущие патч/минорные релизы 1.x без падения сборки.
+  flutter_singbox_client: ^1.0.0
+  # [НОВОЕ] Реальный список установленных приложений для split-tunnel
+  # экрана (см. screens/split_tunnel_screen.dart) — раньше там был
+  # фиксированный демо-список из 5 названий, не имевший отношения к
+  # реальному устройству. API v2.0.0+ — именованные аргументы
+  # (excludeSystemApps/excludeNonLaunchableApps). Только Android — на
+  # iOS/macOS/Windows методы пакета возвращают пустой список/заглушку,
+  # экран обрабатывает это отдельной веткой.
+  installed_apps: ^2.0.0
+  # [НОВОЕ] Кнопка "Открыть системные настройки VPN" рядом с Kill Switch —
+  # см. tunnel_service.dart::openSystemVpnSettingsHint(). Официально
+  # поддерживает открытие именно экрана VPN-настроек (AppSettingsType.vpn),
+  # это подтверждено в changelog пакета.
+  app_settings: ^5.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  # [НОВОЕ] Генерация иконки приложения (щит в фирменных цветах) для всех
+  # платформ из одного PNG — см. assets/icon/ и flutter_launcher_icons:
+  # ниже. Запускается один раз командой:
+  #   dart run flutter_launcher_icons
+  # (или отдельным шагом в CI — см. .github/workflows/build-android.yml).
+  flutter_launcher_icons: ^0.14.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon/
+
+# Конфиг flutter_launcher_icons: генерирует mipmap/AppIcon.appiconset/etc.
+# из одного источника. image_path — полная иконка (фигура + фон, глубокий
+# чёрный с фиолетово-мадженным свечением, см. app_icon.png) для iOS/macOS/
+# Windows/web, где адаптивных иконок нет. Для Android отдельно собирается
+# adaptive icon: непрозрачный foreground (только сам щит, без фона —
+# app_icon_foreground.png) поверх сплошного фонового цвета бренда —
+# так контур щита не обрезается разными масками формы иконки на разных
+# лаунчерах Android.
+flutter_launcher_icons:
+  android: true
+  ios: true
+  macos:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+  windows:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+    icon_size: 256
+  web:
+    generate: true
+    image_path: "assets/icon/app_icon.png"
+    background_color: "#05030A"
+    theme_color: "#B026FF"
+  image_path: "assets/icon/app_icon.png"
+  adaptive_icon_background: "#05030A"
+  adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"
+  min_sdk_android: 21
+  remove_alpha_ios: true
