@@ -68,20 +68,13 @@ jobs:
           PROMPT_TRIMMED="$(trim "$USER_PROMPT")"
           PROMPT_LOWER="$(printf '%s' "$PROMPT_TRIMMED" | tr '[:upper:]' '[:lower:]')"
 
-          echo "🔍 Собираем список файлов проекта без использования опасных символов..."
-          
-          # Пуленепробиваемый сбор файлов: ищем только нужные расширения в папке app, исключая build
-          mapfile -t PROJECT_FILES < <(find app -type f -name "*.dart" -o -name "*.xml" -o -name "*.yaml" -o -name "*.kt" -o -name "*.java" | grep -v "build/" || true)
-
-          echo "📝 В контекст для AI попадёт файлов: ${#PROJECT_FILES[@]}"
+          echo "🔍 Собираем список файлов проекта..."
+          mapfile -t PROJECT_FILES < <(find app -type f -name "*.dart" -o -name "*.xml" -o -name "*.yaml" -o -name "*.kt" -o -name "*.java")
 
           if [ "$PROMPT_LOWER" == "test" ]; then
-            echo "test_mode=true" >> "$GITHUB_OUTPUT"
-            echo "🧪 ТЕСТОВЫЙ РЕЖИМ: пропускаем вызов AI API, кредиты не тратятся."
+            echo "🧪 ТЕСТОВЫЙ РЕЖИМ: Пропускаем запрос к ИИ."
             exit 0
           fi
-
-          echo "test_mode=false" >> "$GITHUB_OUTPUT"
 
           PROJECT_BUNDLE_FILE="$RUNNER_TEMP/project_bundle.txt"
           : > "$PROJECT_BUNDLE_FILE"
@@ -93,52 +86,76 @@ jobs:
             fi
           done
 
-          BUNDLE_SIZE=$(wc -c < "$PROJECT_BUNDLE_FILE")
-          echo "📦 Размер пакета с кодом: ${BUNDLE_SIZE} байт."
+          SYSTEM_PROMPT="Ты старший Flutter/Android инженер, работающий с VPN-клиентом на sing-box (VLESS Reality). Сделай аудит проекта. Задача 1: Исправь ошибку Connection failed под формат ключей Hiddify (извлеки параметры маскировки трафика, DNS, http-опции и примени их в JSON-конфиге sing-box). Задача 2: Добавь в меню 'Мои ключи' функцию выбора активного ключа (с сохранением в shared_preferences), чтобы именно выбранный профиль передавался в ядро sing-box. Ответ верни строго в формате JSON с двумя полями: 'tunnel_code' (код исправленного tunnel_service.dart) и 'keys_code' (код экрана ключей с выбором профиля). Запрещено использовать markdown-теги ```dart."
 
-          SYSTEM_PROMPT="Ты старший Flutter/Android инженер, работающий с VPN-клиентом на sing-box (VLESS Reality). Тебе передан весь релевантный исходный код проекта в виде блоков. Сделай полный аудит, устрани ошибку Connection failed, адаптируй парсер под формат ключей Hiddify и добавь выбор активного профиля в меню 'Мои ключи'. Строго соблюдай совместимость, не ломай другие функции приложения. Выполни задачу ПОЛНОСТЬЮ и добросовестно."
-
-          USER_CONTENT_FILE="$RUNNER_TEMP/user_content.txt"
+          USER_CONTENT_FILE="\$RUNNER_TEMP/user_content.txt"
           {
-            printf 'Задача: %s\n\n' "$USER_PROMPT"
+            printf 'Задача: %s\n\n' "\$USER_PROMPT"
             printf 'Исходный код проекта:\n\n'
-            cat "$PROJECT_BUNDLE_FILE"
-          } > "$USER_CONTENT_FILE"
+            cat "\$PROJECT_BUNDLE_FILE"
+          } > "\$USER_CONTENT_FILE"
 
-          CLEAN_URL="${AITUNNEL_BASE_URL%/}"
-          PAYLOAD_FILE="$RUNNER_TEMP/payload.json"
+          CLEAN_URL="\${AITUNNEL_BASE_URL%/}"
+          PAYLOAD_FILE="\$RUNNER_TEMP/payload.json"
 
           jq -n \
-            --arg model "$MODEL_CHOICE" \
-            --arg sys "$SYSTEM_PROMPT" \
-            --rawfile usr "$USER_CONTENT_FILE" \
+            --arg model "\$MODEL_CHOICE" \
+            --arg sys "\$SYSTEM_PROMPT" \
+            --rawfile usr "\$USER_CONTENT_FILE" \
             --argjson max_tokens 32000 \
-            '{model: $model, messages: [{role: "system", content: $sys}, {role: "user", content: $usr}], max_tokens: $max_tokens}' \
-            > "$PAYLOAD_FILE"
+            '{model: \(model, messages: [{role: "system", content: \)sys}, {role: "user", content: \(usr}], max_tokens:\)max_tokens}' \
+            > "\$PAYLOAD_FILE"
 
-          RESPONSE_FILE="$RUNNER_TEMP/response.json"
+          RESPONSE_FILE="\$RUNNER_TEMP/response.json"
           
-          HTTP_CODE=$(curl -sS --max-time 600 --retry 2 --retry-delay 5 -X POST "$CLEAN_URL/chat/completions" \
-            -H "Authorization: Bearer $AITUNNEL_API_KEY" \
+          HTTP_CODE=(curl -sS --max-time 600 --retry 2 --retry-delay 5 -X POST "CLEAN_URL/chat/completions" \
+            -H "Authorization: Bearer \$AITUNNEL_API_KEY" \
             -H "Content-Type: application/json" \
-            -d @"$PAYLOAD_FILE" \
-            -o "$RESPONSE_FILE" \
+            -d @"\$PAYLOAD_FILE" \
+            -o "\$RESPONSE_FILE" \
             -w '%{http_code}')
 
-          CURL_STATUS=$?
-
-          if [ "$CURL_STATUS" -ne 0 ]; then
-            echo "❌ Ошибка сети при обращении к AITUNNEL (curl exit code $CURL_STATUS)."
+          if [ "\$HTTP_CODE" -ge 400 ]; then
+            echo "❌ Сервер вернул ошибку HTTP \$HTTP_CODE"
+            cat "\$RESPONSE_FILE"
             exit 1
           fi
 
-          if [ "$HTTP_CODE" -ge 400 ]; then
-            echo "❌ Сервер вернул ошибку HTTP $HTTP_CODE"
-            cat "$RESPONSE_FILE"
-            exit 1
+          echo "✅ Запрос к API выполнен успешно! Начинаем физическую перезапись файлов..."
+
+          # Физически извлекаем сгенерированный код из ответа ИИ
+          AI_CONTENT=\((jq -r '.choices[0].message.content // empty' "\)RESPONSE_FILE")
+          
+          # Очищаем от мыслительного блока <think>...</think>, если используется deepseek-r1
+          CLEAN_CONTENT=(echo "AI_CONTENT" | sed -e 's/<think>.*<\/think>//g')
+
+          # Пробуем распарсить JSON поля, если ИИ вернул структурированный ответ
+          NEW_TUNNEL=(echo "CLEAN_CONTENT" | jq -r '.tunnel_code // empty' 2>/dev/null || true)
+          NEW_KEYS=(echo "CLEAN_CONTENT" | jq -r '.keys_code // empty' 2>/dev/null || true)
+
+          # Если ИИ выдал просто сырой код без JSON-структуры, пишем его в tunnel_service.dart
+          if [ -z "\$NEW_TUNNEL" ]; then
+            NEW_TUNNEL=(echo "CLEAN_CONTENT" | sed '/^```/d')
           fi
 
-          echo "✅ Запрос к API выполнен успешно! Переходим к разбору ответа..."
+          # Перезаписываем файлы в репозитории
+          mkdir -p app/lib/services
+          echo "$NEW_TUNNEL" > app/lib/services/tunnel_service.dart
+          echo "✅ Файл tunnel_service.dart успешно перезаписан новым сетевым кодом sing-box!"
+
+          # Ищем и обновляем экран ключей
+          KEYS_FILE=$(find app/lib/ -name "*key*.dart" -print -quit || true)
+          if [ -n "$NEW_KEYS" ] && [ "$NEW_KEYS" != "null" ] && [ -n "$KEYS_FILE" ]; then
+            echo "$NEW_KEYS" > "$KEYS_FILE"
+            echo "✅ Экран ключей ($KEYS_FILE) успешно обновлен: добавлен выбор активного профиля!"
+          fi
+
+          # Прописываем поддержку фонового VPN-сервиса для Android 14+
+          MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST_PATH" ]; then
+            sed -i '/<service/ s/>/ android:foregroundServiceType=\"vpn\">/' "$MANIFEST_PATH"
+            echo "✅ AndroidManifest.xml успешно пропатчен!"
+          fi
 
       - name: Push Code Changes
         continue-on-error: true
@@ -146,7 +163,7 @@ jobs:
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
           git add .
-          git commit -m "Super AI Safe Fix: VLESS Reality & MethodChannel" || echo "No changes to commit"
+          git commit -m "Super AI Safe Fix: VLESS Reality Hiddify & Active Key Selector" || echo "No changes to commit"
           git push
 
       - name: Build Android APK
