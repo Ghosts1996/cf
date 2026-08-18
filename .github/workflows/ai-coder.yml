@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: \${{ secrets.GITHUB_TOKEN }}
+          submodules: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -62,7 +63,7 @@ jobs:
               ]
             }")
 
-          NEW_CODE=(echo "RESPONSE" | jq -r '.choices[0].message.content')
+          NEW_CODE=(echo "RESPONSE" | jq -r '.choices.message.content')
 
           if [ "\(NEW_CODE" == "null" ] \vert{}\vert{} [ -z "\)NEW_CODE" ]; then
             echo "❌ Ошибка: Сервер вернул пустой ответ."
