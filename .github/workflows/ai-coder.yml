@@ -70,8 +70,8 @@ jobs:
 
           echo "🔍 Собираем список файлов проекта без использования опасных символов..."
           
-          # Пуленепробиваемый сбор файлов: ищем только нужные расширения в папке app, исключая build
-          mapfile -t PROJECT_FILES < <(find app -type f -name "*.dart" -o -name "*.xml" -o -name "*.yaml" -o -name "*.kt" -o -name "*.java" | grep -v "build/" || true)
+          # Безопасный сбор файлов без использования символов пайпа |
+          mapfile -t PROJECT_FILES < <(find app -type f -name "*.dart" -o -name "*.xml" -o -name "*.yaml" -o -name "*.kt" -o -name "*.java")
 
           echo "📝 В контекст для AI попадёт файлов: ${#PROJECT_FILES[@]}"
 
