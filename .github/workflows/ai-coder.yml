@@ -1,4 +1,4 @@
-name: AI Autonomous Developer and Builder
+name: Claude Fable Autonomous Builder
 on:
   workflow_dispatch:
     inputs:
@@ -31,15 +31,15 @@ jobs:
 
       - name: Run Cline Agent Core
         run: |
-          # Авторизация и запуск агента через единую CLI-команду без конфликта префиксов ключа
-          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid deepseek-coder "${{ github.event.inputs.task_prompt }}"
+          # Запуск флагманского агента через Claude Fable 5 и шлюз AITUNNEL
+          cline --json auth --provider openai --apikey "${{ secrets.AITUNNEL_API_KEY }}" --baseurl "${{ secrets.AITUNNEL_BASE_URL }}" --modelid anthropic/claude-fable-5 "${{ github.event.inputs.task_prompt }}"
 
       - name: Commit and Push changes
         run: |
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
           git add .
-          git commit -m "AI Auto-fix: ${{ github.event.inputs.task_prompt }}" || echo "No changes to commit"
+          git commit -m "Claude Fable Auto-fix: ${{ github.event.inputs.task_prompt }}" || echo "No changes to commit"
           git push
 
       - name: Build Android APK
