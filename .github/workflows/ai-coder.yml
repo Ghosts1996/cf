@@ -47,7 +47,6 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
           OPENAI_BASE_URL: https://aitunnel.ru
         run: |
-          # Передаем только поддерживаемые CLI-флаги. Авторизация подхватится из env
           cline --json --provider openai --model deepseek-r1 --cwd . "Проанализируй код приложения в папке app/. Проблема пользователя: ${{ github.event.inputs.prompt }}. Найди баг в tunnel_service.dart, роутинге, DNS или туннелировании ядра sing-box. Напиши технический отчет об ошибке в файл .ai_bug_report.md."
 
       - name: ШАГ 2 Claude Fable 5
