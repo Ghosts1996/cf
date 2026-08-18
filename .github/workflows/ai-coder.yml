@@ -16,7 +16,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: \${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -41,51 +41,53 @@ jobs:
 
       - name: 🧠 AI Code Optimization and Bug Fix (DeepSeek-R1)
         run: |
-          echo "🚀 Отправляем запрос на шлюз из твоих секретов..."
+          echo "🚀 Безопасно кодируем файл и отправляем запрос на AITUNNEL..."
           
-          # Находим и считываем текущий код файла туннеля (если он есть), чтобы передать его ИИ
-          TUNNEL_CODE=""
+          # Читаем код и кодируем его в Base64 для 100% защиты от багов в JSON
           if [ -f "app/lib/services/tunnel_service.dart" ]; then
-            TUNNEL_CODE=$(cat app/lib/services/tunnel_service.dart | jq -sR .)
+            TUNNEL_CODE_B64=\$(cat app/lib/services/tunnel_service.dart | base64 -w 0)
           else
-            TUNNEL_CODE="\"Файл tunnel_service.dart не найден, создай его с нуля с поддержкой sing-box и VLESS Reality\""
+            TUNNEL_CODE_B64=\$(echo -n "Файл отсутствует, создай с нуля" | base64 -w 0)
           fi
 
-          # Чистим URL из твоих секретов от возможных лишних пробелов на конце
-          CLEAN_URL=$(echo "${{ secrets.AITUNNEL_BASE_URL }}" | sed 's/[/]*$//')
+          # Чистим URL из секретов
+          CLEAN_URL=\$(echo "\({{ secrets.AITUNNEL_BASE_URL }}" \vert{} sed 's/[/]*\)//')
           
-          # Отправляем прямой запрос к модели deepseek-r1 через ТВОИ секреты
-          RESPONSE=$(curl -s -X POST "$CLEAN_URL/chat/completions" \
-            -H "Authorization: Bearer ${{ secrets.AITUNNEL_API_KEY }}" \
+          # Отправляем запрос, передавая промпт и закодированный файл
+          RESPONSE=(curl -s -X POST "CLEAN_URL/chat/completions" \
+            -H "Authorization: Bearer \${{ secrets.AITUNNEL_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d "{
               \"model\": \"deepseek-r1\",
               \"messages\": [
-                {\"role\": \"system\", \"content\": \"Ты элитный Android/Flutter разработчик. Твоя задача - исправить код VPN-приложения sing-box VLESS Reality, настроить DNS, маршрутизацию и починить вылеты на других телефонах (добавить foregroundServiceType в манифест). Возвращай СТРОГО только чистый код файла tunnel_service.dart без лишнего текста и без markdown-разметки (без ```dart ... ```).\"},
-                {\"role\": \"user\", \"content\": \"Задача: ${{ github.event.inputs.prompt }}. Вот текущий код файла: $TUNNEL_CODE\"}
+                {\"role\": \"system\", \"content\": \"Ты элитный Flutter разработчик. Исправь код sing-box VLESS Reality, настрой DNS, маршрутизацию и почини вылеты на Android 14+. Твой ответ должен состоять СТРОГО только из чистого кода Dart. Запрещено использовать markdown-теги вроде \`\`\`dart или \`\`\`, пиши только сырой код файла.\"},
+                {\"role\": \"user\", \"content\": \"Задача:  github.event.inputs.prompt . Базовый код текущего файла в Base64 (декодируй перед анализом): TUNNEL_CODE_B64\"}
               ]
             }")
 
-          # Извлекаем ответ нейросети из JSON
-          NEW_CODE=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+          # Извлекаем контент ответа
+          NEW_CODE=(echo "RESPONSE" | jq -r '.choices[0].message.content // .choices.message.content')
 
-          if [ "$NEW_CODE" == "null" ] || [ -z "$NEW_CODE" ]; then
-            echo "❌ Ошибка: Сервер вернул пустой ответ. Проверь баланс аккаунта или настройки секретов!"
-            echo "Ответ сервера: $RESPONSE"
+          if [ "\(NEW_CODE" == "null" ] \vert{}\vert{} [ -z "\)NEW_CODE" ]; then
+            echo "❌ Ошибка: Сервер вернул пустой ответ."
+            echo "Ответ сервера: \$RESPONSE"
             exit 1
           fi
 
-          echo "✅ Код успешно сгенерирован и оптимизирован моделью через твои секреты!"
+          # Очищаем от случайных markdown-тегов, если ИИ их все-таки добавил
+          CLEAN_CODE=(echo "NEW_CODE" | sed '/^```/d')
+
+          echo "✅ Код успешно сгенерирован моделью DeepSeek-R1!"
           
-          # Записываем исправленный код прямо в проект
+          # Записываем исправленный код обратно в проект
           mkdir -p app/lib/services
-          echo "$NEW_CODE" > app/lib/services/tunnel_service.dart
+          echo "$CLEAN_CODE" > app/lib/services/tunnel_service.dart
           
-          # Автоматически добавляем поддержку фоновой службы vpn для Android 14+ в манифест
+          # Безопасно обновляем манифест для Android 14+
           MANIFEST_PATH="app/android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST_PATH" ]; then
             sed -i '/<service/ s/>/ android:foregroundServiceType=\"vpn\">/' "$MANIFEST_PATH"
-            echo "✅ AndroidManifest.xml успешно обновлен для поддержки Android 14+!"
+            echo "✅ AndroidManifest.xml успешно пропатчен!"
           fi
 
       - name: Push Code Changes
@@ -100,11 +102,10 @@ jobs:
       - name: Build Android APK
         run: |
           cd app
-          # Собираем универсальный стабильный релизный APK-файл под все процессоры
           flutter build apk --release --target-platform android-arm,android-arm64,android-x64
 
       - name: Upload Finished APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-release
+          name: app-release-package
           path: app/build/outputs/flutter-apk/*.apk
