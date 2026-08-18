@@ -122,7 +122,7 @@ class TunnelService {
     }
   }
 
-  Future<_ParsedVless>? _matchProfile(List<_ParsedVless> profiles, String? hostName) {
+  _ParsedVless? _matchProfile(List<_ParsedVless> profiles, String? hostName) {
     if (hostName == null || hostName.isEmpty) return null;
     final needle = hostName.trim().toLowerCase();
     for (final p in profiles) {
@@ -149,7 +149,7 @@ class TunnelService {
     final bypassedPackages = bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
 
     final profiles = await _loadProfiles(connectionString);
-    final preferred = await _matchProfile(profiles, preferredHostName);
+    final preferred = _matchProfile(profiles, preferredHostName);
     final ordered = preferred != null 
         ? [preferred, ...profiles.where((p) => !identical(p, preferred))] 
         : profiles;
@@ -420,6 +420,15 @@ class TunnelService {
   }
 
   Future<int?> connectedDelayMs() async => null;
+
+  Future<void> dispose() async {
+    await _stateSub?.cancel();
+    await _statsSub?.cancel();
+    await _faultSub?.cancel();
+    _stateSub = null;
+    _statsSub = null;
+    _faultSub = null;
+  }
 }
 
 enum TunnelConnState { disconnected, connecting, connected, disconnecting }
