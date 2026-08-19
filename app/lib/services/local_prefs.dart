@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// [ИСПРАВЛЕНО] Причина бага "тумблеры возвращаются в исходное положение":
@@ -109,4 +110,46 @@ class PrefKeys {
   static const selectedServerId = 'servers.selected_id';
   static const splitTunnelBypass = 'split_tunnel.bypassed_packages';
   static const splitTunnelMode = 'split_tunnel.mode'; // 'exclude' | 'include'
+
+  // [НОВОЕ] Ручной ключ/подписка, вставленная пользователем на экране
+  // "Мои ключи" (vless://... или http(s)-ссылка на подписку). Если задан —
+  // ConnectScreen подключается по нему в приоритете перед ключами из
+  // личного кабинета (API), см. connect_screen.dart::_resolveConnectionString.
+  static const manualConnectionString = 'keys.manual_connection_string';
+}
+
+/// [НОВОЕ] Ин-мемори + на диске хранилище ручного ключа, добавленного
+/// пользователем на экране "Мои ключи" (KeysScreen). Отдельный класс (а не
+/// просто LocalPrefs.getString/setString "по требованию") нужен затем, что
+/// значение должно реактивно долетать до ConnectScreen без явного похода в
+/// SharedPreferences при каждой перерисовке: KeysScreen пишет через
+/// [set]/[clear], ConnectScreen слушает [notifier] и сразу видит новое
+/// значение, даже если оба экрана открыты в одном и том же Navigator-стеке
+/// (например, KeysScreen поверх ConnectScreen).
+class ManualKeyStore {
+  ManualKeyStore._();
+  static final ManualKeyStore instance = ManualKeyStore._();
+
+  final ValueNotifier<String?> notifier = ValueNotifier<String?>(null);
+  bool _loaded = false;
+
+  String? get value => notifier.value;
+
+  Future<void> ensureLoaded() async {
+    if (_loaded) return;
+    _loaded = true;
+    final saved = await LocalPrefs.instance.getString(PrefKeys.manualConnectionString);
+    notifier.value = (saved == null || saved.trim().isEmpty) ? null : saved.trim();
+  }
+
+  Future<void> set(String rawValue) async {
+    final trimmed = rawValue.trim();
+    await LocalPrefs.instance.setString(PrefKeys.manualConnectionString, trimmed);
+    notifier.value = trimmed.isEmpty ? null : trimmed;
+  }
+
+  Future<void> clear() async {
+    await LocalPrefs.instance.setString(PrefKeys.manualConnectionString, '');
+    notifier.value = null;
+  }
 }
