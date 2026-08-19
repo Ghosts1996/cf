@@ -49,14 +49,14 @@ class TunnelService {
       final prevDuration = status.value?.duration ?? 0;
       final prevDownload = status.value?.download ?? 0;
       final prevUpload = status.value?.upload ?? 0;
-      
+
       if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
         _connectStartedAt = DateTime.now();
       }
       if (mapped != TunnelConnState.connected) {
         _connectStartedAt = null;
       }
-      
+
       status.value = TunnelStatus(
         state: mapped,
         duration: mapped == TunnelConnState.connected 
@@ -100,7 +100,7 @@ class TunnelService {
     if (_lastConnectionString == null) return;
     if (!_killSwitchEnabled) return;
     if (_autoReconnectAttempt >= _maxAutoReconnectAttempts) return;
-    
+
     killSwitchBlocking.value = true;
     _autoReconnectAttempt++;
     Future.delayed(Duration(seconds: 3), () async {
@@ -187,7 +187,7 @@ class TunnelService {
         final connectedName = profile.remark.isNotEmpty ? profile.remark : (preferredHostName ?? 'VPNOnline');
         connectedServerName.value = connectedName;
         localProxyAddress.value = proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
-        
+
         _lastConnectionString = connectionString;
         _lastPreferredHostName = preferredHostName;
         _userInitiatedDisconnect = false;
@@ -291,12 +291,12 @@ class TunnelService {
       {'action': 'sniff'},
       {'protocol': 'dns', 'action': 'hijack-dns'},
     ];
-    
+
     final outbounds = <Map<String, dynamic>>[
       outbound,
       {'type': 'direct', 'tag': 'direct'},
     ];
-    
+
     final inbounds = <Map<String, dynamic>>[];
     if (proxyOnly) {
       inbounds.add({
@@ -318,7 +318,7 @@ class TunnelService {
         if (bypassedPackages.isNotEmpty) 'exclude_package': bypassedPackages,
       });
     }
-    
+
     final config = <String, dynamic>{
       'log': {'level': 'warn'},
       'dns': {'servers': dnsServers, 'final': 'remote-dns'},
@@ -330,7 +330,7 @@ class TunnelService {
         'rules': routeRules,
       },
     };
-    
+
     return jsonEncode(config);
   }
 
@@ -355,7 +355,7 @@ class TunnelService {
     if (source.isEmpty) {
       throw TunnelException('Не разместили ссылку на конфигурацию VLESS Reality.');
     }
-    
+
     if (!forceRefresh && 
         _cachedProfiles != null && 
         _cachedSource == source && 
@@ -363,7 +363,7 @@ class TunnelService {
         DateTime.now().difference(_cachedAt!) < _cacheTtl) {
       return _cachedProfiles!;
     }
-    
+
     String body;
     if (source.startsWith('vless://')) {
       body = source;
@@ -378,18 +378,18 @@ class TunnelService {
         throw TunnelException('Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
       }
     }
-    
+
     final profiles = _parseSubscriptionBody(body);
     if (profiles.isEmpty) {
       throw TunnelException('Конфигурация не содержит рабочих серверов VLESS+Reality.');
     }
-    
+
     _cachedSource = source;
     _cachedProfiles = profiles;
     _cachedAt = DateTime.now();
     return profiles;
   }
-  
+
   List<_ParsedVless> _parseSubscriptionBody(String body) {
     String text = body.trim();
     if (!text.contains('vless://')) {
@@ -400,12 +400,12 @@ class TunnelService {
         if (decoded.contains('vless://')) text = decoded;
       } catch (_) {}
     }
-    
+
     final lines = text.split(RegExp(r'[\r\n]+'))
       .map((line) => line.trim())
       .where((line) => line.startsWith('vless://'))
       .toList();
-    
+
     final result = <_ParsedVless>[];
     for (final line in lines) {
       final parsed = _ParsedVless.tryParse(line);
@@ -418,11 +418,11 @@ class TunnelService {
     if (status.value?.state == TunnelConnState.connected) return true;
     final completer = Completer<bool>();
     VoidCallback? listener;
-    
+
     final timer = Timer(timeout, () {
       if (!completer.isCompleted) completer.complete(false);
     });
-    
+
     listener = () {
       if (status.value?.state == TunnelConnState.connected) {
         completer.complete(true);
@@ -430,7 +430,7 @@ class TunnelService {
         completer.complete(false);
       }
     };
-    
+
     status.addListener(listener);
     try {
       return await completer.future;
@@ -527,27 +527,55 @@ class _ParsedVless {
     try {
       final uri = Uri.parse(line);
       if (uri.scheme != 'vless') return null;
-      
+
       final uuid = uri.userInfo;
       final host = uri.host;
       final port = uri.port;
       if (uuid.isEmpty || host.isEmpty || port == 0) return null;
-      
+
       final q = uri.queryParameters;
-      final remark = uri.fragment.isNotEmpty ? Uri.decodeComponent(uri.fragment) : host;
+      // [ИСПРАВЛЕНО] Uri.decodeComponent кидает FormatException, если во
+      // фрагменте (имя сервера после #) встречается одиночный "%", не
+      // являющийся началом валидной %XX-последовательности — такое
+      // бывает в подписках, где имя не было корректно percent-encoded.
+      // Раньше это исключение вылетало из try/catch этого же метода (он
+      // ловит все ошибки — см. ниже), так что сам парсинг не падал, но
+      // ради надёжности декодируем безопасно: если не получилось —
+      // используем фрагмент как есть, а не роняем весь профиль.
+      String remark = host;
+      if (uri.fragment.isNotEmpty) {
+        try {
+          remark = Uri.decodeComponent(uri.fragment);
+        } catch (_) {
+          remark = uri.fragment;
+        }
+      }
 
       // Hiddify/Xray экспортируют тип транспорта либо как "type", либо как "headerType".
       final rawType = (q['type'] ?? q['headerType'] ?? 'tcp').toLowerCase();
       // "http" в поле type у Xray-совместимых ссылок означает HTTP-маскировку поверх tcp,
       // для sing-box это соответствует transport type "http".
       final transportType = rawType.isEmpty ? 'tcp' : rawType;
-      
+
+      // [ИСПРАВЛЕНО] Если security=reality, а поле pbk (публичный ключ)
+      // отсутствует или пустое — раньше это тихо уходило в нативный
+      // конфиг sing-box как null/пустая строка. Нативное ядро на Android
+      // такого не прощает: получив reality-блок без публичного ключа, оно
+      // падает НАТИВНО (Kotlin/JNI), а не кидает Dart-исключение — именно
+      // это выглядит как "приложение вылетает" без какой-либо ошибки в
+      // интерфейсе. Теперь такой профиль просто не парсится (return null)
+      // и tunnel_service переходит к следующему серверу в списке вместо
+      // падения всего приложения.
+      final security = (q['security'] ?? 'none').toLowerCase();
+      final pbkValue = q['pbk'];
+      if (security == 'reality' && (pbkValue == null || pbkValue.isEmpty)) return null;
+
       return _ParsedVless(
         uuid: uuid,
         host: host,
         port: port,
-        security: (q['security'] ?? 'none').toLowerCase(),
-        pbk: q['pbk'],
+        security: security,
+        pbk: pbkValue,
         fp: q['fp'],
         sni: q['sni'],
         sid: q['sid'],
