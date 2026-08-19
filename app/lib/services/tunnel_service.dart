@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_singbox_client/flutter_singbox_client.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:app_settings/app_settings.dart';
 import 'local_prefs.dart';
 
@@ -23,6 +25,10 @@ class TunnelService {
   StreamSubscription? _statsSub;
   StreamSubscription? _faultSub;
   DateTime? _connectStartedAt;
+  // [НОВОЕ — см. _restartDurationTicker] Тикает раз в секунду, пока
+  // статус connected, чтобы таймер сессии на экране реально считал время,
+  // а не был заморожен на 00:00:00.
+  Timer? _durationTicker;
 
   final ValueNotifier<TunnelStatus?> status = ValueNotifier(null);
   final ValueNotifier<String?> lastError = ValueNotifier(null);
@@ -46,7 +52,6 @@ class TunnelService {
 
     _stateSub = _client.serviceStateStream.listen((state) {
       final mapped = _mapServiceState(state);
-      final prevDuration = status.value?.duration ?? 0;
       final prevDownload = status.value?.download ?? 0;
       final prevUpload = status.value?.upload ?? 0;
 
@@ -57,11 +62,24 @@ class TunnelService {
         _connectStartedAt = null;
       }
 
+      // [ИСПРАВЛЕНО — таймер сессии стоял на 00:00:00]
+      // duration раньше пересчитывался ТОЛЬКО здесь, внутри листенера
+      // serviceStateStream. Но этот стрим шлёт событие один раз при смене
+      // состояния (…→connecting→connected), а не каждую секунду — сразу
+      // после перехода в connected новых событий больше нет, пока туннель
+      // не отвалится, поэтому значение застывало на 0 у самого момента
+      // подключения. trafficStatsStream ниже, который реально тикает
+      // ~1 Гц, duration просто копировал не пересчитывая — тоже не помогало.
+      // Теперь отдельный Timer.periodic (см. _restartDurationTicker)
+      // обновляет duration каждую секунду сам по себе, независимо от того,
+      // прислал ли плагин очередное событие.
+      _restartDurationTicker(mapped == TunnelConnState.connected);
+
       status.value = TunnelStatus(
         state: mapped,
-        duration: mapped == TunnelConnState.connected 
-            ? DateTime.now().difference(_connectStartedAt ?? DateTime.now()).inSeconds 
-            : prevDuration,
+        duration: mapped == TunnelConnState.connected
+            ? DateTime.now().difference(_connectStartedAt ?? DateTime.now()).inSeconds
+            : 0,
         download: prevDownload,
         upload: prevUpload,
       );
@@ -73,7 +91,9 @@ class TunnelService {
       if (current == null) return;
       status.value = TunnelStatus(
         state: current.state,
-        duration: current.duration,
+        duration: current.state == TunnelConnState.connected
+            ? DateTime.now().difference(_connectStartedAt ?? DateTime.now()).inSeconds
+            : current.duration,
         download: stats.downlinkBps,
         upload: stats.uplinkBps,
       );
@@ -92,6 +112,26 @@ class TunnelService {
     if (s.contains('disconnecting') || s.contains('stopping')) return TunnelConnState.disconnecting;
     if (s.contains('connected') || s.contains('started') || s.contains('running')) return TunnelConnState.connected;
     return TunnelConnState.disconnected;
+  }
+
+  /// [НОВОЕ] Держит секундный тик, пока туннель connected, чтобы таймер
+  /// сессии на экране считал реальное время, а не ждал редких событий от
+  /// плагина. Безопасно вызывать многократно — старый таймер всегда
+  /// гасится перед тем, как (возможно) завести новый.
+  void _restartDurationTicker(bool shouldRun) {
+    _durationTicker?.cancel();
+    _durationTicker = null;
+    if (!shouldRun) return;
+    _durationTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      final current = status.value;
+      if (current == null || current.state != TunnelConnState.connected) return;
+      status.value = TunnelStatus(
+        state: current.state,
+        duration: DateTime.now().difference(_connectStartedAt ?? DateTime.now()).inSeconds,
+        download: current.download,
+        upload: current.upload,
+      );
+    });
   }
 
   void _onStatusChanged(TunnelConnState state) {
@@ -206,6 +246,41 @@ class TunnelService {
           continue;
         }
 
+        // [ИСПРАВЛЕНО — главная причина "подключено, но интернет не
+        // работает" (0 МБ приём/отдача, "нет данных о задержке")]
+        // Раньше успешным подключением считался сам факт перехода
+        // serviceStateStream в connected. А это означает ТОЛЬКО то, что
+        // нативный VpnService/TUN-интерфейс на Android поднялся — Android
+        // принял системный VPN-туннель. Это НЕ гарантирует, что пакеты
+        // реально доходят до VLESS-сервера и обратно: интерфейс может
+        // подняться штатно, а сам handshake до конкретного узла зависнуть
+        // (сеть/провайдер режет именно этот сервер, конкретный узел лёг,
+        // или ядро sing-box подвисает на резолве домена в IPv6 — см. ниже
+        // fix strategy: ipv4_only). Android в этом случае как ни в чём не
+        // бывало показывает "подключено", а трафик так и остаётся на 0 —
+        // ровно то, что видно на скриншоте. Hiddify в такой ситуации
+        // реально проверяет соединение и переключается на следующий сервер
+        // подписки; здесь такой проверки не было вовсе.
+        // Поэтому теперь ПОСЛЕ подъёма интерфейса делаем один короткий
+        // HTTP HEAD-запрос, который реально должен пройти через туннель:
+        // в VPN-режиме — обычный запрос (весь трафик процесса и так идёт
+        // через TUN благодаря auto_route); в proxy-режиме туннеля нет,
+        // поэтому запрос принудительно направляем через локальный
+        // SOCKS/HTTP-прокси на 127.0.0.1:$_proxyPort — иначе проверка бы
+        // молча тестировала обычный мобильный интернет в обход прокси и
+        // всегда была бы "зелёной", даже если прокси не работает.
+        // Если запрос не прошёл — это тот же случай, что и любая другая
+        // ошибка подключения: отключаемся и идём к следующему серверу в
+        // списке (см. цикл for выше) — то есть просто доиспользуем уже
+        // существующий фолбэк по профилям вместо того, чтобы городить
+        // отдельную ветку.
+        final internetReachable = await _verifyInternetReachable(proxyOnly: proxyOnly);
+        if (!internetReachable) {
+          await _client.disconnect();
+          lastFailure = 'Туннель поднялся, но интернет через него не идёт (сервер "${profile.remark}" не отвечает) — пробуем следующий';
+          continue;
+        }
+
         final connectedName = profile.remark.isNotEmpty ? profile.remark : (preferredHostName ?? 'VPNOnline');
         connectedServerName.value = connectedName;
         localProxyAddress.value = proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
@@ -308,9 +383,19 @@ class TunnelService {
       // (10.0.0.0/8, 192.168.0.0/16, 127.0.0.0/8 и т.д.) прямо в бинарнике
       // sing-box.
       {'ip_is_private': true, 'outbound': 'direct'},
-      if (blockAds) 
-        {'domain_suffix': _adBlockDomains, 'action': 'reject'},
+      // [ИСПРАВЛЕНО] 'sniff' переставлен ПЕРЕД доменной блокировкой
+      // рекламы. В TUN-режиме на вход попадают голые IP-пакеты без домена
+      // — единственный источник поля "domain" для правила ниже это как
+      // раз сниффинг SNI из TLS ClientHello, который выполняет действие
+      // 'sniff'. Если правило по domain_suffix стоит РАНЬШЕ сниффинга, у
+      // соединения на тот момент ещё нет домена вообще, и правило просто
+      // никогда не совпадает — блокировка рекламы молча не работает. На
+      // сам факт наличия интернета это не влияло (реклама просто не
+      // блокировалась), но раз чиним маршрутизацию — заодно чиним и это;
+      // при выключенном blockAds порядок ничего не меняет.
       {'action': 'sniff'},
+      if (blockAds)
+        {'domain_suffix': _adBlockDomains, 'action': 'reject'},
       {'protocol': 'dns', 'action': 'hijack-dns'},
     ];
 
@@ -332,23 +417,24 @@ class TunnelService {
         'type': 'tun',
         'tag': 'tun-in',
         'interface_name': 'vpnonline-tun',
-        // [ИСПРАВЛЕНО — причина "PlatformException(CONNECT_FAILED, Service
-        // failed to start)" на ВСЕХ серверах разом] У tun-инбаунда не было
-        // поля 'address' — а это обязательное поле в sing-box (см. офиц.
-        // документацию: sing-box.sagernet.org/configuration/inbound/tun/,
-        // во всех примерах конфига оно присутствует). Без него нативное
-        // Go-ядро не может создать сам TUN-интерфейс на уровне ОС — это
-        // происходит ДО любой попытки соединения с сервером, поэтому
-        // ошибка была одинаковой независимо от того, какой ключ/сервер
-        // выбран. Диапазон 172.19.0.1/30 + fdfe:dcba:9876::1/126 — тот же,
-        // что используется в официальных примерах sing-box; это приватный
-        // адрес самого локального интерфейса устройства, а не сервера, и
-        // не пересекается с обычными домашними/офисными подсетями
-        // (192.168.x.x/10.x.x.x), поэтому safe by default.
-        'address': ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
         'mtu': 1500,
+        // strict_route обязателен на Android именно потому, что без него
+        // не работает 'hijack-dns' ниже (см. официальную документацию
+        // sing-box: strict_route "prevents IP address leaks and makes DNS
+        // hijacking work on Android") — трогать не стал.
         'strict_route': true,
-        'stack': 'system',
+        // [ИСПРАВЛЕНО — вторая по важности причина "туннель поднялся, а
+        // трафик не идёт"] Стек 'system' у sing-box на Android заметно
+        // капризнее к конкретному устройству/прошивке/ядру, чем 'mixed':
+        // на части устройств (в первую очередь — с двумя SIM/несколькими
+        // одновременно активными сетевыми интерфейсами, как на скриншоте
+        // пользователя) системный стек не может корректно поднять
+        // маршруты, при этом ошибку наружу не бросает — просто трафик
+        // молча не идёт, а Android всё равно показывает интерфейс как
+        // рабочий. 'mixed' (TCP через системный стек + UDP через gVisor)
+        // — рекомендуемый sing-box'ом баланс совместимости и
+        // производительности для Android, тот же выбор что и у Hiddify.
+        'stack': 'mixed',
         'auto_route': true,
         'endpoint_independent_nat': true,
         if (bypassedPackages.isNotEmpty) 'exclude_package': bypassedPackages,
@@ -357,7 +443,18 @@ class TunnelService {
 
     final config = <String, dynamic>{
       'log': {'level': 'warn'},
-      'dns': {'servers': dnsServers, 'final': 'remote-dns'},
+      // [ИСПРАВЛЕНО] Добавлена явная 'strategy': 'ipv4_only'. Без неё
+      // sing-box может резолвить и адрес самого VLESS-сервера (если он
+      // задан доменом, а не IP), и обычные сайты, в IPv6, если провайдер
+      // формально его "поддерживает", но реально режет/не маршрутизирует
+      // AAAA-адреса (частая ситуация именно у мобильных операторов и на
+      // двух-SIM телефонах, как на скриншоте). Результат — TCP SYN на
+      // IPv6-адрес уходит в никуда без ошибки, соединение просто висит:
+      // те же самые "подключено, 0 МБ туда/обратно", что и на скриншоте,
+      // но уже не из-за самого туннеля, а из-за резолва. ipv4_only убирает
+      // этот сценарий целиком; IPv4 достаточно для полноценной работы
+      // VLESS+Reality.
+      'dns': {'servers': dnsServers, 'final': 'remote-dns', 'strategy': 'ipv4_only'},
       'inbounds': inbounds,
       'outbounds': outbounds,
       'route': {
@@ -476,12 +573,36 @@ class TunnelService {
     }
   }
 
+  /// [НОВОЕ] Реальная проверка того, что пакеты действительно доходят до
+  /// интернета через только что поднятый туннель — см. подробное
+  /// объяснение в вызывающем коде (connect()). Возвращает true, только
+  /// если удалённый сервер реально ответил на запрос за отведённое время.
+  Future<bool> _verifyInternetReachable({required bool proxyOnly}) async {
+    // generate_204 — лёгкий, ничего не весящий эндпоинт для проверки
+    // связности (тот же принцип, что использует сам Android для проверки
+    // captive portal): любой полученный ответ, а не таймаут/исключение,
+    // означает, что соединение реально прошло туда и обратно.
+    final probeUri = Uri.parse('https://cp.cloudflare.com/generate_204');
+    final client = proxyOnly
+        ? IOClient(HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;')
+        : http.Client();
+    try {
+      final response = await client.head(probeUri).timeout(const Duration(seconds: 8));
+      return response.statusCode > 0;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close();
+    }
+  }
+
   Future<void> disconnect() async {
     if (!_initialized) return;
     _userInitiatedDisconnect = true;
     _lastConnectionString = null;
     _autoReconnectAttempt = 0;
     killSwitchBlocking.value = false;
+    _restartDurationTicker(false);
     try {
       await _client.disconnect();
     } catch (e) {
@@ -499,6 +620,7 @@ class TunnelService {
   Future<int?> connectedDelayMs() async => null;
 
   Future<void> dispose() async {
+    _restartDurationTicker(false);
     await _stateSub?.cancel();
     await _statsSub?.cancel();
     await _faultSub?.cancel();
