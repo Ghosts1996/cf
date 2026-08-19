@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
+import '../services/local_prefs.dart';
 import 'plans_screen.dart';
 
 /// Экран «Мои ключи».
@@ -31,10 +32,63 @@ class _KeysScreenState extends State<KeysScreen> {
   String? _error;
   bool _loading = true;
 
+  // [НОВОЕ] Поле "свой ключ" — по прямому требованию: возможность вставить
+  // ссылку на подписку/vless:// вручную, в обход ключей из личного
+  // кабинета (например ту же ссылку, что уже используется в Hiddify).
+  // Хранится через ManualKeyStore (services/local_prefs.dart) — оттуда её
+  // читает ConnectScreen при подключении, см. connect_screen.dart.
+  final _manualKeyController = TextEditingController();
+  bool _manualKeySaving = false;
+
   @override
   void initState() {
     super.initState();
     _load();
+    _loadManualKey();
+  }
+
+  Future<void> _loadManualKey() async {
+    await ManualKeyStore.instance.ensureLoaded();
+    if (mounted) {
+      _manualKeyController.text = ManualKeyStore.instance.value ?? '';
+    }
+  }
+
+  @override
+  void dispose() {
+    _manualKeyController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _saveManualKey() async {
+    final text = _manualKeyController.text.trim();
+    if (text.isNotEmpty && !text.startsWith('vless://') && !text.startsWith('http://') && !text.startsWith('https://')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Похоже на неверную ссылку — жду vless://... или http(s)://ссылку на подписку'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+      return;
+    }
+    setState(() => _manualKeySaving = true);
+    await ManualKeyStore.instance.set(text);
+    if (mounted) {
+      setState(() => _manualKeySaving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(text.isEmpty ? 'Ручной ключ удалён' : 'Ключ сохранён — теперь подключение пойдёт по нему')),
+      );
+    }
+  }
+
+  Future<void> _clearManualKey() async {
+    _manualKeyController.clear();
+    await ManualKeyStore.instance.clear();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ручной ключ удалён — снова используются ключи из личного кабинета')),
+      );
+    }
   }
 
   Future<void> _load() async {
@@ -108,6 +162,14 @@ class _KeysScreenState extends State<KeysScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const AppHeader(trailing: Icons.menu_rounded, screenLabel: 'Мои ключи'),
+            const SizedBox(height: 16),
+            _ManualKeyCard(
+              controller: _manualKeyController,
+              saving: _manualKeySaving,
+              onSave: _saveManualKey,
+              onClear: _clearManualKey,
+            ),
+            const SizedBox(height: 16),
             if (_loading) const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator())),
             if (_error != null)
               Padding(
@@ -244,6 +306,96 @@ class _KeyCard extends StatelessWidget {
               icon: const Icon(Icons.refresh_rounded, size: 16),
               label: const Text('Продлить ключ'),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// [НОВОЕ] Карточка "свой ключ" на экране "Мои ключи" — по прямому
+/// требованию: пользователь может вставить готовую ссылку (vless:// или
+/// http(s)-подписку) вручную, вместо/поверх ключей из личного кабинета.
+/// Полезно, например, когда есть ключ, который уже работает в другом
+/// VPN-клиенте (Hiddify), и его нужно использовать именно так, как есть.
+class _ManualKeyCard extends StatelessWidget {
+  const _ManualKeyCard({
+    required this.controller,
+    required this.saving,
+    required this.onSave,
+    required this.onClear,
+  });
+
+  final TextEditingController controller;
+  final bool saving;
+  final VoidCallback onSave;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    return NeonCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.edit_note_rounded, size: 16, color: AppColors.violetGlow),
+              SizedBox(width: 8),
+              Text('Свой ключ (вручную)', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Вставь vless://-ссылку или ссылку на подписку (например, ту же, '
+            'что используешь в Hiddify) — приложение подключится именно по ней, '
+            'в приоритете перед ключами из личного кабинета. Оставь поле пустым '
+            'и сохрани, чтобы вернуться к ключам из личного кабинета.',
+            style: TextStyle(fontSize: 11.5, color: AppColors.textDim, height: 1.4),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: controller,
+            maxLines: 3,
+            minLines: 1,
+            style: const TextStyle(fontSize: 12, color: AppColors.text),
+            decoration: InputDecoration(
+              hintText: 'vless://... или https://.../sub/...',
+              hintStyle: const TextStyle(fontSize: 12, color: AppColors.textDim),
+              filled: true,
+              fillColor: const Color(0xFF0A0614),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.border),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.border),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.violetGlow),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: saving ? null : onSave,
+                  child: saving
+                      ? const SizedBox(
+                          height: 16,
+                          width: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Сохранить'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton(onPressed: saving ? null : onClear, child: const Text('Удалить')),
+            ],
           ),
         ],
       ),
