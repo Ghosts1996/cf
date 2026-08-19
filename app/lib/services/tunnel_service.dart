@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_singbox_client/flutter_singbox_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
@@ -208,6 +209,20 @@ class TunnelService {
           'Нажми "Подключить" ещё раз и разреши в системном диалоге.',
         );
       }
+      // [ИСПРАВЛЕНО — вторая причина PlatformException(CONNECT_FAILED,
+      // "Service failed to start"), кроме отсутствовавшего раньше
+      // разрешения] Системный диалог VPN-разрешения открывается в отдельной
+      // Activity поверх нашей; `requestVPNPermission()` возвращает `true` в
+      // момент, когда Flutter-engine получает onActivityResult — то есть ДО
+      // того, как наша Activity гарантированно вернулась в состояние
+      // RESUMED и система полностью зафиксировала выданное разрешение на
+      // своей стороне. Если сразу в этот момент запустить VpnService (что
+      // раньше и происходило — `_loadProfiles()`/`_client.connect()` шли
+      // немедленно следующей строкой), нативный старт сервиса иногда падает
+      // с этой самой ошибкой — есть же разрешение, но ОС ещё не готова
+      // поднять сервис. Короткая пауза даёт Activity долистать жизненный
+      // цикл до RESUMED перед первой попыткой подключения.
+      await Future.delayed(const Duration(milliseconds: 350));
     }
 
     final profiles = await _loadProfiles(connectionString);
@@ -228,20 +243,43 @@ class TunnelService {
           proxyOnly: proxyOnly,
         );
         await _client.checkConfig(config);
-        await _client.connect(SessionOptions(
-          config: config,
-          networkMode: proxyOnly ? NetworkMode.proxy : NetworkMode.vpn,
-          notification: NotificationConfig(
-            title: profile.remark.isNotEmpty ? profile.remark : 'VPNOnline',
-            showTrafficStats: true,
-            showStopButton: true,
-            stopButtonLabel: 'Отключить',
-          ),
-        ));
+
+        Future<void> startSession() => _client.connect(SessionOptions(
+              config: config,
+              networkMode: proxyOnly ? NetworkMode.proxy : NetworkMode.vpn,
+              notification: NotificationConfig(
+                title: profile.remark.isNotEmpty ? profile.remark : 'VPNOnline',
+                showTrafficStats: true,
+                showStopButton: true,
+                stopButtonLabel: 'Отключить',
+              ),
+            ));
+
+        try {
+          await startSession();
+        } on PlatformException catch (e) {
+          // [ИСПРАВЛЕНО — главная причина PlatformException(CONNECT_FAILED,
+          // "Service failed to start") на скриншоте, повторяющаяся на ВСЕХ
+          // серверах подряд] Это код ошибки, который нативный слой пакета
+          // отдаёт, когда Android ещё не успел освободить/поднять
+          // VpnService/foreground-сервис — типичная гонка между остановкой
+          // предыдущей сессии (или самим системным диалогом разрешения) и
+          // стартом новой, а не проблема конкретного ключа. Раньше любая
+          // ошибка здесь сразу считалась "сервер не подошёл" и цикл шёл к
+          // следующему профилю — из-за чего одна и та же гонка воспроизводи-
+          // лась заново на каждом из 5 серверов подряд и результат выглядел
+          // как "не работает вообще ничего", хотя сами ключи были рабочими.
+          // Теперь для именно этого кода ошибки сначала честно ждём, чтобы
+          // сервис реально освободился, и пробуем ЕЩЁ РАЗ тот же профиль
+          // один раз, прежде чем переходить к следующему серверу.
+          if (e.code != 'CONNECT_FAILED') rethrow;
+          await _settleAfterDisconnect();
+          await startSession();
+        }
 
         final reallyConnected = await _waitForConnected(Duration(seconds: 12));
         if (!reallyConnected) {
-          await _client.disconnect();
+          await _settleAfterDisconnect();
           lastFailure = 'VPN не подключился за 12 сек (ядра sing-box требуют время для инициализации туннеля)';
           continue;
         }
@@ -276,7 +314,7 @@ class TunnelService {
         // отдельную ветку.
         final internetReachable = await _verifyInternetReachable(proxyOnly: proxyOnly);
         if (!internetReachable) {
-          await _client.disconnect();
+          await _settleAfterDisconnect();
           lastFailure = 'Туннель поднялся, но интернет через него не идёт (сервер "${profile.remark}" не отвечает) — пробуем следующий';
           continue;
         }
@@ -292,13 +330,52 @@ class TunnelService {
         return connectedName;
       } catch (e) {
         lastFailure = e;
-        try { await _client.disconnect(); } catch (_) {}
+        await _settleAfterDisconnect();
         continue;
       }
     }
     throw TunnelException(
       'Не удалось подключиться ни к одному серверу (${ordered.length} исп.): $lastFailure',
     );
+  }
+
+  /// [НОВОЕ] Останавливает текущую сессию и ждёт, пока сервис реально
+  /// перейдёт в disconnected (не дольше 1.5 сек), прежде чем возвращать
+  /// управление — вместо fire-and-forget `_client.disconnect()`, который
+  /// раньше стоял здесь. Останавливать VpnService/foreground-сервис на
+  /// Android — асинхронная операция; если следующая попытка подключения
+  /// (следующий сервер в списке) стартует РАНЬШЕ, чем ОС успела освободить
+  /// предыдущую сессию, нативный старт падает с той же
+  /// PlatformException(CONNECT_FAILED, "Service failed to start"), что и на
+  /// скриншоте — даже если сам ключ и конфиг полностью рабочие. Небольшая
+  /// пауза после подтверждённого disconnected — дополнительный запас,
+  /// потому что событие "disconnected" от плагина не всегда означает, что
+  /// ОС уже освободила системные ресурсы сервиса (порт TUN, foreground-
+  /// уведомление и т.д.) на 100%.
+  Future<void> _settleAfterDisconnect() async {
+    try {
+      await _client.disconnect();
+    } catch (_) {}
+    if (status.value?.state != TunnelConnState.disconnected) {
+      final completer = Completer<void>();
+      VoidCallback? listener;
+      final timer = Timer(const Duration(milliseconds: 1500), () {
+        if (!completer.isCompleted) completer.complete();
+      });
+      listener = () {
+        if (status.value?.state == TunnelConnState.disconnected && !completer.isCompleted) {
+          completer.complete();
+        }
+      };
+      status.addListener(listener);
+      try {
+        await completer.future;
+      } finally {
+        timer.cancel();
+        status.removeListener(listener);
+      }
+    }
+    await Future.delayed(const Duration(milliseconds: 350));
   }
 
   static const _proxyPort = 2080;
@@ -332,7 +409,6 @@ class TunnelService {
             'public_key': p.pbk,
             if (p.sid != null && p.sid!.isNotEmpty) 'short_id': p.sid,
           },
-        if (dpiBypass) 'fragment': true,
       };
     }
 
@@ -397,6 +473,32 @@ class TunnelService {
       if (blockAds)
         {'domain_suffix': _adBlockDomains, 'action': 'reject'},
       {'protocol': 'dns', 'action': 'hijack-dns'},
+      // [ИСПРАВЛЕНО] Раньше DPI-обход включался как `'fragment': true`
+      // прямо внутри блока `tls` исходящего vless — это устаревший, давно
+      // убранный формат: в самом sing-box, начиная с 1.12.0, фрагментация
+      // TLS-хендшейка — не свойство исходящего соединения, а ОПЦИЯ ДЕЙСТВИЯ
+      // ПРАВИЛА МАРШРУТИЗАЦИИ (`route`/`route-options`, поле `tls_fragment`,
+      // см. sing-box.sagernet.org/configuration/route/rule_action и
+      // /changelog — "Compatibility for old formats will be removed in
+      // sing-box 1.14.0"). Этот пакет использует именно ядро 1.14.0-alpha —
+      // старый булев `fragment` внутри `tls` там не существует как поле
+      // вообще, поэтому `checkConfig()`/`connect()` с ним гарантированно
+      // упали бы, как только пользователь включил тумблер "Обход DPI" в
+      // настройках (по умолчанию тумблер выключен, поэтому раньше это не
+      // всплывало на каждом подключении, но всплыло бы при первом же
+      // включении). Правильная замена — отдельное правило, которое явно
+      // направляет TCP-трафик пользователя на `proxy` с включённой
+      // фрагментацией именно TLS-хендшейка ВНУТРИ туннеля (обычный HTTPS
+      // пользователя, а не сам VLESS+Reality хендшейк до сервера — тот и
+      // так не детектируется DPI по конструкции REALITY, фрагментировать
+      // его незачем и нечем на этом уровне).
+      if (dpiBypass)
+        {
+          'network': 'tcp',
+          'action': 'route',
+          'outbound': 'proxy',
+          'tls_fragment': {'enabled': true},
+        },
     ];
 
     final outbounds = <Map<String, dynamic>>[
@@ -616,6 +718,28 @@ class TunnelService {
   Future<void> openSystemVpnSettingsHint() async {
     await AppSettings.openAppSettings(type: AppSettingsType.vpn);
   }
+
+  /// [НОВОЕ] Deep-link для импорта той же самой подписки/ключа напрямую в
+  /// Hiddify — официальная, документированная схема самого приложения
+  /// Hiddify (github.com/hiddify/hiddify-app/wiki/URL-Scheme):
+  /// `hiddify://install-sub?url=<encoded-url>#<name>`. Даёт пользователю
+  /// гарантированно рабочий путь тем же ключом (ядро Hiddify — тот же
+  /// sing-box, на котором и так уже построен туннель в этом приложении),
+  /// если по какой-то причине встроенное подключение всё равно не
+  /// поднимается на конкретном устройстве/сети. Сама подписка не меняется
+  /// и никак не зависит от того, установлен Hiddify или нет — ссылку
+  /// строим всегда, а решение, что делать, если приложение не установлено
+  /// (открыть страницу в Google Play), остаётся на стороне UI.
+  static Uri buildHiddifyImportUri(String connectionString, {String label = 'VPN onLine'}) {
+    final encodedUrl = Uri.encodeComponent(connectionString.trim());
+    final encodedLabel = Uri.encodeComponent(label);
+    return Uri.parse('hiddify://install-sub?url=$encodedUrl#$encodedLabel');
+  }
+
+  /// Страница Hiddify в Google Play — используется как фолбэк, если сам
+  /// deep-link выше не открылся (Hiddify не установлен на устройстве).
+  static final Uri hiddifyPlayStoreUri =
+      Uri.parse('https://play.google.com/store/apps/details?id=app.hiddify.com');
 
   Future<int?> connectedDelayMs() async => null;
 
