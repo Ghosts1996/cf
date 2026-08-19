@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
+          token: ${{ secrets.WORKFLOW_PAT }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -49,10 +50,10 @@ jobs:
       - name: 🧠 AI Whole-Project Code Fix (Python Engine)
         id: ai_optimize
         env:
-          USER_PROMPT: \${{ github.event.inputs.prompt }}
-          MODEL_CHOICE: \${{ github.event.inputs.model }}
-          AITUNNEL_BASE_URL: \${{ secrets.AITUNNEL_BASE_URL }}
-          AITUNNEL_API_KEY: \${{ secrets.AITUNNEL_API_KEY }}
+          USER_PROMPT: ${{ github.event.inputs.prompt }}
+          MODEL_CHOICE: ${{ github.event.inputs.model }}
+          AITUNNEL_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
         run: |
           echo "📝 Создаем защищенный Python-скрипт..."
           
@@ -123,8 +124,12 @@ jobs:
                   file_content = []
                   
                   for line in lines:
-                      if '[FILE:' in line:
-                          current_file = line.split('[FILE:')[-1].split(']').strip()
+                      if '[FILE' in line and current_file is None:
+                          # Принимаем оба варианта разметки: "[FILE: path]" и "[FILE path]"
+                          marker = line.split('[FILE', 1)[-1]
+                          if marker.startswith(':'):
+                              marker = marker[1:]
+                          current_file = marker.split(']')[0].strip()
                           file_content = []
                           print(f'🛠 ИИ принял решение обновить файл: {current_file}')
                       elif '[END_FILE]' in line and current_file:
@@ -136,7 +141,7 @@ jobs:
                       elif current_file:
                           file_content.append(line)
                           
-                  if '[FILE:' not in ai_text:
+                  if '[FILE' not in ai_text:
                       print('⚠️ ИИ прислал плоский код без разметки. Записываем напрямую в tunnel_service.dart...')
                       clean_code = ai_text.replace('```dart', '').replace('```', '').strip()
                       os.makedirs('app/lib/services', exist_ok=True)
@@ -151,14 +156,41 @@ jobs:
           # Запускаем созданный файл на выполнение
           python3 ai_run.py
 
-      - name: Push Code Changes
+      - name: Push Code Changes to a New Branch
+        id: push_branch
         continue-on-error: true
         run: |
           git config --global user.name "AITUNNEL-Bot"
           git config --global user.email "bot@aitunnel.ru"
-          git add .
-          git commit -m "Super AI Safe Fix: Autonomous Multi-File Project Update" || echo "No changes to commit"
-          git push
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            BRANCH="ai-fix/${{ github.run_id }}"
+            git checkout -b "$BRANCH"
+            git add .
+            git commit -m "Super AI Safe Fix: Autonomous Multi-File Project Update"
+            git push origin "$BRANCH"
+            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open Pull Request for Review
+        if: steps.push_branch.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.WORKFLOW_PAT }}
+          branch: ${{ steps.push_branch.outputs.branch }}
+          base: main
+          title: "🤖 AI fix: ${{ github.event.inputs.prompt }}"
+          body: |
+            Автоматические изменения от Super Multi-AI Safe Builder.
+
+            **Промпт:** ${{ github.event.inputs.prompt }}
+            **Модель:** ${{ github.event.inputs.model }}
+
+            ⚠️ Проверьте diff перед merge — изменения применены ИИ без ревью.
+          labels: ai-generated
 
       - name: Build Android APK
         run: |
