@@ -21,6 +21,16 @@
          останавливает такой сервис при уходе приложения в фон). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <!-- [ИСПРАВЛЕНО — причина "PlatformException(CONNECT_FAILED, Service
+         failed to start)"] Начиная с Android 14 (API 34) каждый
+         android:foregroundServiceType требует СВОЁ отдельное разрешение.
+         Для типа "vpn" (его использует нативный foreground-сервис пакета
+         flutter_singbox_client, держащий tun-интерфейс) это разрешение —
+         FOREGROUND_SERVICE_VPN. Без него система отказывает в запуске
+         foreground-сервиса с этим типом ещё до того, как код доходит до
+         поднятия самого VPN — отсюда ошибка сразу на всех серверах, а не
+         на каком-то одном ключе. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_VPN"/>
     <!-- [НОВОЕ] Android 13+ (API 33+) требует отдельное runtime-разрешение
          на показ ЛЮБЫХ уведомлений, включая постоянное уведомление туннеля
          (NotificationConfig в tunnel_service.dart, showTrafficStats/
