@@ -86,5 +86,21 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- [НОВОЕ] Нужно для кнопки "Открыть в Hiddify" (connect_screen.dart
+             ::_openInHiddify(), TunnelService.buildHiddifyImportUri()).
+             QUERY_ALL_PACKAGES выше формально уже даёт эту видимость, но это
+             чувствительное разрешение, которое Google Play отдельно
+             проверяет при публикации (нужно обоснование в Play Console на
+             каждое использование) — начиная с Android 11 (API 30) есть
+             более узкий и предпочтительный способ для конкретно этого
+             случая: явно объявить именно ту схему (hiddify://), которую
+             реально запускаем через url_launcher. Без этой записи
+             `launchUrl()`/`canLaunchUrl()` на API 30+ могут не увидеть
+             установленный Hiddify и всегда уходить в фолбэк на Google Play,
+             даже если приложение реально стоит на устройстве. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="hiddify"/>
+        </intent>
     </queries>
 </manifest>
