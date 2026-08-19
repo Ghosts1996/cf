@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          token: ${{ secrets.WORKFLOW_PAT }}
+          token: ${{ secrets.WORKFLOW_PAT || github.token }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -113,7 +113,7 @@ jobs:
           try:
               with urllib.request.urlopen(req, timeout=600) as response:
                   res_data = json.loads(response.read().decode('utf-8'))
-                  ai_text = res_data['choices']['message']['content']
+                  ai_text = res_data['choices'][0]['message']['content']
                   print('✅ Запрос выполнен успешно! Разбираем структуру ответа ИИ...')
                   
                   if '<think>' in ai_text: 
@@ -179,7 +179,7 @@ jobs:
         if: steps.push_branch.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.WORKFLOW_PAT }}
+          token: ${{ secrets.WORKFLOW_PAT || github.token }}
           branch: ${{ steps.push_branch.outputs.branch }}
           base: main
           title: "🤖 AI fix: ${{ github.event.inputs.prompt }}"
