@@ -148,6 +148,28 @@ class TunnelService {
     final bypassedMap = await LocalPrefs.instance.getBoolMap(PrefKeys.splitTunnelBypass);
     final bypassedPackages = bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
 
+    // [ИСПРАВЛЕНО — причина краша приложения при нажатии "Подключить"]
+    // Раньше здесь сразу шёл _loadProfiles()/_client.connect() без запроса
+    // системного разрешения на поднятие VPN. По README пакета
+    // flutter_singbox_client разрешение обязано быть запрошено ДО connect()
+    // в режиме VPN: `if (!await client.requestVPNPermission()) return;`.
+    // Без этого шага Android получает от нативного кода VpnService.prepare(),
+    // который не был согласован пользователем через системный диалог — и
+    // падает НАТИВНО (Kotlin/JNI), минуя Dart try/catch целиком. Именно это
+    // выглядит как "приложение вылетает" без единого сообщения об ошибке в
+    // интерфейсе. В proxy-only режиме (SOCKS5/HTTP локальный прокси, без
+    // системного VPN-интерфейса) этот диалог не нужен — запрашиваем только
+    // когда реально поднимаем VPN.
+    if (!proxyOnly) {
+      final granted = await _client.requestVPNPermission();
+      if (!granted) {
+        throw TunnelException(
+          'Нужно разрешение на VPN-подключение — без него Android не даст поднять туннель. '
+          'Нажми "Подключить" ещё раз и разреши в системном диалоге.',
+        );
+      }
+    }
+
     final profiles = await _loadProfiles(connectionString);
     final preferred = _matchProfile(profiles, preferredHostName);
     final ordered = preferred != null 
