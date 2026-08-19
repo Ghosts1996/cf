@@ -49,10 +49,11 @@ jobs:
       - name: 🧠 AI Whole-Project Code Fix (Python Engine)
         id: ai_optimize
         env:
-          USER_PROMPT: \${{ github.event.inputs.prompt }}
-          MODEL_CHOICE: \${{ github.event.inputs.model }}
-          AITUNNEL_BASE_URL: \${{ secrets.AITUNNEL_BASE_URL }}
-          AITUNNEL_API_KEY: \${{ secrets.AITUNNEL_API_KEY }}
+          USER_PROMPT: ${{ github.event.inputs.prompt }}
+          MODEL_CHOICE: ${{ github.event.inputs.model }}
+          AITUNNEL_BASE_URL: ${{ secrets.AITUNNEL_BASE_URL }}
+          AITUNNEL_API_KEY: ${{ secrets.AITUNNEL_API_KEY }}
+          SYSTEM_INSTRUCTION: "Ты старший инженер Flutter/Android. Тебе дан ПОЛНЫЙ доступ на чтение и запись всех файлов репозитория. Изучи переданный код. Исправь ошибку Connection failed под формат ключей Hiddify (настройки DNS, маршруты sing-box, MethodChannel vpnvless/fallback). Добавь в меню Мои ключи выбор активного ключа через shared_preferences. Защити приложение от вылетов на Android 14+ добавив foregroundServiceType=vpn в AndroidManifest.xml. Можешь изменять и перезаписывать ЛЮБЫЕ файлы проекта. Твой ответ должен содержать только блоки измененных файлов в строгом формате разметки: [FILE: путь/к/файлу] тут код [END_FILE]. Не используй маркдаун теги."
         run: |
           python3 -c "
           import os, sys, json, urllib.request
@@ -60,6 +61,7 @@ jobs:
           url = os.getenv('AITUNNEL_BASE_URL', '').rstrip('/')
           api_key = os.getenv('AITUNNEL_API_KEY', '')
           model = os.getenv('MODEL_CHOICE', 'deepseek-r1')
+          sys_prompt = os.getenv('SYSTEM_INSTRUCTION', '')
           print('🔍 Python собирает файлы Flutter-приложения...')
           project_bundle = []
           for root, dirs, files in os.walk('app'):
@@ -73,7 +75,6 @@ jobs:
              except: pass
           bundle_text = '\n'.join(project_bundle)
           print(f'📦 Успешно упаковано файлов: {len(project_bundle)}')
-          sys_prompt = 'Ты старший инженер Flutter/Android. Тебе дан ПОЛНЫЙ доступ на чтение и запись всех файлов репозитория. Изучи переданный код. Исправь ошибку Connection failed под формат ключей Hiddify (настройки DNS, маршруты sing-box, MethodChannel vpnvless/fallback). Добавь в меню Мои ключи выбор активного ключа ( shared_preferences). Защити приложение от вылетов на Android 14+ (foregroundServiceType=vpn в AndroidManifest.xml). Можешь изменять и перезаписывать ЛЮБЫЕ файлы проекта. Твой ответ должен содержать только блоки измененных файлов в строгом формате разметки: [FILE: путь/к/файлу] тут код [END_FILE]. Не используй маркдаун теги ```dart.'
           payload = {'model': model, 'messages': [{'role': 'system', 'content': sys_prompt}, {'role': 'user', 'content': f'Задача: {prompt}\n\nКод проекта:\n\n{bundle_text}'}], 'max_tokens': 32000}
           print('📡 Отправляем запрос на шлюз AITUNNEL...')
           req = urllib.request.Request(f'{url}/chat/completions', data=json.dumps(payload).encode('utf-8'), headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}, method='POST')
@@ -98,7 +99,7 @@ jobs:
               current_file = None
              elif current_file:
               file_content.append(line)
-            if not ai_text.contains('[FILE:'):
+            if '[FILE:' not in ai_text:
              print('⚠️ ИИ прислал плоский код без разметки. Записываем напрямую в tunnel_service.dart...')
              clean_code = ai_text.replace('```dart', '').replace('```', '').strip()
              os.makedirs('app/lib/services', exist_ok=True)
