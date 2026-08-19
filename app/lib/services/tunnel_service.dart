@@ -276,7 +276,16 @@ class TunnelService {
     ];
 
     final routeRules = <Map<String, dynamic>>[
-      {'geoip': ['private'], 'outbound': 'direct'},
+      // [ИСПРАВЛЕНО] geoip:'private' убран — база GeoIP объявлена deprecated
+      // в sing-box 1.8.0 и полностью удалена в 1.12.0 (см. официальный
+      // Migration guide: sing-box.sagernet.org/migration). Именно это
+      // вызывало ошибку "geoip database is deprecated ... removed in
+      // sing-box 1.12.0" и разрыв соединения на 5 из 5 серверов.
+      // Официальная замена — булево поле ip_is_private: не требует
+      // скачивания/хранения никакой базы данных, матчит приватные диапазоны
+      // (10.0.0.0/8, 192.168.0.0/16, 127.0.0.0/8 и т.д.) прямо в бинарнике
+      // sing-box.
+      {'ip_is_private': true, 'outbound': 'direct'},
       if (blockAds) 
         {'domain_suffix': _adBlockDomains, 'action': 'reject'},
       {'action': 'sniff'},
