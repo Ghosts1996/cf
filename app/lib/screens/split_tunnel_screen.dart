@@ -90,12 +90,6 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
     }
   }
 
-  /// Пакеты, которые пользователь пометил "в обход VPN" — готово для
-  /// передачи в нативный слой, когда/если flutter_vless станет это
-  /// поддерживать (см. docstring класса).
-  List<String> get _bypassedPackages =>
-      _bypassed.entries.where((e) => e.value).map((e) => e.key).toList();
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
