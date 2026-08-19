@@ -55,6 +55,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
   // "истёк ли ключ, к которому подключён живой туннель".
   int? _connectedKeyId;
   Timer? _keyWatchTimer;
+  // [НОВОЕ] Ключ, вставленный пользователем вручную на экране "Мои ключи"
+  // (см. keys_screen.dart + services/local_prefs.dart::ManualKeyStore).
+  // Если задан — используется ВМЕСТО ключа из личного кабинета (API),
+  // см. _effectiveConnectionString ниже.
+  String? _manualKey;
   // [НОВОЕ] Флаг "уже пробовали автоподключение в этой сессии экрана" —
   // без него автоподключение пыталось бы сработать при КАЖДОМ обновлении
   // _activeKey (а не только один раз при первом открытии экрана), включая
@@ -76,6 +81,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
     // (не по нажатию "Отключить") и идёт попытка восстановления, экран
     // должен это явно показать, а не молча остаться в "подключено".
     _tunnel.killSwitchBlocking.addListener(_onTunnelStatus);
+    _manualKey = ManualKeyStore.instance.value;
+    ManualKeyStore.instance.notifier.addListener(_onManualKeyChanged);
+    ManualKeyStore.instance.ensureLoaded();
     _loadKeyState();
     // [НОВОЕ — по прямому требованию] Раньше список ключей перечитывался
     // ТОЛЬКО при открытии экрана и при нажатии "Подключить"/"Отключить" —
@@ -96,6 +104,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     SelectedServer.displayName.removeListener(_onTunnelStatus);
     _tunnel.connectedServerName.removeListener(_onTunnelStatus);
     _tunnel.killSwitchBlocking.removeListener(_onTunnelStatus);
+    ManualKeyStore.instance.notifier.removeListener(_onManualKeyChanged);
     _keyWatchTimer?.cancel();
     super.dispose();
   }
@@ -103,6 +112,31 @@ class _ConnectScreenState extends State<ConnectScreen> {
   void _onTunnelStatus() {
     if (mounted) setState(() {});
   }
+
+  /// [НОВОЕ] Реагирует на сохранение/удаление ручного ключа на экране "Мои
+  /// ключи" прямо во время работы приложения — не только при перезапуске.
+  void _onManualKeyChanged() {
+    if (!mounted) return;
+    setState(() => _manualKey = ManualKeyStore.instance.value);
+    if (_tunnel.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ключ обновлён. Переподключись, чтобы применить его.')),
+      );
+    }
+  }
+
+  /// [НОВОЕ] Ссылка на конфигурацию, которая реально пойдёт в
+  /// TunnelService.connect(): ручной ключ, если он задан, иначе — ключ из
+  /// личного кабинета (API). Ручной ключ приоритетнее: если пользователь
+  /// сам вставил ссылку, значит он осознанно хочет использовать именно её
+  /// (например, ту же самую подписку, что уже настроена и работает в
+  /// Hiddify), а не автоматически выбранный ключ из магазина.
+  String? get _effectiveConnectionString {
+    if (_manualKey != null && _manualKey!.trim().isNotEmpty) return _manualKey!.trim();
+    return _activeKey?['connection_string'] as String?;
+  }
+
+  bool get _hasManualKey => _manualKey != null && _manualKey!.trim().isNotEmpty;
 
   /// Код локации для ServerPill — те же первые буквы имени, что и на
   /// ServersScreen (см. `_codeFromName` там), чтобы отображение не
@@ -161,7 +195,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
       if (!_autoConnectTried) {
         _autoConnectTried = true;
         final autoConnect = await LocalPrefs.instance.getBool(PrefKeys.autoConnect, fallback: true);
-        if (autoConnect && _activeKey != null && !_tunnel.isConnected && !_tunnel.isBusy) {
+        if (autoConnect &&
+            (_activeKey != null || _hasManualKey) &&
+            !_tunnel.isConnected &&
+            !_tunnel.isBusy) {
           unawaited(_toggleConnection());
         }
       }
@@ -207,6 +244,14 @@ class _ConnectScreenState extends State<ConnectScreen> {
         return eb.compareTo(ea);
       });
     final newBest = active.isNotEmpty ? active.first : null;
+
+    if (_hasManualKey && _tunnel.isConnected) {
+      // Туннель поднят на ручном ключе — у него нет expiry_date из API,
+      // поэтому логика "истёк/не истёк" сюда неприменима. Не трогаем
+      // рабочее соединение.
+      setState(() => _activeKey = newBest ?? _activeKey);
+      return;
+    }
 
     if (!_tunnel.isConnected || _connectedKeyId == null) {
       // Туннель не поднят прямо сейчас — просто освежаем список для UI.
@@ -289,8 +334,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
   }
 
   Future<void> _toggleConnection() async {
-    if (_activeKey == null || _connecting || _tunnel.isBusy) return;
-    final connectionString = _activeKey!['connection_string'] as String?;
+    if ((_activeKey == null && !_hasManualKey) || _connecting || _tunnel.isBusy) return;
+    final connectionString = _effectiveConnectionString;
 
     if (_tunnel.isConnected) {
       setState(() => _connecting = true);
@@ -317,7 +362,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
       // туннель — нужно для _recheckKeyExpiry(), чтобы отличать "истёк
       // именно рабочий ключ" от "появился ещё более длинный ключ где-то
       // среди прочих" (см. докстринг метода выше).
-      _connectedKeyId = (_activeKey!['key_id'] as num?)?.toInt();
+      // Для ручного ключа key_id не существует (он не из API) — null, и
+      // _recheckKeyExpiry() просто не трогает соединение на ручном ключе.
+      _connectedKeyId = _hasManualKey ? null : (_activeKey?['key_id'] as num?)?.toInt();
       _measureLatency();
     } on TunnelException catch (e) {
       _showError(e.message);
@@ -367,7 +414,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final hasKey = _activeKey != null;
+    final hasKey = _activeKey != null || _hasManualKey;
     final connected = _tunnel.isConnected;
     final s = _tunnel.status.value;
     final devicesLimit = hasKey ? (_activeKey!['devices_limit'] as num?)?.toInt() : null;
@@ -377,6 +424,18 @@ class _ConnectScreenState extends State<ConnectScreen> {
       child: Column(
         children: [
           const AppHeader(trailing: Icons.menu_rounded, screenLabel: 'Подключение'),
+          if (_hasManualKey)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.edit_note_rounded, size: 14, color: AppColors.violetGlow),
+                  const SizedBox(width: 6),
+                  const Text('Используется ключ, добавленный вручную',
+                      style: TextStyle(fontSize: 11, color: AppColors.violetGlow, fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
           const SizedBox(height: 18),
           if (_tunnel.killSwitchBlocking.value)
             Container(
