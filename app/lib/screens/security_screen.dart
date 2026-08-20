@@ -29,6 +29,12 @@ class _SecurityScreenState extends State<SecurityScreen> {
   bool _killSwitch = true;
   bool _dnsProtection = false;
   bool _blockAds = false;
+  // [НОВОЕ] "Агрессивное переподключение" — настраиваемое число попыток
+  // восстановления соединения. false = 3 попытки (мягко,
+  // экономит батарею при долгом отсутствии сети), true = 8 попыток
+  // (пытается дольше на нестабильных сетях). Реально читается
+  // TunnelService.connect() при каждом подключении — см. tunnel_service.dart.
+  bool _aggressiveReconnect = false;
   bool _loaded = false;
 
   @override
@@ -44,14 +50,26 @@ class _SecurityScreenState extends State<SecurityScreen> {
       // tunnel_service.dart, чтобы UI не расходился с реальным конфигом.
       _prefs.getBool(PrefKeys.dnsProtection, fallback: false),
       _prefs.getBool(PrefKeys.blockAds, fallback: false),
+      _prefs.getInt(PrefKeys.reconnectAttempts, fallback: 3),
     ]);
     if (!mounted) return;
     setState(() {
-      _killSwitch = results[0];
-      _dnsProtection = results[1];
-      _blockAds = results[2];
+      _killSwitch = results[0] as bool;
+      _dnsProtection = results[1] as bool;
+      _blockAds = results[2] as bool;
+      _aggressiveReconnect = (results[3] as int) > 3;
       _loaded = true;
     });
+  }
+
+  /// [НОВОЕ] Реальная настройка, не декоративная — TunnelService.connect()
+  /// читает settings.reconnect_attempts при каждом подключении и именно
+  /// столько раз подряд пытается восстановить туннель после неожиданного
+  /// обрыва, прежде чем сдаться и показать предупреждение "интернет БЕЗ
+  /// защиты VPN".
+  Future<void> _setAggressiveReconnect(bool v) async {
+    setState(() => _aggressiveReconnect = v);
+    await _prefs.setInt(PrefKeys.reconnectAttempts, v ? 8 : 3);
   }
 
   @override
@@ -143,6 +161,21 @@ class _SecurityScreenState extends State<SecurityScreen> {
                             setState(() => _blockAds = v);
                             await _prefs.setBool(PrefKeys.blockAds, v);
                           },
+                        ),
+                      ),
+                      const Divider(height: 20),
+                      // [НОВОЕ] Настраиваемая "живучесть" Kill Switch —
+                      // реально влияет на TunnelService.connect(), см.
+                      // _setAggressiveReconnect выше.
+                      _Row(
+                        icon: Icons.replay_circle_filled_rounded,
+                        title: 'Агрессивное переподключение',
+                        subtitle: _aggressiveReconnect
+                            ? 'До 8 попыток восстановить туннель при обрыве'
+                            : 'До 3 попыток восстановить туннель при обрыве',
+                        trailing: NeonToggle(
+                          value: _aggressiveReconnect,
+                          onChanged: _setAggressiveReconnect,
                         ),
                       ),
                     ],
