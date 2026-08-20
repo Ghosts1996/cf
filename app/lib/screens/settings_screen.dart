@@ -39,7 +39,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _killSwitch = true;
   bool _dpiBypass = false;
   bool _proxyOnly = false;
+  // [НОВОЕ] Выбор DNS-over-HTTPS резолвера. Реально прокидывается в конфиг
+  // sing-box через TunnelService.connect()/_buildSingBoxConfig, а не
+  // просто хранится "для галочки" — см. tunnel_service.dart.
+  String _dnsProvider = 'cloudflare';
   bool _loaded = false;
+
+  static const _dnsProviderLabels = {
+    'cloudflare': 'Cloudflare (1.1.1.1)',
+    'google': 'Google (8.8.8.8)',
+    'adguard': 'AdGuard (94.140.14.14)',
+    'quad9': 'Quad9 (9.9.9.9)',
+  };
 
   @override
   void initState() {
@@ -57,6 +68,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
     ]);
+    final savedDnsProvider = await _prefs.getString(PrefKeys.dnsServerProvider);
     if (!mounted) return;
     setState(() {
       _autoConnect = results[0];
@@ -64,6 +76,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _killSwitch = results[2];
       _dpiBypass = results[3];
       _proxyOnly = results[4];
+      _dnsProvider = (savedDnsProvider != null && _dnsProviderLabels.containsKey(savedDnsProvider))
+          ? savedDnsProvider
+          : 'cloudflare';
       _loaded = true;
     });
   }
@@ -116,6 +131,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _setSmartWifi(bool v) async {
     setState(() => _smartWifi = v);
     await _prefs.setBool(PrefKeys.smartWifi, v);
+  }
+
+  /// [НОВОЕ] Реальная настройка — сохраняет провайдера DNS-over-HTTPS и
+  /// применяется при следующем подключении (см. _buildSingBoxConfig в
+  /// tunnel_service.dart). Если туннель сейчас активен, честно
+  /// предупреждаем, что нужно переподключиться, а не создаём иллюзию
+  /// мгновенного эффекта (та же логика, что у _setDpiBypass выше).
+  Future<void> _setDnsProvider(String? v) async {
+    if (v == null) return;
+    setState(() => _dnsProvider = v);
+    await _prefs.setString(PrefKeys.dnsServerProvider, v);
+    if (mounted && TunnelService.instance.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас')),
+      );
+    }
   }
 
   Future<void> _setKillSwitch(bool v) async {
@@ -234,6 +265,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _SettingsRow(
                   label: 'Язык',
                   trailing: const Text('Русский', style: TextStyle(color: AppColors.textDim, fontSize: 12)),
+                ),
+                _SettingsRow(
+                  label: 'DNS-сервер',
+                  trailing: DropdownButton<String>(
+                    value: _dnsProvider,
+                    underline: const SizedBox.shrink(),
+                    dropdownColor: AppColors.bgCard,
+                    style: const TextStyle(color: AppColors.textDim, fontSize: 12),
+                    items: _dnsProviderLabels.entries
+                        .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
+                        .toList(),
+                    onChanged: _setDnsProvider,
+                  ),
                 ),
                 _SettingsRow(
                   label: 'Очистить кэш',
