@@ -4,6 +4,7 @@ import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
 import '../services/local_prefs.dart';
+import '../services/tunnel_service.dart';
 import 'plans_screen.dart';
 
 /// Экран «Мои ключи».
@@ -34,11 +35,13 @@ class _KeysScreenState extends State<KeysScreen> {
 
   // [НОВОЕ] Поле "свой ключ" — по прямому требованию: возможность вставить
   // ссылку на подписку/vless:// вручную, в обход ключей из личного
-  // кабинета (например ту же ссылку, что уже используется в Hiddify).
+  // кабинета.
   // Хранится через ManualKeyStore (services/local_prefs.dart) — оттуда её
   // читает ConnectScreen при подключении, см. connect_screen.dart.
   final _manualKeyController = TextEditingController();
   bool _manualKeySaving = false;
+  // [НОВОЕ] Флаг загрузки для кнопки "Проверить ключ" — см. _validateManualKey.
+  bool _manualKeyValidating = false;
 
   @override
   void initState() {
@@ -77,6 +80,62 @@ class _KeysScreenState extends State<KeysScreen> {
       setState(() => _manualKeySaving = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(text.isEmpty ? 'Ручной ключ удалён' : 'Ключ сохранён — теперь подключение пойдёт по нему')),
+      );
+    }
+  }
+
+  /// [НОВОЕ] "Проверить ключ" — реально скачивает и расшифровывает
+  /// подписку/ссылку из поля (тем же кодом, что и подключение — см.
+  /// TunnelService.checkSubscription()) и честно показывает, сколько
+  /// рабочих серверов в ней нашлось, БЕЗ подъёма самого туннеля. Нужно
+  /// именно для того, чтобы проверять формат ссылок вроде
+  /// `https://.../sub/<uuid>` до того, как жать "Подключить" на главном
+  /// экране — если тут ключ не распознаётся, туннель тоже не поднимется,
+  /// и это будет видно сразу, с понятным списком причин.
+  Future<void> _validateManualKey() async {
+    final text = _manualKeyController.text.trim();
+    if (text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Сначала вставь vless://-ссылку или ссылку на подписку')),
+      );
+      return;
+    }
+    setState(() => _manualKeyValidating = true);
+    final result = await TunnelService.instance.checkSubscription(text);
+    if (!mounted) return;
+    setState(() => _manualKeyValidating = false);
+    if (result.ok) {
+      showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: AppColors.bgCard,
+          title: Text('Найдено серверов: ${result.serverCount}'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: result.serverNames
+                  .map((name) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.check_circle_rounded, size: 16, color: AppColors.success),
+                            const SizedBox(width: 8),
+                            Expanded(child: Text(name, style: const TextStyle(fontSize: 13))),
+                          ],
+                        ),
+                      ))
+                  .toList(),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Ок')),
+          ],
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result.error ?? 'Ключ не распознан'), backgroundColor: AppColors.danger),
       );
     }
   }
@@ -166,8 +225,10 @@ class _KeysScreenState extends State<KeysScreen> {
             _ManualKeyCard(
               controller: _manualKeyController,
               saving: _manualKeySaving,
+              validating: _manualKeyValidating,
               onSave: _saveManualKey,
               onClear: _clearManualKey,
+              onValidate: _validateManualKey,
             ),
             const SizedBox(height: 16),
             if (_loading) const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator())),
@@ -317,19 +378,23 @@ class _KeyCard extends StatelessWidget {
 /// требованию: пользователь может вставить готовую ссылку (vless:// или
 /// http(s)-подписку) вручную, вместо/поверх ключей из личного кабинета.
 /// Полезно, например, когда есть ключ, который уже работает в другом
-/// VPN-клиенте (Hiddify), и его нужно использовать именно так, как есть.
+/// VPN-клиенте, и его нужно использовать именно так, как есть.
 class _ManualKeyCard extends StatelessWidget {
   const _ManualKeyCard({
     required this.controller,
     required this.saving,
+    required this.validating,
     required this.onSave,
     required this.onClear,
+    required this.onValidate,
   });
 
   final TextEditingController controller;
   final bool saving;
+  final bool validating;
   final VoidCallback onSave;
   final VoidCallback onClear;
+  final VoidCallback onValidate;
 
   @override
   Widget build(BuildContext context) {
@@ -346,10 +411,9 @@ class _ManualKeyCard extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           const Text(
-            'Вставь vless://-ссылку или ссылку на подписку (например, ту же, '
-            'что используешь в Hiddify) — приложение подключится именно по ней, '
-            'в приоритете перед ключами из личного кабинета. Оставь поле пустым '
-            'и сохрани, чтобы вернуться к ключам из личного кабинета.',
+            'Вставь vless://-ссылку или ссылку на подписку — приложение подключится '
+            'именно по ней, в приоритете перед ключами из личного кабинета. Оставь поле '
+            'пустым и сохрани, чтобы вернуться к ключам из личного кабинета.',
             style: TextStyle(fontSize: 11.5, color: AppColors.textDim, height: 1.4),
           ),
           const SizedBox(height: 12),
@@ -396,6 +460,26 @@ class _ManualKeyCard extends StatelessWidget {
               const SizedBox(width: 10),
               OutlinedButton(onPressed: saving ? null : onClear, child: const Text('Удалить')),
             ],
+          ),
+          const SizedBox(height: 10),
+          // [НОВОЕ] Проверяет ссылку прямо сейчас — реально скачивает и
+          // расшифровывает подписку (тот же код, что и подключение, см.
+          // TunnelService.checkSubscription) и показывает список найденных
+          // серверов, БЕЗ подъёма туннеля. Полезно именно для диагностики
+          // ссылок вида https://.../sub/<uuid> до нажатия "Подключить".
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: validating ? null : onValidate,
+              icon: validating
+                  ? const SizedBox(
+                      height: 14,
+                      width: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.fact_check_rounded, size: 16),
+              label: const Text('Проверить ключ'),
+            ),
           ),
         ],
       ),
