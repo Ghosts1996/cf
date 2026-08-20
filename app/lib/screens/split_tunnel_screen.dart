@@ -37,7 +37,12 @@ class SplitTunnelScreen extends StatefulWidget {
 class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
   final _prefs = LocalPrefs.instance;
   List<AppInfo> _apps = [];
-  final Map<String, bool> _bypassed = {}; // packageName -> "идёт в обход VPN"
+  final Map<String, bool> _bypassed = {}; // packageName -> "отмечено в списке"
+  // [НОВОЕ] Режим — см. PrefKeys.splitTunnelMode.
+  // 'exclude' — отмеченные приложения идут В ОБХОД VPN (как раньше).
+  // 'include' — ТОЛЬКО отмеченные приложения идут через VPN (режим Hiddify
+  // "разрешить VPN только для выбранных приложений").
+  String _mode = 'exclude';
   bool _loading = true;
   String? _error;
 
@@ -53,6 +58,8 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
     // (значения по умолчанию), а потом "дёрнулась" бы после чтения из
     // хранилища. Загружаем оба источника параллельно и объединяем один раз.
     final savedBypassed = await _prefs.getBoolMap(PrefKeys.splitTunnelBypass);
+    final savedMode = await _prefs.getString(PrefKeys.splitTunnelMode);
+    if (savedMode == 'include' || savedMode == 'exclude') _mode = savedMode!;
     if (!Platform.isAndroid) {
       setState(() {
         _bypassed.addAll(savedBypassed);
@@ -90,8 +97,19 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
     }
   }
 
+  /// [НОВОЕ] Переключение режима 'exclude' <-> 'include' — реально
+  /// прокидывается в tunnel_service.dart::_buildSingBoxConfig
+  /// (include_package/exclude_package на tun-инбаунде) при следующем
+  /// подключении.
+  Future<void> _setMode(String mode) async {
+    if (mode == _mode) return;
+    setState(() => _mode = mode);
+    await _prefs.setString(PrefKeys.splitTunnelMode, mode);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final isInclude = _mode == 'include';
     return Scaffold(
       body: SafeArea(
         child: Column(
@@ -103,11 +121,42 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
                 children: [
                   AppHeader(trailing: Icons.arrow_back_rounded, onTrailingTap: () => Navigator.pop(context)),
                   const Text('Split-туннелирование', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Выбери, какие приложения работают в обход VPN — например банк или локальные сервисы. '
-                    'Список — реальные приложения с этого устройства.',
-                    style: TextStyle(color: AppColors.textDim, fontSize: 11, height: 1.5),
+                  const SizedBox(height: 10),
+                  // [НОВОЕ] Сегментированный переключатель режима — как
+                  // "VPN для всех / выбранных приложений" в Hiddify.
+                  Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      color: AppColors.bgCard,
+                      border: Border.all(color: AppColors.border),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _ModeSegment(
+                            label: 'Обход выбранных',
+                            selected: !isInclude,
+                            onTap: () => _setMode('exclude'),
+                          ),
+                        ),
+                        Expanded(
+                          child: _ModeSegment(
+                            label: 'Только выбранные',
+                            selected: isInclude,
+                            onTap: () => _setMode('include'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    isInclude
+                        ? 'Через VPN работают ТОЛЬКО отмеченные ниже приложения — остальные всегда напрямую.'
+                        : 'Отмеченные ниже приложения работают в обход VPN — например банк или локальные сервисы. '
+                            'Список — реальные приложения с этого устройства.',
+                    style: const TextStyle(color: AppColors.textDim, fontSize: 11, height: 1.5),
                   ),
                   const SizedBox(height: 10),
                 ],
@@ -169,6 +218,40 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// [НОВОЕ] Один сегмент переключателя режима 'exclude'/'include' на
+/// экране Split-туннелирования — простая кнопка-таб без внешних зависимостей.
+class _ModeSegment extends StatelessWidget {
+  const _ModeSegment({required this.label, required this.selected, required this.onTap});
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.violet2.withValues(alpha: 0.18) : Colors.transparent,
+          borderRadius: BorderRadius.circular(9),
+          border: selected ? Border.all(color: AppColors.violet2.withValues(alpha: 0.5)) : null,
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            color: selected ? AppColors.violetGlow : AppColors.textDim,
+          ),
         ),
       ),
     );
