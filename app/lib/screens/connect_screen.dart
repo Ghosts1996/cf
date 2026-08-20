@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
@@ -131,7 +130,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
   /// личного кабинета (API). Ручной ключ приоритетнее: если пользователь
   /// сам вставил ссылку, значит он осознанно хочет использовать именно её
   /// (например, ту же самую подписку, что уже настроена и работает в
-  /// Hiddify), а не автоматически выбранный ключ из магазина.
+  /// другом VPN-клиенте), а не автоматически выбранный ключ из магазина.
   String? get _effectiveConnectionString {
     if (_manualKey != null && _manualKey!.trim().isNotEmpty) return _manualKey!.trim();
     return _activeKey?['connection_string'] as String?;
@@ -376,43 +375,25 @@ class _ConnectScreenState extends State<ConnectScreen> {
     }
   }
 
-  /// [НОВОЕ] Открывает ту же подписку/ключ напрямую в Hiddify — см.
-  /// TunnelService.buildHiddifyImportUri(). Официальная deep-link схема
-  /// самого Hiddify; если приложение не установлено, launchUrl молча не
-  /// находит обработчика intent'а — в этом случае откатываемся на страницу
-  /// Hiddify в Google Play, чтобы кнопка не выглядела нерабочей.
-  Future<void> _openInHiddify(String connectionString) async {
-    final deepLink = TunnelService.buildHiddifyImportUri(connectionString);
-    var opened = false;
-    try {
-      opened = await launchUrl(deepLink, mode: LaunchMode.externalApplication);
-    } catch (_) {
-      opened = false;
-    }
-    if (!opened && mounted) {
-      try {
-        await launchUrl(TunnelService.hiddifyPlayStoreUri, mode: LaunchMode.externalApplication);
-      } catch (_) {}
-    }
-  }
-
   void _showError(String message, {String? fallbackConnectionString}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
         backgroundColor: AppColors.danger,
-        // [НОВОЕ] Если это ошибка именно подключения (передан ключ, а не
-        // просто предупреждение вроде "нет ссылки на сервер") — даём
-        // быстрый выход: тот же ключ, но через Hiddify (то же ядро
-        // sing-box, которое уже используется тут — просто другой клиент,
-        // проверенный на подобных ключах пользователя).
+        // [ИЗМЕНЕНО] Раньше здесь было быстрое переключение на сторонний
+        // клиент тем же ключом. Вместо этого при ошибке
+        // подключения ведём в системные настройки VPN на устройстве — это
+        // помогает в самом частом реальном сценарии таких ошибок:
+        // разрешение на VPN отозвано вручную или его удерживает другое
+        // VPN-приложение, и без похода в системные настройки это не
+        // починить программно.
         action: fallbackConnectionString == null
             ? null
             : SnackBarAction(
-                label: 'Hiddify',
+                label: 'Настройки VPN',
                 textColor: AppColors.violet2,
-                onPressed: () => _openInHiddify(fallbackConnectionString),
+                onPressed: () => _tunnel.openSystemVpnSettingsHint(),
               ),
         duration: fallbackConnectionString == null
             ? const Duration(seconds: 4)
