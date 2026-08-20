@@ -46,6 +46,17 @@ class LocalPrefs {
     await sp.setBool(key, value);
   }
 
+  // ── generic int (например: количество попыток авто-переподключения) ──
+  Future<int> getInt(String key, {int fallback = 0}) async {
+    final sp = await _sp;
+    return sp.getInt(key) ?? fallback;
+  }
+
+  Future<void> setInt(String key, int value) async {
+    final sp = await _sp;
+    await sp.setInt(key, value);
+  }
+
   // ── generic string ────────────────────────────────────────────────────
   Future<String?> getString(String key) async {
     final sp = await _sp;
@@ -105,6 +116,14 @@ class PrefKeys {
   // "Use NetworkMode.proxy when you only need HTTP/SOCKS proxy ports
   // without requesting VPN permission").
   static const proxyOnlyMode = 'settings.proxy_only_mode';
+  // [НОВОЕ] Провайдер DNS-over-HTTPS, который использует туннель для
+  // резолва внешних доменов (см. tunnel_service.dart::_buildSingBoxConfig).
+  // Хранит один из: 'cloudflare' | 'google' | 'adguard' | 'quad9'.
+  static const dnsServerProvider = 'settings.dns_server_provider';
+  // [НОВОЕ] Сколько раз подряд Kill Switch пытается автоматически
+  // восстановить туннель после неожиданного обрыва, прежде чем сдаться и
+  // показать пользователю, что защита снята — см. tunnel_service.dart.
+  static const reconnectAttempts = 'security.reconnect_attempts';
   static const favoriteServers = 'servers.favorites';
   static const autoBalance = 'servers.auto_balance';
   static const selectedServerId = 'servers.selected_id';
