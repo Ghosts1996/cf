@@ -43,6 +43,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // sing-box через TunnelService.connect()/_buildSingBoxConfig, а не
   // просто хранится "для галочки" — см. tunnel_service.dart.
   String _dnsProvider = 'cloudflare';
+  // [НОВОЕ] Свой DNS-сервер (см. PrefKeys.customDnsServer) — как "Custom DNS"
+  // в Hiddify. Используется, когда _dnsProvider == 'custom'.
+  final _customDnsController = TextEditingController();
+  // [НОВОЕ] Разрешить IPv6 в туннеле — см. PrefKeys.ipv6Enabled и
+  // подробный докстринг в tunnel_service.dart::_buildSingBoxConfig.
+  bool _ipv6Enabled = false;
   bool _loaded = false;
 
   static const _dnsProviderLabels = {
@@ -50,7 +56,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     'google': 'Google (8.8.8.8)',
     'adguard': 'AdGuard (94.140.14.14)',
     'quad9': 'Quad9 (9.9.9.9)',
+    'custom': 'Свой DNS…',
   };
+
+  @override
+  void dispose() {
+    _customDnsController.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -67,8 +80,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       // при необходимости (совпадает с fallback в tunnel_service.dart).
       _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
+      _prefs.getBool(PrefKeys.ipv6Enabled, fallback: false),
     ]);
     final savedDnsProvider = await _prefs.getString(PrefKeys.dnsServerProvider);
+    final savedCustomDns = await _prefs.getString(PrefKeys.customDnsServer);
     if (!mounted) return;
     setState(() {
       _autoConnect = results[0];
@@ -76,9 +91,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _killSwitch = results[2];
       _dpiBypass = results[3];
       _proxyOnly = results[4];
+      _ipv6Enabled = results[5];
       _dnsProvider = (savedDnsProvider != null && _dnsProviderLabels.containsKey(savedDnsProvider))
           ? savedDnsProvider
           : 'cloudflare';
+      _customDnsController.text = savedCustomDns ?? '';
       _loaded = true;
     });
   }
@@ -145,6 +162,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас')),
+      );
+    }
+  }
+
+  /// [НОВОЕ] Сохраняет пользовательский DNS-адрес по мере ввода (когда
+  /// выбран провайдер 'custom') — реально прокидывается в конфиг sing-box
+  /// на следующем подключении, см. tunnel_service.dart::_buildSingBoxConfig
+  /// (resolvedDnsServer).
+  Future<void> _setCustomDnsServer(String v) async {
+    await _prefs.setString(PrefKeys.customDnsServer, v);
+    if (mounted && TunnelService.instance.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас')),
+      );
+    }
+  }
+
+  /// [НОВОЕ] IPv6 в туннеле — см. PrefKeys.ipv6Enabled.
+  Future<void> _setIpv6Enabled(bool v) async {
+    setState(() => _ipv6Enabled = v);
+    await _prefs.setBool(PrefKeys.ipv6Enabled, v);
+    if (mounted && TunnelService.instance.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы включить сейчас')),
       );
     }
   }
@@ -278,6 +319,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         .toList(),
                     onChanged: _setDnsProvider,
                   ),
+                ),
+                // [НОВОЕ] Поле для своего DNS-адреса, показывается только
+                // когда выбран 'custom' в списке выше.
+                if (_dnsProvider == 'custom')
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: TextField(
+                      controller: _customDnsController,
+                      onChanged: _setCustomDnsServer,
+                      style: const TextStyle(fontSize: 12, color: AppColors.text),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: 'Например: 9.9.9.11',
+                        hintStyle: const TextStyle(color: AppColors.textDim, fontSize: 12),
+                        filled: true,
+                        fillColor: AppColors.bgCard,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: AppColors.border),
+                        ),
+                      ),
+                    ),
+                  ),
+                // [НОВОЕ] IPv6 — см. _setIpv6Enabled выше.
+                _SettingsRow(
+                  label: 'Разрешить IPv6 в туннеле',
+                  trailing: NeonToggle(value: _ipv6Enabled, onChanged: _setIpv6Enabled),
                 ),
                 _SettingsRow(
                   label: 'Очистить кэш',
