@@ -16,6 +16,14 @@ class TunnelService {
   final SingboxClient _client = SingboxClient();
   bool _initialized = false;
   bool _killSwitchEnabled = true;
+  // [НОВОЕ] См. PrefKeys.strictKillSwitch — включает поведение "физически
+  // блокировать трафик", а не только "пытаться переподключиться".
+  bool _strictKillSwitchEnabled = false;
+  // [НОВОЕ] true, пока активна служебная блокирующая сессия (см.
+  // _engageHardKillSwitch) — используется, чтобы не пытаться поднять её
+  // повторно и чтобы disconnect()/connect() знали, что нужно сначала снять
+  // именно её, а не обычную сессию.
+  bool _hardKillSwitchEngaged = false;
   bool _userInitiatedDisconnect = false;
   String? _lastConnectionString;
   String? _lastPreferredHostName;
@@ -37,6 +45,11 @@ class TunnelService {
   final ValueNotifier<TunnelStatus?> status = ValueNotifier(null);
   final ValueNotifier<String?> lastError = ValueNotifier(null);
   final ValueNotifier<bool> killSwitchBlocking = ValueNotifier(false);
+  // [НОВОЕ] true, когда именно строгий Kill Switch физически держит
+  // интернет заблокированным (после исчерпания попыток авто-переподключения)
+  // — отдельно от killSwitchBlocking (тот включается уже на первой попытке
+  // переподключения и означает просто "сейчас идёт восстановление").
+  final ValueNotifier<bool> hardKillSwitchActive = ValueNotifier(false);
   final ValueNotifier<String?> connectedServerName = ValueNotifier(null);
   final ValueNotifier<String?> localProxyAddress = ValueNotifier(null);
 
@@ -55,6 +68,12 @@ class TunnelService {
     await _client.initialize();
 
     _stateSub = _client.serviceStateStream.listen((state) {
+      // [НОВОЕ] Пока активна служебная блокирующая сессия строгого Kill
+      // Switch (см. _engageHardKillSwitch/_disengageHardKillSwitch) — её
+      // собственные события состояния не должны затрагивать публичный
+      // status/duration/трафик обычного туннеля и не должны запускать
+      // обычную логику авто-переподключения через _onStatusChanged.
+      if (_hardKillSwitchEngaged) return;
       final mapped = _mapServiceState(state);
       final prevDownload = status.value?.download ?? 0;
       final prevUpload = status.value?.upload ?? 0;
@@ -143,7 +162,16 @@ class TunnelService {
     if (_userInitiatedDisconnect) return;
     if (_lastConnectionString == null) return;
     if (!_killSwitchEnabled) return;
-    if (_autoReconnectAttempt >= _maxAutoReconnectAttempts) return;
+    // [ИЗМЕНЕНО] Раньше при исчерпании попыток авто-переподключения метод
+    // просто молча выходил (return) — устройство оставалось с обычным,
+    // незащищённым интернетом, а UI по-прежнему мог показывать
+    // killSwitchBlocking == true чуть раньше в цикле. Теперь при
+    // исчерпании попыток, если включён строгий Kill Switch, физически
+    // поднимаем блокирующую сессию вместо того, чтобы просто сдаться.
+    if (_autoReconnectAttempt >= _maxAutoReconnectAttempts) {
+      if (_strictKillSwitchEnabled) _engageHardKillSwitch();
+      return;
+    }
 
     killSwitchBlocking.value = true;
     _autoReconnectAttempt++;
@@ -153,8 +181,117 @@ class TunnelService {
         await connect(_lastConnectionString!, preferredHostName: _lastPreferredHostName);
         killSwitchBlocking.value = false;
         _autoReconnectAttempt = 0;
-      } catch (_) {}
+      } catch (_) {
+        // connect() сам исчерпает попытки и снова придёт сюда через
+        // _onStatusChanged при следующем disconnected — здесь специально
+        // ничего не делаем, чтобы не задваивать логику исчерпания попыток.
+      }
     });
+  }
+
+  /// [НОВОЕ] Настоящий Kill Switch — физически блокирует трафик, поднимая
+  /// служебную VPN-сессию с конфигом, у которого нет рабочего внешнего
+  /// outbound'а (route.final = 'block'): пакеты, которые раньше улетали бы
+  /// напрямую через мобильную сеть/Wi-Fi в обход упавшего туннеля, теперь
+  /// просто отбрасываются на уровне TUN-интерфейса. Именно так реализован
+  /// Kill Switch в Hiddify — это не настройка ОС, а собственная "заглушка"
+  /// вместо реального туннеля, которая держит системный маршрут на себя.
+  /// Автоматически снимается, как только пользователь нажмёт "Отключить"
+  /// (disconnect()) или начнётся новое обычное подключение (connect()).
+  Future<void> _engageHardKillSwitch() async {
+    if (_hardKillSwitchEngaged) return;
+    if (_userInitiatedDisconnect) return;
+    // [ВАЖНО] Флаг взводится ДО await, а не после успешного connect() —
+    // serviceStateStream у плагина может прислать промежуточные события
+    // ('connecting'/'connected' самой блокирующей сессии) ещё во время
+    // выполнения await ниже. Guard в _ensureInitialized (см. выше по файлу)
+    // проверяет именно этот флаг, чтобы не дать состоянию служебной сессии
+    // просочиться в публичный status/duration/трафик обычного туннеля.
+    _hardKillSwitchEngaged = true;
+    try {
+      final blockConfig = _buildBlockAllConfig();
+      await _client.checkConfig(blockConfig);
+      await _client.connect(SessionOptions(
+        config: blockConfig,
+        networkMode: NetworkMode.vpn,
+        notification: const NotificationConfig(
+          title: 'VPNOnline — трафик заблокирован',
+          showTrafficStats: false,
+          showStopButton: true,
+          stopButtonLabel: 'Отключить',
+        ),
+      ));
+      hardKillSwitchActive.value = true;
+    } catch (e) {
+      // Если даже блокирующую сессию поднять не удалось (например, нет
+      // самого VPN-разрешения) — честно откатываем флаг и оставляем
+      // lastError, но не рушим остальной поток управления. killSwitchBlocking
+      // всё ещё сигнализирует пользователю в UI, что защиты сейчас нет.
+      _hardKillSwitchEngaged = false;
+      lastError.value = 'Не удалось включить строгую блокировку трафика: $e';
+    }
+  }
+
+  /// Снимает служебную блокирующую сессию (см. _engageHardKillSwitch), если
+  /// она сейчас активна. Безопасно вызывать всегда — если сессии нет, ничего
+  /// не делает.
+  Future<void> _disengageHardKillSwitch() async {
+    if (!_hardKillSwitchEngaged) return;
+    try {
+      await _client.disconnect();
+    } catch (_) {}
+    // [ВАЖНО] _hardKillSwitchEngaged намеренно остаётся true ещё чуть-чуть
+    // после disconnect() — пока флаг true, guard в serviceStateStream-
+    // листенере (_ensureInitialized) игнорирует событие 'disconnected' от
+    // ИМЕННО этой блокирующей сессии. Без этой паузы событие прошло бы как
+    // обычный обрыв туннеля и заново запустило бы цикл авто-переподключения
+    // поверх того подключения, которое и так следующим шагом запускает
+    // вызвавший этот метод код (connect()/disconnect()).
+    await Future.delayed(const Duration(milliseconds: 250));
+    _hardKillSwitchEngaged = false;
+    hardKillSwitchActive.value = false;
+    _autoReconnectAttempt = 0;
+  }
+
+  /// Минимальный конфиг sing-box без внешнего outbound'а — только TUN-
+  /// инбаунд, чей единственный маршрут (`route.final`) — `block`. Валидный
+  /// sing-box-конфиг обязан содержать хотя бы один outbound, поэтому
+  /// добавлены `block` и `dns-out` (стандартные встроенные типы) — оба
+  /// ничего никуда не пересылают.
+  String _buildBlockAllConfig() {
+    final config = <String, dynamic>{
+      'log': {'level': 'warn'},
+      'dns': {
+        'servers': [
+          {'type': 'local', 'tag': 'local-dns'},
+        ],
+        'final': 'local-dns',
+      },
+      'inbounds': [
+        {
+          'type': 'tun',
+          'tag': 'tun-in',
+          'interface_name': 'vpnonline-killswitch',
+          'mtu': 1500,
+          'strict_route': true,
+          'stack': 'mixed',
+          'auto_route': true,
+          'endpoint_independent_nat': true,
+        },
+      ],
+      'outbounds': [
+        {'type': 'block', 'tag': 'block'},
+        {'type': 'dns', 'tag': 'dns-out'},
+      ],
+      'route': {
+        'auto_detect_interface': true,
+        'final': 'block',
+        'rules': [
+          {'protocol': 'dns', 'outbound': 'dns-out'},
+        ],
+      },
+    };
+    return jsonEncode(config);
   }
 
   Future<List<String>> listProfileNames(String connectionString) async {
@@ -189,10 +326,27 @@ class TunnelService {
     final dpiBypass = await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: false);
     final proxyOnly = await LocalPrefs.instance.getBool(PrefKeys.proxyOnlyMode, fallback: false);
     final dnsProvider = await LocalPrefs.instance.getString(PrefKeys.dnsServerProvider) ?? 'cloudflare';
+    final customDns = await LocalPrefs.instance.getString(PrefKeys.customDnsServer);
     _killSwitchEnabled = await LocalPrefs.instance.getBool(PrefKeys.killSwitch, fallback: true);
+    // [НОВОЕ] Строгий Kill Switch — см. докстринг PrefKeys.strictKillSwitch
+    // и _engageHardKillSwitch ниже. Читается заранее, чтобы _onStatusChanged
+    // знал, нужно ли поднимать служебную блокирующую сессию, когда обычное
+    // авто-переподключение исчерпает попытки.
+    _strictKillSwitchEnabled = await LocalPrefs.instance.getBool(PrefKeys.strictKillSwitch, fallback: false);
     _maxAutoReconnectAttempts = await LocalPrefs.instance.getInt(PrefKeys.reconnectAttempts, fallback: 3);
     final bypassedMap = await LocalPrefs.instance.getBoolMap(PrefKeys.splitTunnelBypass);
-    final bypassedPackages = bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
+    final splitTunnelMode = await LocalPrefs.instance.getString(PrefKeys.splitTunnelMode) ?? 'exclude';
+    final selectedPackages = bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
+    final bypassLan = await LocalPrefs.instance.getBool(PrefKeys.bypassLan, fallback: true);
+    final muxEnabled = await LocalPrefs.instance.getBool(PrefKeys.muxEnabled, fallback: false);
+    final muxProtocol = await LocalPrefs.instance.getString(PrefKeys.muxProtocol) ?? 'h2mux';
+    final fakeIpDns = await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: false);
+    final ipv6Enabled = await LocalPrefs.instance.getBool(PrefKeys.ipv6Enabled, fallback: false);
+
+    // Если сейчас активна служебная "блокирующая" сессия Kill Switch (см.
+    // _engageHardKillSwitch), её нужно снять перед обычным подключением —
+    // иначе новая сессия конкурирует с ней за системный TUN-интерфейс.
+    await _disengageHardKillSwitch();
 
     // [ИСПРАВЛЕНО — причина краша приложения при нажатии "Подключить"]
     // Раньше здесь сразу шёл _loadProfiles()/_client.connect() без запроса
@@ -244,9 +398,16 @@ class TunnelService {
           dnsProtection: dnsProtection,
           blockAds: blockAds,
           dpiBypass: dpiBypass,
-          bypassedPackages: bypassedPackages,
+          selectedPackages: selectedPackages,
+          splitTunnelMode: splitTunnelMode,
           proxyOnly: proxyOnly,
           dnsProvider: dnsProvider,
+          customDns: customDns,
+          bypassLan: bypassLan,
+          muxEnabled: muxEnabled,
+          muxProtocol: muxProtocol,
+          fakeIpDns: fakeIpDns,
+          ipv6Enabled: ipv6Enabled,
         );
         await _client.checkConfig(config);
 
@@ -391,9 +552,18 @@ class TunnelService {
     required bool dnsProtection,
     required bool blockAds,
     required bool dpiBypass,
-    required List<String> bypassedPackages,
+    required List<String> selectedPackages,
     bool proxyOnly = false,
     String dnsProvider = 'cloudflare',
+    String? customDns,
+    // 'exclude' — selectedPackages идут в обход VPN (старое поведение).
+    // 'include' — ТОЛЬКО selectedPackages идут через VPN.
+    String splitTunnelMode = 'exclude',
+    bool bypassLan = true,
+    bool muxEnabled = false,
+    String muxProtocol = 'h2mux',
+    bool fakeIpDns = false,
+    bool ipv6Enabled = false,
   }) {
     final outbound = <String, dynamic>{
       'type': 'vless',
@@ -402,6 +572,17 @@ class TunnelService {
       'server_port': p.port,
       'uuid': p.uuid,
       if (p.flow != null && p.flow!.isNotEmpty) 'flow': p.flow,
+      // [НОВОЕ] Mux — см. PrefKeys.muxEnabled. Несовместим с flow
+      // (xtls-rprx-vision и подобные потоки сами управляют TCP-соединением
+      // на уровне TLS и не могут быть завёрнуты в дополнительный
+      // мультиплексор) — поэтому включается, только если flow не задан,
+      // ровно как это ограничение работает и в самом sing-box/Hiddify.
+      if (muxEnabled && (p.flow == null || p.flow!.isEmpty))
+        'multiplex': {
+          'enabled': true,
+          'protocol': muxProtocol,
+          'max_streams': 8,
+        },
     };
 
     if (p.security == 'reality' || p.security == 'tls') {
@@ -457,13 +638,42 @@ class TunnelService {
       'adguard': '94.140.14.14',
       'quad9': '9.9.9.9',
     };
+    // [НОВОЕ] Провайдер 'custom' — пользовательский DNS-адрес с экрана
+    // "Настройки" (см. PrefKeys.customDnsServer). Если пользователь выбрал
+    // custom, но не указал адрес — тихо откатываемся на Cloudflare, чтобы
+    // не отправлять sing-box заведомо пустой server и не ронять конфиг.
+    final resolvedDnsServer = dnsProvider == 'custom' && customDns != null && customDns.trim().isNotEmpty
+        ? customDns.trim()
+        : (dnsProviderIps[dnsProvider] ?? dnsProviderIps['cloudflare']);
+
+    // [НОВОЕ] Fake IP (см. PrefKeys.fakeIpDns, как в Hiddify: Settings ->
+    // DNS -> Fake IP). Домены внутри туннеля резолвятся в адреса из
+    // служебных диапазонов 198.18.0.0/15 (IPv4) и fc00::/18 (IPv6) —
+    // реальный домен подставляется обратно за счёт того же sniffing,
+    // который уже используется для блокировки рекламы (route.rules
+    // 'action': 'sniff' ниже). Формат — официальный dns.fakeip блок
+    // sing-box, ничего специфичного не выдумано.
     final dnsServers = <Map<String, dynamic>>[
       {
         'type': 'https',
         'tag': 'remote-dns',
-        'server': dnsProviderIps[dnsProvider] ?? dnsProviderIps['cloudflare'],
+        'server': resolvedDnsServer,
         if (dnsProtection) 'detour': 'proxy',
       },
+      if (fakeIpDns)
+        {
+          'type': 'fakeip',
+          'tag': 'fakeip',
+          'inet4_range': '198.18.0.0/15',
+          'inet6_range': 'fc00::/18',
+        },
+    ];
+    final dnsRules = <Map<String, dynamic>>[
+      if (fakeIpDns)
+        {
+          'query_type': ['A', 'AAAA'],
+          'server': 'fakeip',
+        },
     ];
 
     final routeRules = <Map<String, dynamic>>[
@@ -476,7 +686,11 @@ class TunnelService {
       // скачивания/хранения никакой базы данных, матчит приватные диапазоны
       // (10.0.0.0/8, 192.168.0.0/16, 127.0.0.0/8 и т.д.) прямо в бинарнике
       // sing-box.
-      {'ip_is_private': true, 'outbound': 'direct'},
+      // [НОВОЕ] Теперь под условием bypassLan (по умолчанию true, как в
+      // Hiddify) — выключив тумблер "Обход локальной сети" на экране
+      // "Безопасность", пользователь заворачивает LAN-трафик в туннель тоже
+      // (например, чтобы достучаться до ресурсов в сети самого VPN-сервера).
+      if (bypassLan) {'ip_is_private': true, 'outbound': 'direct'},
       // [ИСПРАВЛЕНО] 'sniff' переставлен ПЕРЕД доменной блокировкой
       // рекламы. В TUN-режиме на вход попадают голые IP-пакеты без домена
       // — единственный источник поля "domain" для правила ниже это как
@@ -557,7 +771,22 @@ class TunnelService {
         'stack': 'mixed',
         'auto_route': true,
         'endpoint_independent_nat': true,
-        if (bypassedPackages.isNotEmpty) 'exclude_package': bypassedPackages,
+        // [НОВОЕ] IPv6 внутри туннеля (см. PrefKeys.ipv6Enabled). Когда
+        // выключено (по умолчанию) — поле 'address' не задаётся вовсе,
+        // ровно как раньше (sing-box сам поднимает стандартный IPv4-адрес
+        // TUN-интерфейса) — поведение по умолчанию не меняется ни на бит.
+        // Когда включено — добавляем IPv6-подсеть к уже поднимаемой
+        // sing-box'ом стандартной IPv4, чтобы AAAA-трафик тоже пошёл через
+        // туннель, а не утёк напрямую в обычную сеть.
+        if (ipv6Enabled) 'address': ['172.19.0.1/28', 'fdfe:dcba:9876::1/126'],
+        // [НОВОЕ] Режим split-tunnel — см. PrefKeys.splitTunnelMode и
+        // докстринг параметра splitTunnelMode выше. sing-box не позволяет
+        // задать include_package и exclude_package одновременно, поэтому
+        // всегда ровно одно из двух полей, в зависимости от режима.
+        if (selectedPackages.isNotEmpty && splitTunnelMode == 'include')
+          'include_package': selectedPackages,
+        if (selectedPackages.isNotEmpty && splitTunnelMode != 'include')
+          'exclude_package': selectedPackages,
       });
     }
 
@@ -574,7 +803,25 @@ class TunnelService {
       // но уже не из-за самого туннеля, а из-за резолва. ipv4_only убирает
       // этот сценарий целиком; IPv4 достаточно для полноценной работы
       // VLESS+Reality.
-      'dns': {'servers': dnsServers, 'final': 'remote-dns', 'strategy': 'ipv4_only'},
+      // [НОВОЕ] Когда пользователь осознанно включил IPv6 (ipv6Enabled) —
+      // используем 'prefer_ipv4' вместо жёсткого 'ipv4_only': резолвер
+      // по-прежнему предпочитает IPv4-адрес при прочих равных (не
+      // возвращается тот же самый баг с висящими SYN на части сетей), но
+      // при отсутствии A-записи честно отдаёт AAAA, а не молча отбрасывает
+      // домен целиком, как было бы со strategy: 'ipv4_only'.
+      'dns': {
+        'servers': dnsServers,
+        if (dnsRules.isNotEmpty) 'rules': dnsRules,
+        // 'final' — это фолбэк, когда ни одно правило (dnsRules) не
+        // сработало. fakeIpDns подключается через отдельное правило выше
+        // (query_type A/AAAA -> server fakeip), поэтому final всегда
+        // остаётся настоящим резолвером, а не fakeip — иначе, например,
+        // запросы других типов (TXT, MX и т.д.) тоже ушли бы в fakeip и
+        // просто не получили бы ответа.
+        'final': 'remote-dns',
+        'strategy': ipv6Enabled ? 'prefer_ipv4' : 'ipv4_only',
+        'independent_cache': true,
+      },
       'inbounds': inbounds,
       'outbounds': outbounds,
       'route': {
@@ -871,6 +1118,16 @@ class TunnelService {
     _autoReconnectAttempt = 0;
     killSwitchBlocking.value = false;
     _restartDurationTicker(false);
+    // [НОВОЕ] Если сейчас активна служебная блокирующая сессия строгого Kill
+    // Switch — снимаем именно её. _disengageHardKillSwitch сама проверяет
+    // _hardKillSwitchEngaged и ничего не делает, если её нет, поэтому
+    // безопасно вызывать всегда перед обычным disconnect().
+    if (_hardKillSwitchEngaged) {
+      await _disengageHardKillSwitch();
+      connectedServerName.value = null;
+      localProxyAddress.value = null;
+      return;
+    }
     try {
       await _client.disconnect();
     } catch (e) {
