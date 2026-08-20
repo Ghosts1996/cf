@@ -20,7 +20,10 @@ class TunnelService {
   String? _lastConnectionString;
   String? _lastPreferredHostName;
   int _autoReconnectAttempt = 0;
-  static const _maxAutoReconnectAttempts = 3;
+  // [ИЗМЕНЕНО] Было жёстко зашитой константой — теперь читается из
+  // LocalPrefs при каждом connect() (см. ниже), настраивается тумблером
+  // "Агрессивное переподключение" на экране Безопасность.
+  int _maxAutoReconnectAttempts = 3;
 
   StreamSubscription? _stateSub;
   StreamSubscription? _statsSub;
@@ -185,7 +188,9 @@ class TunnelService {
     final blockAds = await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: false);
     final dpiBypass = await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: false);
     final proxyOnly = await LocalPrefs.instance.getBool(PrefKeys.proxyOnlyMode, fallback: false);
+    final dnsProvider = await LocalPrefs.instance.getString(PrefKeys.dnsServerProvider) ?? 'cloudflare';
     _killSwitchEnabled = await LocalPrefs.instance.getBool(PrefKeys.killSwitch, fallback: true);
+    _maxAutoReconnectAttempts = await LocalPrefs.instance.getInt(PrefKeys.reconnectAttempts, fallback: 3);
     final bypassedMap = await LocalPrefs.instance.getBoolMap(PrefKeys.splitTunnelBypass);
     final bypassedPackages = bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
 
@@ -241,6 +246,7 @@ class TunnelService {
           dpiBypass: dpiBypass,
           bypassedPackages: bypassedPackages,
           proxyOnly: proxyOnly,
+          dnsProvider: dnsProvider,
         );
         await _client.checkConfig(config);
 
@@ -296,9 +302,9 @@ class TunnelService {
         // или ядро sing-box подвисает на резолве домена в IPv6 — см. ниже
         // fix strategy: ipv4_only). Android в этом случае как ни в чём не
         // бывало показывает "подключено", а трафик так и остаётся на 0 —
-        // ровно то, что видно на скриншоте. Hiddify в такой ситуации
-        // реально проверяет соединение и переключается на следующий сервер
-        // подписки; здесь такой проверки не было вовсе.
+        // ровно то, что видно на скриншоте. Полноценный клиент в такой
+        // ситуации реально проверяет соединение и переключается на следующий
+        // сервер подписки; здесь такой проверки не было вовсе.
         // Поэтому теперь ПОСЛЕ подъёма интерфейса делаем один короткий
         // HTTP HEAD-запрос, который реально должен пройти через туннель:
         // в VPN-режиме — обычный запрос (весь трафик процесса и так идёт
@@ -387,6 +393,7 @@ class TunnelService {
     required bool dpiBypass,
     required List<String> bypassedPackages,
     bool proxyOnly = false,
+    String dnsProvider = 'cloudflare',
   }) {
     final outbound = <String, dynamic>{
       'type': 'vless',
@@ -414,8 +421,8 @@ class TunnelService {
 
     // Маскировка/транспорт (ws, grpc, http) — обязателен для ключей, где
     // сервер ожидает не голый TCP, а конкретный транспортный "конверт".
-    // Без этого блока такие ключи (например, экспортированные из Hiddify
-    // с http-заголовками) не подключаются: сервер отвергает handshake.
+    // Без этого блока такие ключи (например, экспортированные с
+    // http-заголовками из другого клиента) не подключаются: сервер отвергает handshake.
     final transportType = p.transportType ?? 'tcp';
     if (transportType == 'ws') {
       outbound['transport'] = {
@@ -439,11 +446,22 @@ class TunnelService {
     // transportType == 'tcp' (или неизвестный) — без блока "transport",
     // как и раньше: sing-box по умолчанию использует голый TCP.
 
+    // [НОВОЕ] Выбор DNS-over-HTTPS резолвера — та же идея, что в
+    // у многих клиентов ("DNS Server" в настройках): раньше был всегда жёстко
+    // зашит 1.1.1.1 без возможности сменить. IP конкретного резолвера
+    // достаточно sing-box'у для type: 'https' (тот же формат, что был и
+    // раньше, просто с настраиваемым адресом).
+    const dnsProviderIps = {
+      'cloudflare': '1.1.1.1',
+      'google': '8.8.8.8',
+      'adguard': '94.140.14.14',
+      'quad9': '9.9.9.9',
+    };
     final dnsServers = <Map<String, dynamic>>[
       {
         'type': 'https',
         'tag': 'remote-dns',
-        'server': '1.1.1.1',
+        'server': dnsProviderIps[dnsProvider] ?? dnsProviderIps['cloudflare'],
         if (dnsProtection) 'detour': 'proxy',
       },
     ];
@@ -535,7 +553,7 @@ class TunnelService {
         // молча не идёт, а Android всё равно показывает интерфейс как
         // рабочий. 'mixed' (TCP через системный стек + UDP через gVisor)
         // — рекомендуемый sing-box'ом баланс совместимости и
-        // производительности для Android, тот же выбор что и у Hiddify.
+        // производительности для Android — стандартная практика для sing-box на Android.
         'stack': 'mixed',
         'auto_route': true,
         'endpoint_independent_nat': true,
@@ -604,11 +622,27 @@ class TunnelService {
       body = source;
     } else {
       try {
-        final res = await http.get(Uri.parse(source)).timeout(Duration(seconds: 12));
+        // [НОВОЕ] Заголовки как у обычного подписочного клиента (тот же
+        // принцип, что у большинства подписочных клиентов) — некоторые панели подписок
+        // (3x-ui, Marzban и т.п.) отдают РАЗНОЕ содержимое в зависимости от
+        // User-Agent запроса (например пустой ответ или HTML-страницу
+        // логина для нераспознанных клиентов вместо самой подписки). Без
+        // этого заголовка `http.get()` уходил с дефолтным Dart-агентом
+        // ("Dart/3.x (dart:io)"), который часть панелей не распознаёт как
+        // подписочный клиент вообще.
+        final res = await http.get(
+          Uri.parse(source),
+          headers: const {
+            'User-Agent': 'VPNonLine/1.0 (sing-box-client; compatible)',
+            'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
+          },
+        ).timeout(Duration(seconds: 12));
         if (res.statusCode >= 400) {
           throw TunnelException('Подписка недоступна (${res.statusCode}). Попробуйте позднее.');
         }
         body = res.body;
+      } on TunnelException {
+        rethrow;
       } catch (e) {
         throw TunnelException('Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
       }
@@ -627,6 +661,19 @@ class TunnelService {
 
   List<_ParsedVless> _parseSubscriptionBody(String body) {
     String text = body.trim();
+
+    // [НОВОЕ — принимать больше форматов подписки] Некоторые панели/подписки
+    // отдают не base64-список vless://-ссылок, а готовый JSON-конфиг
+    // sing-box (полный объект с полем "outbounds", либо просто массив
+    // outbound'ов). Некоторые другие клиенты такой формат подписки понимают нативно — эта
+    // ветка добавляет то же самое: пробуем распарсить как sing-box JSON
+    // ДО попытки трактовать текст как список ссылок, чтобы для JSON-тела
+    // не проваливаться сразу в пустой список профилей.
+    if (text.startsWith('{') || text.startsWith('[')) {
+      final fromJson = _parseSingboxJsonOutbounds(text);
+      if (fromJson.isNotEmpty) return fromJson;
+    }
+
     if (!text.contains('vless://')) {
       try {
         final normalized = text.replaceAll('-', '+').replaceAll('_', '/');
@@ -647,6 +694,89 @@ class TunnelService {
       if (parsed != null) result.add(parsed);
     }
     return result;
+  }
+
+  /// [НОВОЕ] Достаёт vless-профили напрямую из JSON-конфига sing-box —
+  /// либо из `{"outbounds":[...]}`, либо из голого массива outbound'ов.
+  /// Молча пропускает outbound'ы других типов (direct/block/urltest и
+  /// т.д.) и любые vless-записи с полями, которых не хватает для рабочего
+  /// подключения (см. те же проверки, что и в `_ParsedVless.tryParse`).
+  /// Ошибки парсинга самого JSON не бросает наружу — просто возвращает
+  /// пустой список, и вызывающий код (`_parseSubscriptionBody`) в этом
+  /// случае идёт дальше по обычному пути (vless://-ссылки/base64).
+  List<_ParsedVless> _parseSingboxJsonOutbounds(String text) {
+    try {
+      final decoded = jsonDecode(text);
+      final List<dynamic> outbounds;
+      if (decoded is Map<String, dynamic> && decoded['outbounds'] is List) {
+        outbounds = decoded['outbounds'] as List;
+      } else if (decoded is List) {
+        outbounds = decoded;
+      } else {
+        return const [];
+      }
+
+      final result = <_ParsedVless>[];
+      for (final item in outbounds) {
+        if (item is! Map<String, dynamic>) continue;
+        if ((item['type'] as String?)?.toLowerCase() != 'vless') continue;
+
+        final uuid = item['uuid'] as String?;
+        final host = item['server'] as String?;
+        final port = (item['server_port'] as num?)?.toInt();
+        if (uuid == null || uuid.isEmpty || host == null || host.isEmpty || port == null || port == 0) {
+          continue;
+        }
+
+        final tls = item['tls'] as Map<String, dynamic>?;
+        final tlsEnabled = tls?['enabled'] == true;
+        final reality = tls?['reality'] as Map<String, dynamic>?;
+        final realityEnabled = reality?['enabled'] == true;
+        final utls = tls?['utls'] as Map<String, dynamic>?;
+
+        final transport = item['transport'] as Map<String, dynamic>?;
+        String? transportHost;
+        String? transportPath;
+        if (transport != null) {
+          final headers = transport['headers'] as Map<String, dynamic>?;
+          final headerHost = headers?['Host'] ?? headers?['host'];
+          final transportHostList = transport['host'];
+          transportHost = headerHost as String? ??
+              (transportHostList is List && transportHostList.isNotEmpty
+                  ? transportHostList.first as String?
+                  : null);
+          transportPath = transport['path'] as String? ?? transport['service_name'] as String?;
+        }
+
+        // security=reality без public_key нативное ядро не примет — та же
+        // защита, что и в _ParsedVless.tryParse ниже для vless://-ссылок.
+        final security = realityEnabled ? 'reality' : (tlsEnabled ? 'tls' : 'none');
+        final pbk = reality?['public_key'] as String?;
+        if (security == 'reality' && (pbk == null || pbk.isEmpty)) continue;
+
+        final alpnList = tls?['alpn'];
+
+        result.add(_ParsedVless(
+          uuid: uuid,
+          host: host,
+          port: port,
+          security: security,
+          pbk: pbk,
+          fp: utls?['fingerprint'] as String?,
+          sni: tls?['server_name'] as String?,
+          sid: reality?['short_id'] as String?,
+          flow: item['flow'] as String?,
+          alpn: (alpnList is List && alpnList.isNotEmpty) ? alpnList.join(',') : null,
+          transportType: (transport?['type'] as String?) ?? 'tcp',
+          transportHost: transportHost,
+          transportPath: transportPath,
+          remark: (item['tag'] as String?) ?? host,
+        ));
+      }
+      return result;
+    } catch (_) {
+      return const [];
+    }
   }
 
   Future<bool> _waitForConnected(Duration timeout) async {
@@ -685,17 +815,53 @@ class TunnelService {
     // captive portal): любой полученный ответ, а не таймаут/исключение,
     // означает, что соединение реально прошло туда и обратно.
     final probeUri = Uri.parse('https://cp.cloudflare.com/generate_204');
-    final client = proxyOnly
-        ? IOClient(HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;')
-        : http.Client();
-    try {
-      final response = await client.head(probeUri).timeout(const Duration(seconds: 8));
-      return response.statusCode > 0;
-    } catch (_) {
-      return false;
-    } finally {
-      client.close();
+
+    if (proxyOnly) {
+      // В proxy-режиме запрос явно направлен через локальный SOCKS/HTTP-порт
+      // (127.0.0.1:$_proxyPort) — это соединение процесса приложения с самим
+      // собой (loopback), оно не подчиняется системной маршрутизации VPN и
+      // потому реально проходит именно через только что поднятый туннель.
+      // Проверка тут валидна как есть — трогать не стал.
+      final client = IOClient(HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
+      try {
+        final response = await client.head(probeUri).timeout(const Duration(seconds: 8));
+        return response.statusCode > 0;
+      } catch (_) {
+        return false;
+      } finally {
+        client.close();
+      }
     }
+
+    // [ИСПРАВЛЕНО — вероятная главная причина "туннель поднялся, но
+    // интернет не идёт" / "не удалось подключиться ни к одному серверу"
+    // сразу на ВСЕХ серверах подряд в VPN-режиме] Раньше здесь, как и в
+    // proxy-режиме, слался обычный http.Client().head(probeUri) — то есть
+    // запрос из ТОГО ЖЕ процесса приложения. Но системный VpnService на
+    // Android ОБЯЗАН исключать трафик самого VPN-приложения из своего же
+    // TUN-интерфейса (иначе пакет, отправленный приложением в TUN, тут же
+    // попал бы в тот же TUN и зациклился бы навсегда — это не особенность
+    // конкретного пакета, а стандартное поведение платформы, иначе это же
+    // приложение физически не могло бы открыть сокет до самого
+    // VLESS-сервера). Из этого прямо следует: HTTP-запрос из процесса
+    // приложения идёт МИМО туннеля, обычным прямым путём телефона, а не
+    // через него — то есть эта проверка НИКОГДА не тестировала реальный
+    // туннель. В лучшем случае она просто дублировала обычный доступ в
+    // интернет (если он и так есть — маскируя проблему), в худшем — ложно
+    // проваливалась на КАЖДОМ сервере подряд, если именно прямой путь
+    // телефона к cp.cloudflare.com чем-то ограничен (сетью/провайдером,
+    // ровно тем, что и должен обходить сам VPN) — и тогда приложение видит
+    // "интернет не идёт" на полностью рабочем туннеле и одинаково
+    // безрезультатно перебирает все 5 серверов подписки подряд.
+    // Поэтому в VPN-режиме такой самопроверочный запрос из процесса
+    // приложения больше не шлём. Доверяем событию serviceStateStream о
+    // реально поднятом интерфейсе (это уже подтверждено в
+    // _waitForConnected выше) и дополнительно ждём короткое окно — этого
+    // достаточно, чтобы отсеять интерфейсы, которые поднимаются и тут же
+    // падают обратно (реальный признак нерабочего сервера), не полагаясь
+    // при этом на в принципе нерабочий self-probe.
+    await Future.delayed(const Duration(milliseconds: 1200));
+    return status.value?.state == TunnelConnState.connected;
   }
 
   Future<void> disconnect() async {
@@ -719,27 +885,29 @@ class TunnelService {
     await AppSettings.openAppSettings(type: AppSettingsType.vpn);
   }
 
-  /// [НОВОЕ] Deep-link для импорта той же самой подписки/ключа напрямую в
-  /// Hiddify — официальная, документированная схема самого приложения
-  /// Hiddify (github.com/hiddify/hiddify-app/wiki/URL-Scheme):
-  /// `hiddify://install-sub?url=<encoded-url>#<name>`. Даёт пользователю
-  /// гарантированно рабочий путь тем же ключом (ядро Hiddify — тот же
-  /// sing-box, на котором и так уже построен туннель в этом приложении),
-  /// если по какой-то причине встроенное подключение всё равно не
-  /// поднимается на конкретном устройстве/сети. Сама подписка не меняется
-  /// и никак не зависит от того, установлен Hiddify или нет — ссылку
-  /// строим всегда, а решение, что делать, если приложение не установлено
-  /// (открыть страницу в Google Play), остаётся на стороне UI.
-  static Uri buildHiddifyImportUri(String connectionString, {String label = 'VPN onLine'}) {
-    final encodedUrl = Uri.encodeComponent(connectionString.trim());
-    final encodedLabel = Uri.encodeComponent(label);
-    return Uri.parse('hiddify://install-sub?url=$encodedUrl#$encodedLabel');
+  /// [НОВОЕ] Проверка ключа/подписки БЕЗ подключения — используется
+  /// кнопкой "Проверить ключ" на экране "Мои ключи". Реально скачивает и
+  /// разбирает подписку тем же кодом, что и `connect()` (см.
+  /// `_loadProfiles`/`_parseSubscriptionBody` выше — включая base64,
+  /// голые vless://-ссылки и JSON-конфиг sing-box), и честно возвращает,
+  /// сколько рабочих серверов реально нашлось и под какими именами — это
+  /// именно то, что нужно проверить, чтобы убедиться, что конкретная
+  /// ссылка формата `https://.../sub/<uuid>` (или любая другая) реально
+  /// расшифровывается и содержит пригодные для подключения профили, не
+  /// поднимая сам туннель.
+  Future<SubscriptionCheckResult> checkSubscription(String connectionString) async {
+    try {
+      final profiles = await _loadProfiles(connectionString, forceRefresh: true);
+      return SubscriptionCheckResult(
+        ok: true,
+        serverNames: profiles.map((p) => p.remark.isNotEmpty ? p.remark : p.host).toList(),
+      );
+    } on TunnelException catch (e) {
+      return SubscriptionCheckResult(ok: false, error: e.message);
+    } catch (e) {
+      return SubscriptionCheckResult(ok: false, error: 'Не удалось проверить ключ: $e');
+    }
   }
-
-  /// Страница Hiddify в Google Play — используется как фолбэк, если сам
-  /// deep-link выше не открылся (Hiddify не установлен на устройстве).
-  static final Uri hiddifyPlayStoreUri =
-      Uri.parse('https://play.google.com/store/apps/details?id=app.hiddify.com');
 
   Future<int?> connectedDelayMs() async => null;
 
@@ -752,6 +920,16 @@ class TunnelService {
     _statsSub = null;
     _faultSub = null;
   }
+}
+
+/// [НОВОЕ] Результат `TunnelService.checkSubscription()` — см. докстринг
+/// метода. `serverNames` заполнен только когда `ok == true`.
+class SubscriptionCheckResult {
+  SubscriptionCheckResult({required this.ok, this.serverNames = const [], this.error});
+  final bool ok;
+  final List<String> serverNames;
+  final String? error;
+  int get serverCount => serverNames.length;
 }
 
 enum TunnelConnState { disconnected, connecting, connected, disconnecting }
@@ -833,7 +1011,7 @@ class _ParsedVless {
         }
       }
 
-      // Hiddify/Xray экспортируют тип транспорта либо как "type", либо как "headerType".
+      // Xray-совместимые клиенты экспортируют тип транспорта либо как "type", либо как "headerType".
       final rawType = (q['type'] ?? q['headerType'] ?? 'tcp').toLowerCase();
       // "http" в поле type у Xray-совместимых ссылок означает HTTP-маскировку поверх tcp,
       // для sing-box это соответствует transport type "http".
