@@ -14,9 +14,13 @@ import '../services/tunnel_service.dart';
 /// синхронизированы через один и тот же persist-ключ вместо двух
 /// независимых друг от друга состояний).
 ///
-/// ДОПУЩЕНИЕ (принцип 4, честно): реальная блокировка трафика при обрыве
-/// туннеля/фильтрация DNS зависит от нативной реализации VPN-сервиса —
-/// см. NATIVE_SETUP.md. Сохранение выбора уже полностью рабочее.
+/// [НОВОЕ] Набор пунктов расширен до уровня функционала Hiddify (по
+/// согласованию с разработчиком): строгий Kill Switch (физическая
+/// блокировка трафика, а не только авто-переподключение — см.
+/// tunnel_service.dart::_engageHardKillSwitch), обход локальной сети (LAN),
+/// мультиплексирование соединений (Mux) и Fake IP DNS. Каждый пункт реально
+/// прокидывается в конфиг sing-box при следующем подключении — см.
+/// TunnelService.connect()/_buildSingBoxConfig, никаких заглушек.
 class SecurityScreen extends StatefulWidget {
   const SecurityScreen({super.key});
   @override
@@ -27,8 +31,13 @@ class _SecurityScreenState extends State<SecurityScreen> {
   final _prefs = LocalPrefs.instance;
 
   bool _killSwitch = true;
+  bool _strictKillSwitch = false;
   bool _dnsProtection = false;
   bool _blockAds = false;
+  bool _bypassLan = true;
+  bool _muxEnabled = false;
+  String _muxProtocol = 'h2mux';
+  bool _fakeIpDns = false;
   // [НОВОЕ] "Агрессивное переподключение" — настраиваемое число попыток
   // восстановления соединения. false = 3 попытки (мягко,
   // экономит батарею при долгом отсутствии сети), true = 8 попыток
@@ -36,6 +45,12 @@ class _SecurityScreenState extends State<SecurityScreen> {
   // TunnelService.connect() при каждом подключении — см. tunnel_service.dart.
   bool _aggressiveReconnect = false;
   bool _loaded = false;
+
+  static const _muxProtocolLabels = {
+    'h2mux': 'H2Mux',
+    'smux': 'SMux',
+    'yamux': 'YAMux',
+  };
 
   @override
   void initState() {
@@ -46,18 +61,30 @@ class _SecurityScreenState extends State<SecurityScreen> {
   Future<void> _load() async {
     final results = await Future.wait([
       _prefs.getBool(PrefKeys.killSwitch, fallback: true),
+      _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
       // [ИСПРАВЛЕНО] По умолчанию выключено — совпадает с fallback в
       // tunnel_service.dart, чтобы UI не расходился с реальным конфигом.
       _prefs.getBool(PrefKeys.dnsProtection, fallback: false),
       _prefs.getBool(PrefKeys.blockAds, fallback: false),
       _prefs.getInt(PrefKeys.reconnectAttempts, fallback: 3),
+      _prefs.getBool(PrefKeys.bypassLan, fallback: true),
+      _prefs.getBool(PrefKeys.muxEnabled, fallback: false),
+      _prefs.getBool(PrefKeys.fakeIpDns, fallback: false),
     ]);
+    final savedMuxProtocol = await _prefs.getString(PrefKeys.muxProtocol);
     if (!mounted) return;
     setState(() {
       _killSwitch = results[0] as bool;
-      _dnsProtection = results[1] as bool;
-      _blockAds = results[2] as bool;
-      _aggressiveReconnect = (results[3] as int) > 3;
+      _strictKillSwitch = results[1] as bool;
+      _dnsProtection = results[2] as bool;
+      _blockAds = results[3] as bool;
+      _aggressiveReconnect = (results[4] as int) > 3;
+      _bypassLan = results[5] as bool;
+      _muxEnabled = results[6] as bool;
+      _fakeIpDns = results[7] as bool;
+      _muxProtocol = (savedMuxProtocol != null && _muxProtocolLabels.containsKey(savedMuxProtocol))
+          ? savedMuxProtocol
+          : 'h2mux';
       _loaded = true;
     });
   }
@@ -70,6 +97,65 @@ class _SecurityScreenState extends State<SecurityScreen> {
   Future<void> _setAggressiveReconnect(bool v) async {
     setState(() => _aggressiveReconnect = v);
     await _prefs.setInt(PrefKeys.reconnectAttempts, v ? 8 : 3);
+  }
+
+  /// [НОВОЕ] Строгий Kill Switch — см. подробный докстринг
+  /// PrefKeys.strictKillSwitch и TunnelService._engageHardKillSwitch.
+  /// Требует, чтобы обычный Kill Switch (переподключение) тоже был включён —
+  /// строгий режим включается уже ПОСЛЕ того, как обычные попытки
+  /// переподключения исчерпались, поэтому без базового тумблера ему просто
+  /// нечего "продолжать".
+  Future<void> _setStrictKillSwitch(bool v) async {
+    if (v && !_killSwitch) {
+      setState(() {
+        _killSwitch = true;
+        _strictKillSwitch = true;
+      });
+      await Future.wait([
+        _prefs.setBool(PrefKeys.killSwitch, true),
+        _prefs.setBool(PrefKeys.strictKillSwitch, true),
+      ]);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Kill Switch включён автоматически — строгий режим работает поверх него')),
+        );
+      }
+      return;
+    }
+    setState(() => _strictKillSwitch = v);
+    await _prefs.setBool(PrefKeys.strictKillSwitch, v);
+  }
+
+  Future<void> _setMuxEnabled(bool v) async {
+    setState(() => _muxEnabled = v);
+    await _prefs.setBool(PrefKeys.muxEnabled, v);
+    _notifyReconnectNeeded();
+  }
+
+  Future<void> _setMuxProtocol(String? v) async {
+    if (v == null) return;
+    setState(() => _muxProtocol = v);
+    await _prefs.setString(PrefKeys.muxProtocol, v);
+    _notifyReconnectNeeded();
+  }
+
+  Future<void> _setBypassLan(bool v) async {
+    setState(() => _bypassLan = v);
+    await _prefs.setBool(PrefKeys.bypassLan, v);
+    _notifyReconnectNeeded();
+  }
+
+  Future<void> _setFakeIpDns(bool v) async {
+    setState(() => _fakeIpDns = v);
+    await _prefs.setBool(PrefKeys.fakeIpDns, v);
+    _notifyReconnectNeeded();
+  }
+
+  void _notifyReconnectNeeded() {
+    if (!mounted || !TunnelService.instance.isConnected) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы включить сейчас')),
+    );
   }
 
   @override
@@ -89,30 +175,73 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   padding: EdgeInsets.symmetric(vertical: 20),
                   child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
                 )
-              else
+              else ...[
+                // [НОВОЕ] Живой индикатор, когда строгий Kill Switch реально
+                // держит трафик заблокированным прямо сейчас (см.
+                // TunnelService.hardKillSwitchActive).
+                ValueListenableBuilder<bool>(
+                  valueListenable: TunnelService.instance.hardKillSwitchActive,
+                  builder: (context, active, _) {
+                    if (!active) return const SizedBox.shrink();
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: AppColors.danger.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppColors.danger.withValues(alpha: 0.4)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.block_rounded, size: 18, color: AppColors.danger),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Text(
+                              'Kill Switch активен: сервер недоступен, интернет физически заблокирован до восстановления туннеля',
+                              style: TextStyle(fontSize: 11, color: AppColors.text, height: 1.4),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
                 NeonCard(
                   child: Column(
                     children: [
                       _Row(
                         icon: Icons.shield_rounded,
                         title: 'Kill Switch',
-                        subtitle: 'Блокирует интернет при обрыве туннеля',
+                        subtitle: 'Автоматически переподключает туннель при обрыве',
                         trailing: NeonToggle(
                           value: _killSwitch,
                           onChanged: (v) async {
-                            setState(() => _killSwitch = v);
+                            setState(() {
+                              _killSwitch = v;
+                              if (!v) _strictKillSwitch = false;
+                            });
                             await _prefs.setBool(PrefKeys.killSwitch, v);
+                            if (!v) await _prefs.setBool(PrefKeys.strictKillSwitch, false);
                           },
                         ),
                       ),
+                      const Divider(height: 20),
+                      // [НОВОЕ] Настоящий Kill Switch как в Hiddify — не
+                      // просто переподключение, а физическая блокировка
+                      // трафика, когда переподключиться не вышло. См.
+                      // tunnel_service.dart::_engageHardKillSwitch.
+                      _Row(
+                        icon: Icons.gpp_bad_rounded,
+                        title: 'Строгий режим (блокировать трафик)',
+                        subtitle: _strictKillSwitch
+                            ? 'Если переподключиться не удалось — интернет физически блокируется'
+                            : 'Выключено: при неудаче просто останется обычный интернет',
+                        trailing: NeonToggle(
+                          value: _strictKillSwitch,
+                          onChanged: _setStrictKillSwitch,
+                        ),
+                      ),
                       const SizedBox(height: 10),
-                      // [НОВОЕ] Тумблер выше — это автоматическое
-                      // восстановление соединения при обрыве (реальное, см.
-                      // tunnel_service.dart), а НЕ физическая блокировка
-                      // трафика на уровне ОС. Настоящая блокировка ("ни
-                      // байта мимо VPN") — системная настройка Android,
-                      // приложение не может включить её программно, только
-                      // привести пользователя на нужный экран.
                       GestureDetector(
                         onTap: () => TunnelService.instance.openSystemVpnSettingsHint(),
                         child: Container(
@@ -128,7 +257,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                               const SizedBox(width: 8),
                               const Expanded(
                                 child: Text(
-                                  'Включить настоящую блокировку трафика без VPN (системная настройка Android)',
+                                  'Дополнительно: включить блокировку без VPN на уровне системы Android',
                                   style: TextStyle(fontSize: 10.5, color: AppColors.textDim),
                                 ),
                               ),
@@ -147,8 +276,17 @@ class _SecurityScreenState extends State<SecurityScreen> {
                           onChanged: (v) async {
                             setState(() => _dnsProtection = v);
                             await _prefs.setBool(PrefKeys.dnsProtection, v);
+                            _notifyReconnectNeeded();
                           },
                         ),
+                      ),
+                      const Divider(height: 20),
+                      // [НОВОЕ] Fake IP — режим DNS-резолва, как в Hiddify.
+                      _Row(
+                        icon: Icons.alt_route_rounded,
+                        title: 'Fake IP (DNS)',
+                        subtitle: 'Резолв доменов через служебные адреса — быстрее и без утечки таймингов',
+                        trailing: NeonToggle(value: _fakeIpDns, onChanged: _setFakeIpDns),
                       ),
                       const Divider(height: 20),
                       _Row(
@@ -160,9 +298,49 @@ class _SecurityScreenState extends State<SecurityScreen> {
                           onChanged: (v) async {
                             setState(() => _blockAds = v);
                             await _prefs.setBool(PrefKeys.blockAds, v);
+                            _notifyReconnectNeeded();
                           },
                         ),
                       ),
+                      const Divider(height: 20),
+                      // [НОВОЕ] Обход локальной сети (LAN) — включён по
+                      // умолчанию, как в Hiddify.
+                      _Row(
+                        icon: Icons.lan_rounded,
+                        title: 'Обход локальной сети',
+                        subtitle: _bypassLan
+                            ? 'Устройства в LAN (роутер, принтер, NAS) доступны напрямую'
+                            : 'LAN тоже идёт через VPN — доступ к сети сервера',
+                        trailing: NeonToggle(value: _bypassLan, onChanged: _setBypassLan),
+                      ),
+                      const Divider(height: 20),
+                      // [НОВОЕ] Mux — мультиплексирование соединений.
+                      _Row(
+                        icon: Icons.merge_type_rounded,
+                        title: 'Mux (мультиплексирование)',
+                        subtitle: 'Несколько потоков через одно соединение — быстрее открытие сайтов',
+                        trailing: NeonToggle(value: _muxEnabled, onChanged: _setMuxEnabled),
+                      ),
+                      if (_muxEnabled) ...[
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            const SizedBox(width: 48),
+                            const Text('Протокол:', style: TextStyle(fontSize: 11, color: AppColors.textDim)),
+                            const Spacer(),
+                            DropdownButton<String>(
+                              value: _muxProtocol,
+                              underline: const SizedBox.shrink(),
+                              dropdownColor: AppColors.bgCard,
+                              style: const TextStyle(color: AppColors.textDim, fontSize: 12),
+                              items: _muxProtocolLabels.entries
+                                  .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
+                                  .toList(),
+                              onChanged: _setMuxProtocol,
+                            ),
+                          ],
+                        ),
+                      ],
                       const Divider(height: 20),
                       // [НОВОЕ] Настраиваемая "живучесть" Kill Switch —
                       // реально влияет на TunnelService.connect(), см.
@@ -181,6 +359,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                     ],
                   ),
                 ),
+              ],
               const SizedBox(height: 14),
               Container(
                 padding: const EdgeInsets.all(12),
@@ -190,10 +369,11 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
                 ),
                 child: const Text(
-                  'На Android эти переключатели реально влияют на трафик (DNS-защита и блокировка рекламы '
-                  'встроены в конфиг туннеля при следующем подключении, Kill Switch — это автовосстановление '
-                  'соединения при обрыве). На платформах без нативного VPN-туннеля (см. NATIVE_SETUP.md) выбор '
-                  'сохраняется, но пока ни на что не влияет.',
+                  'На Android эти переключатели реально влияют на трафик: DNS-защита, Fake IP, обход LAN, '
+                  'Mux и блокировка рекламы встроены в конфиг туннеля при следующем подключении, Kill Switch — '
+                  'это автовосстановление соединения, а строгий режим — физическая блокировка трафика, если '
+                  'восстановиться не удалось. На платформах без нативного VPN-туннеля (см. NATIVE_SETUP.md) '
+                  'выбор сохраняется, но пока ни на что не влияет.',
                   style: TextStyle(fontSize: 11, color: AppColors.textDim, height: 1.4),
                 ),
               ),
