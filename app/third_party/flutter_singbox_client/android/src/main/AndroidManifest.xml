@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ── Core network ─────────────────────────────────────────────────── -->
+    <!-- Required for all proxy/VPN outbound connections -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required: ConnectivityManager callbacks in DefaultNetworkMonitor -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Required: ConnectivityManager.requestNetwork() on API 28-30 -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- Required: WifiManager.getConnectionInfo() for SSID-based routing rules -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- ── Foreground services ───────────────────────────────────────────── -->
+    <!-- Required: startForeground() in both VPN and proxy services -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Required: foregroundServiceType="systemExempted" on SingboxVPNService (API 34+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+    <!-- Required: foregroundServiceType="specialUse" on SingboxProxyService (API 34+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- ── Notifications ─────────────────────────────────────────────────── -->
+    <!-- Required: POST_NOTIFICATIONS runtime permission on Android 13+ (API 33+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- ── Boot receiver ─────────────────────────────────────────────────── -->
+    <!-- Required: BootReceiver receives ACTION_BOOT_COMPLETED to re-broadcast
+         dev.amirzr.singbox.DEVICE_BOOTED to the host app -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application>
+
+        <!-- VPN Service -->
+        <service
+            android:name=".service.SingboxVPNService"
+            android:exported="false"
+            android:foregroundServiceType="systemExempted"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="true" />
+        </service>
+
+        <!-- Proxy-only Service -->
+        <service
+            android:name=".service.SingboxProxyService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Network proxy service for Sing-box SDK" />
+        </service>
+
+        <!-- Boot auto-start receiver: broadcasts DEVICE_BOOTED, starts nothing itself -->
+        <receiver
+            android:name=".receivers.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Notification stop action receiver -->
+        <receiver
+            android:name=".receivers.NotificationStopReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="dev.amirzr.singbox.STOP" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

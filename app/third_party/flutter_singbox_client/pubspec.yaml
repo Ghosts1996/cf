@@ -1,0 +1,32 @@
+name: flutter_singbox_client
+description: Flutter Sing-box VPN/proxy plugin — Android free; iOS, Windows, macOS & Linux available. TUN, kill switch, split tunneling, Clash API.
+version: 1.1.0
+homepage: https://github.com/amir-zr/flutter_singbox_client
+license: GPL-3.0-only
+repository: https://github.com/amir-zr/flutter_singbox_client
+issue_tracker: https://github.com/amir-zr/flutter_singbox_client/issues
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  plugin_platform_interface: ^2.0.2
+  path_provider: ^2.1.0
+  http: ^1.2.0
+  uuid: ^4.4.0
+  rxdart: ^0.28.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.amirzr.singbox
+        pluginClass: FlutterSingboxClientPlugin
