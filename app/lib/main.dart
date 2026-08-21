@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 import 'theme.dart';
 import 'screens/connect_screen.dart';
 import 'screens/keys_screen.dart';
-import 'screens/plans_screen.dart';
+import 'screens/balance_screen.dart';
 import 'screens/servers_screen.dart';
 import 'screens/menu_screen.dart';
 import 'screens/onboarding_screen.dart';
@@ -131,7 +131,14 @@ class _RootShellState extends State<RootShell> {
     final screens = [
       const ConnectScreen(),
       const KeysScreen(),
-      const PlansScreen(),
+      // [ИСПРАВЛЕНО] Раньше здесь стоял PlansScreen (покупка ключа) —
+      // пункт нижнего меню назывался "Баланс", но фактически открывал
+      // экран покупки, а не сам баланс, и мгновенно дёргал /plans при
+      // каждом заходе на вкладку (сетевая ошибка на скриншоте — оттуда).
+      // Теперь здесь BalanceScreen: сумма на счету + число ключей + явная
+      // кнопка "Пополнить баланс". Покупка ключа никуда не делась — она
+      // доступна с этого же экрана кнопкой и из общего меню.
+      const BalanceScreen(),
       const ServersScreen(),
       MenuScreen(onLoggedOut: widget.onLoggedOut),
     ];
