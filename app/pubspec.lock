@@ -201,10 +201,11 @@ packages:
   flutter_singbox_client:
     dependency: "direct main"
     description:
-      name: flutter_singbox_client
-      sha256: "4e099d1c0d3863d503d7ee15c7c1ccd8a6b0cff462e6f45f6000fda16ae8db38"
-      url: "https://pub.dev"
-    source: hosted
+      path: "app/third_party/flutter_singbox_client"
+      ref: ccurecc_singbox_dns
+      resolved-ref: e1cf4e2c41ed480f6c6f165e955522ddb108a6f7
+      url: "https://github.com/Ghosts1996/cf.git"
+    source: git
     version: "1.1.0"
   flutter_test:
     dependency: "direct dev"

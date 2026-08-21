@@ -627,24 +627,23 @@ class TunnelService {
     // transportType == 'tcp' (или неизвестный) — без блока "transport",
     // как и раньше: sing-box по умолчанию использует голый TCP.
 
-    // [НОВОЕ] Выбор DNS-over-HTTPS резолвера — та же идея, что в
-    // у многих клиентов ("DNS Server" в настройках): раньше был всегда жёстко
-    // зашит 1.1.1.1 без возможности сменить. IP конкретного резолвера
-    // достаточно sing-box'у для type: 'https' (тот же формат, что был и
-    // раньше, просто с настраиваемым адресом).
-    const dnsProviderIps = {
-      'cloudflare': '1.1.1.1',
-      'google': '8.8.8.8',
-      'adguard': '94.140.14.14',
-      'quad9': '9.9.9.9',
+    // DNS должен быть доступен ещё до первого DNS-ответа через туннель.
+    // Поэтому для встроенных провайдеров используем DoT с фиксированным IP
+    // и корректным TLS SNI, а не DoH к голому IP. Иначе часть устройств
+    // поднимает TUN, но не может установить защищённое DNS-соединение —
+    // внешне это выглядит как «подключено, а интернета нет».
+    const dnsProviders = {
+      'cloudflare': {'server': '1.1.1.1', 'server_name': 'cloudflare-dns.com'},
+      'google': {'server': '8.8.8.8', 'server_name': 'dns.google'},
+      'adguard': {'server': '94.140.14.14', 'server_name': 'dns.adguard-dns.com'},
+      'quad9': {'server': '9.9.9.9', 'server_name': 'dns.quad9.net'},
     };
     // [НОВОЕ] Провайдер 'custom' — пользовательский DNS-адрес с экрана
     // "Настройки" (см. PrefKeys.customDnsServer). Если пользователь выбрал
     // custom, но не указал адрес — тихо откатываемся на Cloudflare, чтобы
     // не отправлять sing-box заведомо пустой server и не ронять конфиг.
-    final resolvedDnsServer = dnsProvider == 'custom' && customDns != null && customDns.trim().isNotEmpty
-        ? customDns.trim()
-        : (dnsProviderIps[dnsProvider] ?? dnsProviderIps['cloudflare']);
+    final selectedDns = dnsProviders[dnsProvider] ?? dnsProviders['cloudflare']!;
+    final hasCustomDns = dnsProvider == 'custom' && customDns != null && customDns.trim().isNotEmpty;
 
     // [НОВОЕ] Fake IP (см. PrefKeys.fakeIpDns, как в Hiddify: Settings ->
     // DNS -> Fake IP). Домены внутри туннеля резолвятся в адреса из
@@ -655,10 +654,20 @@ class TunnelService {
     // sing-box, ничего специфичного не выдумано.
     final dnsServers = <Map<String, dynamic>>[
       {
-        'type': 'https',
+        // Для произвольного сервера оставляем прежний DoH-режим: у него нет
+        // известного имени сертификата/SNI, необходимого для безопасного DoT.
+        'type': hasCustomDns ? 'https' : 'tls',
         'tag': 'remote-dns',
-        'server': resolvedDnsServer,
-        if (dnsProtection) 'detour': 'proxy',
+        'server': hasCustomDns ? customDns!.trim() : selectedDns['server'],
+        if (!hasCustomDns) 'server_port': 853,
+        if (!hasCustomDns)
+          'tls': {
+            'enabled': true,
+            'server_name': selectedDns['server_name'],
+          },
+        // DNS перехватывается правилом hijack-dns ниже, поэтому должен
+        // направляться через VLESS при любом положении UI-тумблера.
+        'detour': 'proxy',
       },
       if (fakeIpDns)
         {
@@ -771,14 +780,14 @@ class TunnelService {
         'stack': 'mixed',
         'auto_route': true,
         'endpoint_independent_nat': true,
-        // [НОВОЕ] IPv6 внутри туннеля (см. PrefKeys.ipv6Enabled). Когда
-        // выключено (по умолчанию) — поле 'address' не задаётся вовсе,
-        // ровно как раньше (sing-box сам поднимает стандартный IPv4-адрес
-        // TUN-интерфейса) — поведение по умолчанию не меняется ни на бит.
-        // Когда включено — добавляем IPv6-подсеть к уже поднимаемой
-        // sing-box'ом стандартной IPv4, чтобы AAAA-трафик тоже пошёл через
-        // туннель, а не утёк напрямую в обычную сеть.
-        if (ipv6Enabled) 'address': ['172.19.0.1/28', 'fdfe:dcba:9876::1/126'],
+        // `hijack-dns` на Android требует явный IPv4-адрес TUN. Без него
+        // sing-box завершает запуск с ошибкой "need one more IPv4 address
+        // for DNS hijacking". IPv6 при необходимости добавляется вторым
+        // адресом, не заменяя обязательный IPv4.
+        'address': [
+          '172.19.0.1/28',
+          if (ipv6Enabled) 'fdfe:dcba:9876::1/126',
+        ],
         // [НОВОЕ] Режим split-tunnel — см. PrefKeys.splitTunnelMode и
         // докстринг параметра splitTunnelMode выше. sing-box не позволяет
         // задать include_package и exclude_package одновременно, поэтому

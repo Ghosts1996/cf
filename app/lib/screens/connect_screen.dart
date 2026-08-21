@@ -437,7 +437,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
     final hasKey = _activeKey != null || _hasManualKey;
     final connected = _tunnel.isConnected;
     final s = _tunnel.status.value;
-    final devicesLimit = hasKey ? (_activeKey!['devices_limit'] as num?)?.toInt() : null;
+    // При ручном ключе `_activeKey` может отсутствовать: ключ есть, но
+    // лимит устройств API не возвращал. Не разыменовываем nullable значение.
+    final devicesLimit = (_activeKey?['devices_limit'] as num?)?.toInt();
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),

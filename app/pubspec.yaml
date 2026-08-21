@@ -51,13 +51,13 @@ dependencies:
   #    разработке", Windows/Linux — "в планах", см. README пакета). Раз твой
   #    CI (.github/workflows) собирает именно Android APK — это не должно
   #    быть проблемой для реального релиза, но упоминаю явно, а не молчу.
-  # [ИСПРАВЛЕНО — реальный баг] На pub.dev у пакета сейчас опубликованы
-  # только версии 1.0.0/1.0.1 (проверено на странице пакета) — ограничение
-  # `^1.1.0` не резолвится вообще (`flutter pub get` падает с
-  # "version solving failed"), т.к. 1.1.x ещё не существует. `^1.0.0`
-  # разрешает 1.0.0 <= v < 2.0.0, то есть подхватит и текущий 1.0.1, и
-  # будущие патч/минорные релизы 1.x без падения сборки.
-  flutter_singbox_client: ^1.0.0
+  # Версия плагина с исправленной передачей DNS в Android VPN Service.
+  # Ревизия фиксируется в pubspec.lock.
+  flutter_singbox_client:
+    git:
+      url: https://github.com/Ghosts1996/cf.git
+      ref: ccurecc_singbox_dns
+      path: app/third_party/flutter_singbox_client
   # [НОВОЕ] Реальный список установленных приложений для split-tunnel
   # экрана (см. screens/split_tunnel_screen.dart) — раньше там был
   # фиксированный демо-список из 5 названий, не имевший отношения к
