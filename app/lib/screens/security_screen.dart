@@ -32,18 +32,18 @@ class _SecurityScreenState extends State<SecurityScreen> {
 
   bool _killSwitch = true;
   bool _strictKillSwitch = false;
-  bool _dnsProtection = false;
-  bool _blockAds = false;
-  bool _bypassLan = true;
-  bool _muxEnabled = false;
-  String _muxProtocol = 'h2mux';
-  bool _fakeIpDns = false;
+  bool _dnsProtection = true;
+  bool _blockAds = true;
+  bool _bypassLan = false;
+  bool _muxEnabled = true;
+  String _muxProtocol = 'smux';
+  bool _fakeIpDns = true;
   // [НОВОЕ] "Агрессивное переподключение" — настраиваемое число попыток
   // восстановления соединения. false = 3 попытки (мягко,
   // экономит батарею при долгом отсутствии сети), true = 8 попыток
   // (пытается дольше на нестабильных сетях). Реально читается
   // TunnelService.connect() при каждом подключении — см. tunnel_service.dart.
-  bool _aggressiveReconnect = false;
+  bool _aggressiveReconnect = true;
   bool _loaded = false;
 
   static const _muxProtocolLabels = {
@@ -62,14 +62,12 @@ class _SecurityScreenState extends State<SecurityScreen> {
     final results = await Future.wait([
       _prefs.getBool(PrefKeys.killSwitch, fallback: true),
       _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
-      // [ИСПРАВЛЕНО] По умолчанию выключено — совпадает с fallback в
-      // tunnel_service.dart, чтобы UI не расходился с реальным конфигом.
-      _prefs.getBool(PrefKeys.dnsProtection, fallback: false),
-      _prefs.getBool(PrefKeys.blockAds, fallback: false),
-      _prefs.getInt(PrefKeys.reconnectAttempts, fallback: 3),
-      _prefs.getBool(PrefKeys.bypassLan, fallback: true),
-      _prefs.getBool(PrefKeys.muxEnabled, fallback: false),
-      _prefs.getBool(PrefKeys.fakeIpDns, fallback: false),
+      _prefs.getBool(PrefKeys.dnsProtection, fallback: true),
+      _prefs.getBool(PrefKeys.blockAds, fallback: true),
+      _prefs.getInt(PrefKeys.reconnectAttempts, fallback: 8),
+      _prefs.getBool(PrefKeys.bypassLan, fallback: false),
+      _prefs.getBool(PrefKeys.muxEnabled, fallback: true),
+      _prefs.getBool(PrefKeys.fakeIpDns, fallback: true),
     ]);
     final savedMuxProtocol = await _prefs.getString(PrefKeys.muxProtocol);
     if (!mounted) return;
@@ -84,7 +82,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
       _fakeIpDns = results[7] as bool;
       _muxProtocol = (savedMuxProtocol != null && _muxProtocolLabels.containsKey(savedMuxProtocol))
           ? savedMuxProtocol
-          : 'h2mux';
+          : 'smux';
       _loaded = true;
     });
   }

@@ -34,7 +34,7 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _prefs = LocalPrefs.instance;
 
-  bool _autoConnect = true;
+  bool _autoConnect = false;
   bool _smartWifi = true;
   bool _killSwitch = true;
   bool _dpiBypass = false;
@@ -48,7 +48,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _customDnsController = TextEditingController();
   // [НОВОЕ] Разрешить IPv6 в туннеле — см. PrefKeys.ipv6Enabled и
   // подробный докстринг в tunnel_service.dart::_buildSingBoxConfig.
-  bool _ipv6Enabled = false;
+  bool _ipv6Enabled = true;
   bool _loaded = false;
 
   static const _dnsProviderLabels = {
@@ -73,14 +73,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _load() async {
     final results = await Future.wait([
-      _prefs.getBool(PrefKeys.autoConnect, fallback: true),
+      _prefs.getBool(PrefKeys.autoConnect, fallback: false),
       _prefs.getBool(PrefKeys.smartWifi, fallback: true),
       _prefs.getBool(PrefKeys.killSwitch, fallback: true),
       // [ИСПРАВЛЕНО] По умолчанию выключено — пользователь включает сам
       // при необходимости (совпадает с fallback в tunnel_service.dart).
       _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
-      _prefs.getBool(PrefKeys.ipv6Enabled, fallback: false),
+      _prefs.getBool(PrefKeys.ipv6Enabled, fallback: true),
     ]);
     final savedDnsProvider = await _prefs.getString(PrefKeys.dnsServerProvider);
     final savedCustomDns = await _prefs.getString(PrefKeys.customDnsServer);

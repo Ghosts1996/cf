@@ -159,9 +159,16 @@ class _PlansScreenState extends State<PlansScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-      child: Column(
+    // Экран открывается как отдельный MaterialPageRoute, поэтому ему
+    // нужен собственный Material-предок. Без Scaffold текст вне
+    // NeonCard наследовал аварийный DefaultTextStyle Flutter с жёлтым
+    // двойным подчёркиванием.
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+          child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           AppHeader(screenLabel: _isExtend ? 'Продление ключа' : 'Оформление подписки'),
@@ -222,6 +229,8 @@ class _PlansScreenState extends State<PlansScreen> {
             ),
           ],
         ],
+          ),
+        ),
       ),
     );
   }

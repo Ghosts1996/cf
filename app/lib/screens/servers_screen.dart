@@ -57,6 +57,25 @@ class _ServersScreenState extends State<ServersScreen> {
   // задержку ни разу — просто константный текст.
   final Map<String, int?> _livePing = {};
 
+  ({String? host, int? port}) _pingEndpoint(Map<String, dynamic> server) {
+    final explicitHost = server['connect_host'] as String?;
+    final explicitPort = (server['connect_port'] as num?)?.toInt();
+    if (explicitHost != null && explicitHost.isNotEmpty) {
+      return (host: explicitHost, port: explicitPort ?? 443);
+    }
+
+    // Рабочий /hosts пока отдаёт subscription_url/host_url без отдельных
+    // connect_host/connect_port. Извлекаем адрес из уже имеющегося URL.
+    for (final key in const ['subscription_url', 'host_url']) {
+      final raw = server[key] as String?;
+      if (raw == null || raw.isEmpty) continue;
+      final uri = Uri.tryParse(raw);
+      if (uri == null || uri.host.isEmpty) continue;
+      return (host: uri.host, port: uri.hasPort ? uri.port : 443);
+    }
+    return (host: null, port: null);
+  }
+
   /// TCP-connect до connect_host:connect_port (см. api.py -> api_hosts()).
   /// Не ICMP-пинг (для него на Android нужны root-права/raw sockets,
   /// недоступные обычному приложению) — время TCP-рукопожатия достаточно
@@ -72,14 +91,18 @@ class _ServersScreenState extends State<ServersScreen> {
   /// скриншоте, скорее всего, не в этом файле, а в том, что бэкенд ещё
   /// отдаёт старый ответ без этих полей. Но теперь UI хотя бы не врёт
   /// бесконечным "измеряю..." — покажет честное "нет данных для пинга".
-  Future<void> _measureLivePing(String hostName, String? host, int? port) async {
+  Future<void> _measureLivePing(
+      String hostName, String? host, int? port) async {
     if (host == null || host.isEmpty) {
-      if (mounted) setState(() => _livePing[hostName] = -2); // -2 = нет connect_host от бэкенда
+      if (mounted)
+        setState(
+            () => _livePing[hostName] = -2); // -2 = нет connect_host от бэкенда
       return;
     }
     final sw = Stopwatch()..start();
     try {
-      final socket = await Socket.connect(host, port ?? 443, timeout: const Duration(seconds: 4));
+      final socket = await Socket.connect(host, port ?? 443,
+          timeout: const Duration(seconds: 4));
       sw.stop();
       socket.destroy();
       if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds);
@@ -99,7 +122,8 @@ class _ServersScreenState extends State<ServersScreen> {
       final host = s as Map<String, dynamic>;
       final hostName = host['host_name'] as String? ?? '';
       if (hostName.isEmpty) continue;
-      _measureLivePing(hostName, host['connect_host'] as String?, host['connect_port'] as int?);
+      final endpoint = _pingEndpoint(host);
+      _measureLivePing(hostName, endpoint.host, endpoint.port);
     }
   }
 
@@ -121,7 +145,8 @@ class _ServersScreenState extends State<ServersScreen> {
       final id = host['host_name'] as String? ?? '';
       if (id.isEmpty) continue;
       final ping = _livePing[id];
-      if (ping == null || ping < 0) continue; // ещё не измерен / недоступен / нет данных
+      if (ping == null || ping < 0)
+        continue; // ещё не измерен / недоступен / нет данных
       if (bestPing == null || ping < bestPing) {
         bestPing = ping;
         bestId = id;
@@ -179,7 +204,8 @@ class _ServersScreenState extends State<ServersScreen> {
           // текущий _selectedId не найден среди актуальных хостов —
           // выбираем первый доступный.
           final stillExists = _selectedId != null &&
-              hosts.any((h) => (h as Map<String, dynamic>)['host_name'] == _selectedId);
+              hosts.any((h) =>
+                  (h as Map<String, dynamic>)['host_name'] == _selectedId);
           if (!stillExists) {
             final first = hosts.first as Map<String, dynamic>;
             _selectedId = first['host_name'] as String?;
@@ -216,17 +242,26 @@ class _ServersScreenState extends State<ServersScreen> {
     final trimmed = name.trim();
     if (trimmed.isEmpty) return '??';
     final firstWord = trimmed.split(RegExp(r'\s+')).first;
-    return firstWord.length >= 2 ? firstWord.substring(0, 2).toUpperCase() : firstWord.toUpperCase();
+    return firstWord.length >= 2
+        ? firstWord.substring(0, 2).toUpperCase()
+        : firstWord.toUpperCase();
   }
 
   @override
   Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: SingleChildScrollView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-        child: Column(
+    // ServersScreen используется и во вкладке RootShell, и как
+    // отдельный MaterialPageRoute с главного экрана. Во втором
+    // случае без Scaffold текст вне NeonCard попадал под аварийный
+    // DefaultTextStyle Flutter с жёлтым двойным подчёркиванием.
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: _load,
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+            child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             AppHeader(
@@ -239,16 +274,22 @@ class _ServersScreenState extends State<ServersScreen> {
               style: TextStyle(fontSize: 10, color: AppColors.textDim),
             ),
             const SizedBox(height: 10),
-            if (_loading) const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator())),
+            if (_loading)
+              const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: CircularProgressIndicator())),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(_error!, style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+                child: Text(_error!,
+                    style:
+                        const TextStyle(color: AppColors.danger, fontSize: 12)),
               ),
             if (_hosts != null && _hosts!.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 20),
-                child: Text('В панелях 3x-ui пока нет активных локаций.', style: TextStyle(color: AppColors.textDim)),
+                child: Text('В панелях 3x-ui пока нет активных локаций.',
+                    style: TextStyle(color: AppColors.textDim)),
               ),
             if (_hosts != null)
               ..._hosts!.map((s) {
@@ -302,19 +343,25 @@ class _ServersScreenState extends State<ServersScreen> {
                               _favorites.add(id);
                             }
                           });
-                          _prefs.setStringSet(PrefKeys.favoriteServers, _favorites);
+                          _prefs.setStringSet(
+                              PrefKeys.favoriteServers, _favorites);
                         },
                         child: Icon(
-                          isFav ? Icons.star_rounded : Icons.star_border_rounded,
+                          isFav
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
                           size: 18,
-                          color: isFav ? const Color(0xFFF5C451) : const Color(0xFF372A52),
+                          color: isFav
+                              ? const Color(0xFFF5C451)
+                              : const Color(0xFF372A52),
                         ),
                       ),
                       const SizedBox(width: 8),
                       if (isSelected)
                         const NeonBadge('выбран')
                       else
-                        const Icon(Icons.chevron_right_rounded, color: AppColors.textDim, size: 18),
+                        const Icon(Icons.chevron_right_rounded,
+                            color: AppColors.textDim, size: 18),
                     ],
                   ),
                 );
@@ -330,7 +377,8 @@ class _ServersScreenState extends State<ServersScreen> {
                     height: 32,
                     decoration: const BoxDecoration(
                       shape: BoxShape.circle,
-                      gradient: LinearGradient(colors: [AppColors.success, Color(0xFF1D9A6C)]),
+                      gradient: LinearGradient(
+                          colors: [AppColors.success, Color(0xFF1D9A6C)]),
                     ),
                     alignment: Alignment.center,
                     child: const Text('⚡', style: TextStyle(fontSize: 14)),
@@ -340,9 +388,13 @@ class _ServersScreenState extends State<ServersScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Авто-балансировка', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                        Text('Авто-балансировка',
+                            style: TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w600)),
                         SizedBox(height: 2),
-                        Text('выбор лучшего сервера', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
+                        Text('выбор лучшего сервера',
+                            style: TextStyle(
+                                fontSize: 10, color: AppColors.textDim)),
                       ],
                     ),
                   ),
@@ -358,6 +410,8 @@ class _ServersScreenState extends State<ServersScreen> {
               ),
             ),
           ],
+            ),
+          ),
         ),
       ),
     );

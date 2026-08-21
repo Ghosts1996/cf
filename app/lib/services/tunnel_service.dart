@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart' show PlatformException;
+import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 import 'package:flutter_singbox_client/flutter_singbox_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
@@ -14,6 +14,7 @@ class TunnelService {
   static final TunnelService instance = TunnelService._();
 
   final SingboxClient _client = SingboxClient();
+  static const _nativeStatsChannel = MethodChannel('vpnonline/native_stats');
   bool _initialized = false;
   bool _killSwitchEnabled = true;
   // [НОВОЕ] См. PrefKeys.strictKillSwitch — включает поведение "физически
@@ -37,10 +38,22 @@ class TunnelService {
   StreamSubscription? _statsSub;
   StreamSubscription? _faultSub;
   DateTime? _connectStartedAt;
+  int _downloadTotalBytes = 0;
+  int _uploadTotalBytes = 0;
+  int _displayDownloadBytes = 0;
+  int _displayUploadBytes = 0;
+  DateTime? _lastTrafficAt;
+  int? _lastNativeRxBytes;
+  int? _lastNativeTxBytes;
+  DateTime? _lastNativeStatsAt;
+  bool _nativeStatsPolling = false;
+  String? _connectedHost;
+  int? _connectedPort;
   // [НОВОЕ — см. _restartDurationTicker] Тикает раз в секунду, пока
   // статус connected, чтобы таймер сессии на экране реально считал время,
   // а не был заморожен на 00:00:00.
   Timer? _durationTicker;
+  bool _runtimeStateSynced = false;
 
   final ValueNotifier<TunnelStatus?> status = ValueNotifier(null);
   final ValueNotifier<String?> lastError = ValueNotifier(null);
@@ -55,7 +68,7 @@ class TunnelService {
 
   bool get isConnected => status.value?.state == TunnelConnState.connected;
   bool get isBusy =>
-      status.value?.state == TunnelConnState.connecting || 
+      status.value?.state == TunnelConnState.connecting ||
       status.value?.state == TunnelConnState.disconnecting;
 
   String? _cachedSource;
@@ -67,61 +80,8 @@ class TunnelService {
     if (_initialized) return;
     await _client.initialize();
 
-    _stateSub = _client.serviceStateStream.listen((state) {
-      // [НОВОЕ] Пока активна служебная блокирующая сессия строгого Kill
-      // Switch (см. _engageHardKillSwitch/_disengageHardKillSwitch) — её
-      // собственные события состояния не должны затрагивать публичный
-      // status/duration/трафик обычного туннеля и не должны запускать
-      // обычную логику авто-переподключения через _onStatusChanged.
-      if (_hardKillSwitchEngaged) return;
-      final mapped = _mapServiceState(state);
-      final prevDownload = status.value?.download ?? 0;
-      final prevUpload = status.value?.upload ?? 0;
-
-      if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
-        _connectStartedAt = DateTime.now();
-      }
-      if (mapped != TunnelConnState.connected) {
-        _connectStartedAt = null;
-      }
-
-      // [ИСПРАВЛЕНО — таймер сессии стоял на 00:00:00]
-      // duration раньше пересчитывался ТОЛЬКО здесь, внутри листенера
-      // serviceStateStream. Но этот стрим шлёт событие один раз при смене
-      // состояния (…→connecting→connected), а не каждую секунду — сразу
-      // после перехода в connected новых событий больше нет, пока туннель
-      // не отвалится, поэтому значение застывало на 0 у самого момента
-      // подключения. trafficStatsStream ниже, который реально тикает
-      // ~1 Гц, duration просто копировал не пересчитывая — тоже не помогало.
-      // Теперь отдельный Timer.periodic (см. _restartDurationTicker)
-      // обновляет duration каждую секунду сам по себе, независимо от того,
-      // прислал ли плагин очередное событие.
-      _restartDurationTicker(mapped == TunnelConnState.connected);
-
-      status.value = TunnelStatus(
-        state: mapped,
-        duration: mapped == TunnelConnState.connected
-            ? DateTime.now().difference(_connectStartedAt ?? DateTime.now()).inSeconds
-            : 0,
-        download: prevDownload,
-        upload: prevUpload,
-      );
-      _onStatusChanged(mapped);
-    });
-
-    _statsSub = _client.trafficStatsStream.listen((stats) {
-      final current = status.value;
-      if (current == null) return;
-      status.value = TunnelStatus(
-        state: current.state,
-        duration: current.state == TunnelConnState.connected
-            ? DateTime.now().difference(_connectStartedAt ?? DateTime.now()).inSeconds
-            : current.duration,
-        download: stats.downlinkBps,
-        upload: stats.uplinkBps,
-      );
-    });
-
+    _stateSub = _client.serviceStateStream.listen(_applyServiceState);
+    _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
     _faultSub = _client.faultStream.listen((error) {
       lastError.value = error.toString();
     });
@@ -129,11 +89,156 @@ class TunnelService {
     _initialized = true;
   }
 
+  void _applyServiceState(dynamic state) {
+    // [НОВОЕ] Пока активна служебная блокирующая сессия строгого Kill
+    // Switch (см. _engageHardKillSwitch/_disengageHardKillSwitch) — её
+    // собственные события состояния не должны затрагивать публичный
+    // status/duration/трафик обычного туннеля и не должны запускать
+    // обычную логику авто-переподключения через _onStatusChanged.
+    if (_hardKillSwitchEngaged) return;
+    final mapped = _mapServiceState(state);
+    final prevDownload = status.value?.download ?? 0;
+    final prevUpload = status.value?.upload ?? 0;
+
+    if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
+      _connectStartedAt = DateTime.now();
+      if (_runtimeStateSynced) {
+        unawaited(LocalPrefs.instance.setInt(
+          PrefKeys.tunnelConnectedAtMillis,
+          _connectStartedAt!.millisecondsSinceEpoch,
+        ));
+      }
+    }
+    if (mapped != TunnelConnState.connected) {
+      _connectStartedAt = null;
+      if (_runtimeStateSynced) {
+        unawaited(
+            LocalPrefs.instance.setInt(PrefKeys.tunnelConnectedAtMillis, 0));
+      }
+    }
+
+    // [ИСПРАВЛЕНО — таймер сессии стоял на 00:00:00]
+    // duration раньше пересчитывался ТОЛЬКО здесь, внутри листенера
+    // serviceStateStream. Но этот стрим шлёт событие один раз при смене
+    // состояния (…→connecting→connected), а не каждую секунду — сразу
+    // после перехода в connected новых событий больше нет, пока туннель
+    // не отвалится, поэтому значение застывало на 0 у самого момента
+    // подключения. trafficStatsStream ниже, который реально тикает
+    // ~1 Гц, duration просто копировал не пересчитывая — тоже не помогало.
+    // Теперь отдельный Timer.periodic (см. _restartDurationTicker)
+    // обновляет duration каждую секунду сам по себе, независимо от того,
+    // прислал ли плагин очередное событие.
+    _restartDurationTicker(mapped == TunnelConnState.connected);
+
+    status.value = TunnelStatus(
+      state: mapped,
+      duration: mapped == TunnelConnState.connected
+          ? DateTime.now()
+              .difference(_connectStartedAt ?? DateTime.now())
+              .inSeconds
+          : 0,
+      download: prevDownload,
+      upload: prevUpload,
+      downloadTotalBytes:
+          mapped == TunnelConnState.connected ? _downloadTotalBytes : 0,
+      uploadTotalBytes:
+          mapped == TunnelConnState.connected ? _uploadTotalBytes : 0,
+    );
+    _onStatusChanged(mapped);
+  }
+
+  void _applyTrafficStats(dynamic stats) {
+    final current = status.value;
+    if (current == null) return;
+    final now = DateTime.now();
+    final nextDownloadTotal = stats.downlinkTotalBytes as int;
+    final nextUploadTotal = stats.uplinkTotalBytes as int;
+    // На части версий libbox total остаётся нулевым, хотя каждый тик
+    // содержит throughput. Накапливаем его сами, чтобы UI не сбрасывался.
+    final reportedDownload = nextDownloadTotal > _displayDownloadBytes
+        ? nextDownloadTotal
+        : _displayDownloadBytes +
+            ((stats.downlinkBps as num).toDouble().clamp(0, 1e12)).round();
+    final reportedUpload = nextUploadTotal > _displayUploadBytes
+        ? nextUploadTotal
+        : _displayUploadBytes +
+            ((stats.uplinkBps as num).toDouble().clamp(0, 1e12)).round();
+    _displayDownloadBytes = reportedDownload;
+    _displayUploadBytes = reportedUpload;
+    final elapsedSeconds = _lastTrafficAt == null
+        ? 0.0
+        : now.difference(_lastTrafficAt!).inMilliseconds / 1000.0;
+    final derivedDownload = elapsedSeconds > 0
+        ? ((nextDownloadTotal - _downloadTotalBytes) / elapsedSeconds)
+            .round()
+            .clamp(0, 1 << 62)
+        : 0;
+    final derivedUpload = elapsedSeconds > 0
+        ? ((nextUploadTotal - _uploadTotalBytes) / elapsedSeconds)
+            .round()
+            .clamp(0, 1 << 62)
+        : 0;
+    _lastTrafficAt = now;
+    _downloadTotalBytes = reportedDownload;
+    _uploadTotalBytes = reportedUpload;
+    status.value = TunnelStatus(
+      state: current.state,
+      duration: current.state == TunnelConnState.connected
+          ? DateTime.now()
+              .difference(_connectStartedAt ?? DateTime.now())
+              .inSeconds
+          : current.duration,
+      // На некоторых версиях libbox мгновенные up/down приходят нулевыми,
+      // хотя session total растёт. Считаем скорость по дельте totals и
+      // используем её как надёжный fallback.
+      // Android plugin already receives the live sing-box counters. Раньше
+      // здесь всегда оставлялся `current.*`, а он изначально равен нулю;
+      // native UID fallback не видел трафик других приложений и поэтому
+      // тоже возвращал нули. Берём показания ядра, а fallback используем
+      // только если конкретный тик действительно нулевой.
+      download: stats.downlinkBps > 0 ? stats.downlinkBps : current.download,
+      upload: stats.uplinkBps > 0 ? stats.uplinkBps : current.upload,
+      downloadTotalBytes: reportedDownload,
+      uploadTotalBytes: reportedUpload,
+    );
+  }
+
+  /// Перечитывает фактическое состояние нативного foreground-сервиса.
+  /// Пока Flutter Activity была в фоне или пересоздавалась Android, старое
+  /// событие Dart-стрима могло потеряться, хотя VPN продолжает работать.
+  Future<void> syncRuntimeState() async {
+    await _ensureInitialized();
+    try {
+      final actualState = await _client.getServiceState();
+      // Сначала восстанавливаем момент подключения и лишь затем публикуем
+      // состояние. Иначе экран кратко покажет 00:00:00 при возвращении в
+      // приложение, хотя foreground VPN всё это время был подключён.
+      if (_mapServiceState(actualState) == TunnelConnState.connected) {
+        final savedAt = await LocalPrefs.instance
+            .getInt(PrefKeys.tunnelConnectedAtMillis, fallback: 0);
+        if (savedAt > 0) {
+          _connectStartedAt = DateTime.fromMillisecondsSinceEpoch(savedAt);
+        }
+      }
+      _runtimeStateSynced = true;
+      _applyServiceState(actualState);
+      if (_mapServiceState(actualState) == TunnelConnState.connected) {
+        _applyTrafficStats(await _client.getTrafficStats());
+      }
+    } catch (e) {
+      lastError.value = 'Не удалось обновить состояние VPN: $e';
+    }
+  }
+
   TunnelConnState _mapServiceState(dynamic state) {
     final s = state.toString().toLowerCase();
-    if (s.contains('connecting') || s.contains('starting')) return TunnelConnState.connecting;
-    if (s.contains('disconnecting') || s.contains('stopping')) return TunnelConnState.disconnecting;
-    if (s.contains('connected') || s.contains('started') || s.contains('running')) return TunnelConnState.connected;
+    if (s.contains('connecting') || s.contains('starting'))
+      return TunnelConnState.connecting;
+    if (s.contains('disconnecting') || s.contains('stopping'))
+      return TunnelConnState.disconnecting;
+    if (s.contains('connected') ||
+        s.contains('started') ||
+        s.contains('running')) return TunnelConnState.connected;
     return TunnelConnState.disconnected;
   }
 
@@ -144,17 +249,83 @@ class TunnelService {
   void _restartDurationTicker(bool shouldRun) {
     _durationTicker?.cancel();
     _durationTicker = null;
-    if (!shouldRun) return;
+    if (!shouldRun) {
+      _lastNativeRxBytes = null;
+      _lastNativeTxBytes = null;
+      _lastNativeStatsAt = null;
+      return;
+    }
+    if (Platform.isAndroid) unawaited(_pollNativeTraffic());
     _durationTicker = Timer.periodic(const Duration(seconds: 1), (_) {
       final current = status.value;
       if (current == null || current.state != TunnelConnState.connected) return;
       status.value = TunnelStatus(
         state: current.state,
-        duration: DateTime.now().difference(_connectStartedAt ?? DateTime.now()).inSeconds,
+        duration: DateTime.now()
+            .difference(_connectStartedAt ?? DateTime.now())
+            .inSeconds,
         download: current.download,
         upload: current.upload,
+        downloadTotalBytes: current.downloadTotalBytes,
+        uploadTotalBytes: current.uploadTotalBytes,
       );
+      if (Platform.isAndroid) unawaited(_pollNativeTraffic());
     });
+  }
+
+  /// Android продолжает учитывать байты VPN на UID приложения даже тогда,
+  /// когда Flutter Activity была выгружена, а foreground VpnService остался
+  /// работать. Это надёжный fallback для бага плагина, у которого после
+  /// восстановления процесса больше не возобновлялся trafficStatsStream.
+  Future<void> _pollNativeTraffic() async {
+    if (_nativeStatsPolling || !isConnected) return;
+    _nativeStatsPolling = true;
+    try {
+      final raw = await _nativeStatsChannel
+          .invokeMapMethod<String, dynamic>('getUidTraffic');
+      final rx = (raw?['rxBytes'] as num?)?.toInt();
+      final tx = (raw?['txBytes'] as num?)?.toInt();
+      if (rx == null || tx == null) return;
+
+      final now = DateTime.now();
+      final elapsedSeconds = _lastNativeStatsAt == null
+          ? 0.0
+          : now.difference(_lastNativeStatsAt!).inMilliseconds / 1000.0;
+      final current = status.value;
+      if (current != null &&
+          current.state == TunnelConnState.connected &&
+          elapsedSeconds > 0 &&
+          _lastNativeRxBytes != null &&
+          _lastNativeTxBytes != null) {
+        final download = ((rx - _lastNativeRxBytes!) / elapsedSeconds)
+            .round()
+            .clamp(0, 1 << 62);
+        final upload = ((tx - _lastNativeTxBytes!) / elapsedSeconds)
+            .round()
+            .clamp(0, 1 << 62);
+        // UID-счётчики Android не включают трафик других приложений при
+        // split/full VPN и часто дают одинаковые значения. Не затираем ими
+        // уже полученную от sing-box скорость нулями.
+        if (download > 0 || upload > 0) {
+          status.value = TunnelStatus(
+            state: current.state,
+            duration: current.duration,
+            download: download > 0 ? download : current.download,
+            upload: upload > 0 ? upload : current.upload,
+            downloadTotalBytes: current.downloadTotalBytes,
+            uploadTotalBytes: current.uploadTotalBytes,
+          );
+        }
+      }
+      _lastNativeRxBytes = rx;
+      _lastNativeTxBytes = tx;
+      _lastNativeStatsAt = now;
+    } catch (_) {
+      // Не-Android платформы и старые сборки нативного слоя продолжают
+      // использовать штатный trafficStatsStream выше.
+    } finally {
+      _nativeStatsPolling = false;
+    }
   }
 
   void _onStatusChanged(TunnelConnState state) {
@@ -178,7 +349,8 @@ class TunnelService {
     Future.delayed(Duration(seconds: 3), () async {
       if (_userInitiatedDisconnect) return;
       try {
-        await connect(_lastConnectionString!, preferredHostName: _lastPreferredHostName);
+        await connect(_lastConnectionString!,
+            preferredHostName: _lastPreferredHostName);
         killSwitchBlocking.value = false;
         _autoReconnectAttempt = 0;
       } catch (_) {
@@ -317,31 +489,82 @@ class TunnelService {
     return null;
   }
 
-  Future<String> connect(String connectionString, {String? preferredHostName}) async {
+  Future<String> connect(String connectionString,
+      {String? preferredHostName}) async {
     lastError.value = null;
     await _ensureInitialized();
+    // На Android 13+ одного объявления POST_NOTIFICATIONS в манифесте
+    // недостаточно: пока пользователь не подтвердит runtime-разрешение,
+    // foreground VPN продолжает работать, но его карточка скрыта в шторке.
+    // Запрашиваем его до старта VpnService, чтобы первое подключение уже
+    // показало постоянное уведомление с кнопкой отключения.
+    if (Platform.isAndroid) {
+      try {
+        final notificationsAllowed = await _nativeStatsChannel
+                .invokeMethod<bool>('requestNotificationPermission') ??
+            false;
+        if (!notificationsAllowed) {
+          lastError.value =
+              'Разрешите уведомления, чтобы видеть статус VPN в шторке.';
+        }
+      } on PlatformException {
+        // Не прерываем VPN на старых сборках/устройствах: разрешение влияет
+        // только на видимость уведомления, а не на безопасность туннеля.
+      }
+    }
+    // Обычное подключение может получить событие connected раньше, чем
+    // ConnectScreen вызовет syncRuntimeState(), поэтому с этого момента
+    // разрешаем сохранить время старта сессии.
+    _runtimeStateSynced = true;
+    _downloadTotalBytes = 0;
+    _uploadTotalBytes = 0;
+    _displayDownloadBytes = 0;
+    _displayUploadBytes = 0;
+    _lastTrafficAt = null;
+    _lastNativeRxBytes = null;
+    _lastNativeTxBytes = null;
+    _lastNativeStatsAt = null;
 
-    final dnsProtection = await LocalPrefs.instance.getBool(PrefKeys.dnsProtection, fallback: false);
-    final blockAds = await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: false);
-    final dpiBypass = await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: false);
-    final proxyOnly = await LocalPrefs.instance.getBool(PrefKeys.proxyOnlyMode, fallback: false);
-    final dnsProvider = await LocalPrefs.instance.getString(PrefKeys.dnsServerProvider) ?? 'cloudflare';
-    final customDns = await LocalPrefs.instance.getString(PrefKeys.customDnsServer);
-    _killSwitchEnabled = await LocalPrefs.instance.getBool(PrefKeys.killSwitch, fallback: true);
+    final dnsProtection = await LocalPrefs.instance
+        .getBool(PrefKeys.dnsProtection, fallback: true);
+    final blockAds =
+        await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: true);
+    final dpiBypass =
+        await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: false);
+    final proxyOnly = await LocalPrefs.instance
+        .getBool(PrefKeys.proxyOnlyMode, fallback: false);
+    final dnsProvider =
+        await LocalPrefs.instance.getString(PrefKeys.dnsServerProvider) ??
+            'cloudflare';
+    final customDns =
+        await LocalPrefs.instance.getString(PrefKeys.customDnsServer);
+    _killSwitchEnabled =
+        await LocalPrefs.instance.getBool(PrefKeys.killSwitch, fallback: true);
     // [НОВОЕ] Строгий Kill Switch — см. докстринг PrefKeys.strictKillSwitch
     // и _engageHardKillSwitch ниже. Читается заранее, чтобы _onStatusChanged
     // знал, нужно ли поднимать служебную блокирующую сессию, когда обычное
     // авто-переподключение исчерпает попытки.
-    _strictKillSwitchEnabled = await LocalPrefs.instance.getBool(PrefKeys.strictKillSwitch, fallback: false);
-    _maxAutoReconnectAttempts = await LocalPrefs.instance.getInt(PrefKeys.reconnectAttempts, fallback: 3);
-    final bypassedMap = await LocalPrefs.instance.getBoolMap(PrefKeys.splitTunnelBypass);
-    final splitTunnelMode = await LocalPrefs.instance.getString(PrefKeys.splitTunnelMode) ?? 'exclude';
-    final selectedPackages = bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
-    final bypassLan = await LocalPrefs.instance.getBool(PrefKeys.bypassLan, fallback: true);
-    final muxEnabled = await LocalPrefs.instance.getBool(PrefKeys.muxEnabled, fallback: false);
-    final muxProtocol = await LocalPrefs.instance.getString(PrefKeys.muxProtocol) ?? 'h2mux';
-    final fakeIpDns = await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: false);
-    final ipv6Enabled = await LocalPrefs.instance.getBool(PrefKeys.ipv6Enabled, fallback: false);
+    _strictKillSwitchEnabled = await LocalPrefs.instance
+        .getBool(PrefKeys.strictKillSwitch, fallback: false);
+    _maxAutoReconnectAttempts = await LocalPrefs.instance
+        .getInt(PrefKeys.reconnectAttempts, fallback: 8);
+    final bypassedMap =
+        await LocalPrefs.instance.getBoolMap(PrefKeys.splitTunnelBypass);
+    final splitTunnelMode =
+        await LocalPrefs.instance.getString(PrefKeys.splitTunnelMode) ??
+            'exclude';
+    final selectedPackages =
+        bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
+    final bypassLan =
+        await LocalPrefs.instance.getBool(PrefKeys.bypassLan, fallback: false);
+    final muxEnabled =
+        await LocalPrefs.instance.getBool(PrefKeys.muxEnabled, fallback: true);
+    final muxProtocol =
+        await LocalPrefs.instance.getString(PrefKeys.muxProtocol) ?? 'smux';
+    final fakeIpDns =
+        await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: true);
+    final ipv6Enabled = await LocalPrefs.instance
+        .getBool(PrefKeys.ipv6Enabled, fallback: true);
 
     // Если сейчас активна служебная "блокирующая" сессия Kill Switch (см.
     // _engageHardKillSwitch), её нужно снять перед обычным подключением —
@@ -386,8 +609,8 @@ class TunnelService {
 
     final profiles = await _loadProfiles(connectionString);
     final preferred = _matchProfile(profiles, preferredHostName);
-    final ordered = preferred != null 
-        ? [preferred, ...profiles.where((p) => !identical(p, preferred))] 
+    final ordered = preferred != null
+        ? [preferred, ...profiles.where((p) => !identical(p, preferred))]
         : profiles;
 
     Object? lastFailure;
@@ -414,8 +637,23 @@ class TunnelService {
         Future<void> startSession() => _client.connect(SessionOptions(
               config: config,
               networkMode: proxyOnly ? NetworkMode.proxy : NetworkMode.vpn,
+              // На Android split-tunnel должен задаваться не только
+              // в JSON sing-box, но и на VpnService.Builder ДО establish().
+              // Именно нативный allow/disallow-список определяет,
+              // попадёт ли UID в VPN-сеть Android. Раньше плагину
+              // perAppProxy не передавался, поэтому VpnService захватывал
+              // все UID-ы, включая отмеченные в экране исключений.
+              perAppProxy: !proxyOnly && selectedPackages.isNotEmpty
+                  ? PerAppProxyOptions(
+                      mode: splitTunnelMode == 'include'
+                          ? PerAppProxyMode.include
+                          : PerAppProxyMode.exclude,
+                      packages: selectedPackages,
+                    )
+                  : null,
               notification: NotificationConfig(
-                title: profile.remark.isNotEmpty ? profile.remark : 'VPNOnline',
+                title: 'VPN подключён',
+                channelName: 'VPNOnline — подключение',
                 showTrafficStats: true,
                 showStopButton: true,
                 stopButtonLabel: 'Отключить',
@@ -447,7 +685,8 @@ class TunnelService {
         final reallyConnected = await _waitForConnected(Duration(seconds: 12));
         if (!reallyConnected) {
           await _settleAfterDisconnect();
-          lastFailure = 'VPN не подключился за 12 сек (ядра sing-box требуют время для инициализации туннеля)';
+          lastFailure =
+              'VPN не подключился за 12 сек (ядра sing-box требуют время для инициализации туннеля)';
           continue;
         }
 
@@ -479,16 +718,23 @@ class TunnelService {
         // списке (см. цикл for выше) — то есть просто доиспользуем уже
         // существующий фолбэк по профилям вместо того, чтобы городить
         // отдельную ветку.
-        final internetReachable = await _verifyInternetReachable(proxyOnly: proxyOnly);
+        final internetReachable =
+            await _verifyInternetReachable(proxyOnly: proxyOnly);
         if (!internetReachable) {
           await _settleAfterDisconnect();
-          lastFailure = 'Туннель поднялся, но интернет через него не идёт (сервер "${profile.remark}" не отвечает) — пробуем следующий';
+          lastFailure =
+              'Туннель поднялся, но интернет через него не идёт (сервер "${profile.remark}" не отвечает) — пробуем следующий';
           continue;
         }
 
-        final connectedName = profile.remark.isNotEmpty ? profile.remark : (preferredHostName ?? 'VPNOnline');
+        final connectedName = profile.remark.isNotEmpty
+            ? profile.remark
+            : (preferredHostName ?? 'VPNOnline');
         connectedServerName.value = connectedName;
-        localProxyAddress.value = proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
+        _connectedHost = profile.host;
+        _connectedPort = profile.port;
+        localProxyAddress.value =
+            proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
 
         _lastConnectionString = connectionString;
         _lastPreferredHostName = preferredHostName;
@@ -530,7 +776,8 @@ class TunnelService {
         if (!completer.isCompleted) completer.complete();
       });
       listener = () {
-        if (status.value?.state == TunnelConnState.disconnected && !completer.isCompleted) {
+        if (status.value?.state == TunnelConnState.disconnected &&
+            !completer.isCompleted) {
           completer.complete();
         }
       };
@@ -559,10 +806,10 @@ class TunnelService {
     // 'exclude' — selectedPackages идут в обход VPN (старое поведение).
     // 'include' — ТОЛЬКО selectedPackages идут через VPN.
     String splitTunnelMode = 'exclude',
-    bool bypassLan = true,
-    bool muxEnabled = false,
-    String muxProtocol = 'h2mux',
-    bool fakeIpDns = false,
+    bool bypassLan = false,
+    bool muxEnabled = true,
+    String muxProtocol = 'smux',
+    bool fakeIpDns = true,
     bool ipv6Enabled = false,
   }) {
     final outbound = <String, dynamic>{
@@ -590,7 +837,10 @@ class TunnelService {
         'enabled': true,
         'server_name': p.sni ?? p.host,
         if (p.alpn != null && p.alpn!.isNotEmpty) 'alpn': p.alpn!.split(','),
-        'utls': {'enabled': true, 'fingerprint': (p.fp == null || p.fp!.isEmpty) ? 'chrome' : p.fp},
+        'utls': {
+          'enabled': true,
+          'fingerprint': (p.fp == null || p.fp!.isEmpty) ? 'chrome' : p.fp
+        },
         if (p.security == 'reality')
           'reality': {
             'enabled': true,
@@ -608,20 +858,27 @@ class TunnelService {
     if (transportType == 'ws') {
       outbound['transport'] = {
         'type': 'ws',
-        'path': (p.transportPath == null || p.transportPath!.isEmpty) ? '/' : p.transportPath,
+        'path': (p.transportPath == null || p.transportPath!.isEmpty)
+            ? '/'
+            : p.transportPath,
         if (p.transportHost != null && p.transportHost!.isNotEmpty)
           'headers': {'Host': p.transportHost},
       };
     } else if (transportType == 'grpc') {
       outbound['transport'] = {
         'type': 'grpc',
-        'service_name': (p.transportPath == null || p.transportPath!.isEmpty) ? '' : p.transportPath,
+        'service_name': (p.transportPath == null || p.transportPath!.isEmpty)
+            ? ''
+            : p.transportPath,
       };
     } else if (transportType == 'http') {
       outbound['transport'] = {
         'type': 'http',
-        if (p.transportHost != null && p.transportHost!.isNotEmpty) 'host': [p.transportHost],
-        'path': (p.transportPath == null || p.transportPath!.isEmpty) ? '/' : p.transportPath,
+        if (p.transportHost != null && p.transportHost!.isNotEmpty)
+          'host': [p.transportHost],
+        'path': (p.transportPath == null || p.transportPath!.isEmpty)
+            ? '/'
+            : p.transportPath,
       };
     }
     // transportType == 'tcp' (или неизвестный) — без блока "transport",
@@ -635,15 +892,21 @@ class TunnelService {
     const dnsProviders = {
       'cloudflare': {'server': '1.1.1.1', 'server_name': 'cloudflare-dns.com'},
       'google': {'server': '8.8.8.8', 'server_name': 'dns.google'},
-      'adguard': {'server': '94.140.14.14', 'server_name': 'dns.adguard-dns.com'},
+      'adguard': {
+        'server': '94.140.14.14',
+        'server_name': 'dns.adguard-dns.com'
+      },
       'quad9': {'server': '9.9.9.9', 'server_name': 'dns.quad9.net'},
     };
     // [НОВОЕ] Провайдер 'custom' — пользовательский DNS-адрес с экрана
     // "Настройки" (см. PrefKeys.customDnsServer). Если пользователь выбрал
     // custom, но не указал адрес — тихо откатываемся на Cloudflare, чтобы
     // не отправлять sing-box заведомо пустой server и не ронять конфиг.
-    final selectedDns = dnsProviders[dnsProvider] ?? dnsProviders['cloudflare']!;
-    final hasCustomDns = dnsProvider == 'custom' && customDns != null && customDns.trim().isNotEmpty;
+    final selectedDns =
+        dnsProviders[dnsProvider] ?? dnsProviders['cloudflare']!;
+    final hasCustomDns = dnsProvider == 'custom' &&
+        customDns != null &&
+        customDns.trim().isNotEmpty;
 
     // [НОВОЕ] Fake IP (см. PrefKeys.fakeIpDns, как в Hiddify: Settings ->
     // DNS -> Fake IP). Домены внутри туннеля резолвятся в адреса из
@@ -711,34 +974,17 @@ class TunnelService {
       // блокировалась), но раз чиним маршрутизацию — заодно чиним и это;
       // при выключенном blockAds порядок ничего не меняет.
       {'action': 'sniff'},
-      if (blockAds)
-        {'domain_suffix': _adBlockDomains, 'action': 'reject'},
+      if (blockAds) {'domain_suffix': _adBlockDomains, 'action': 'reject'},
       {'protocol': 'dns', 'action': 'hijack-dns'},
-      // [ИСПРАВЛЕНО] Раньше DPI-обход включался как `'fragment': true`
-      // прямо внутри блока `tls` исходящего vless — это устаревший, давно
-      // убранный формат: в самом sing-box, начиная с 1.12.0, фрагментация
-      // TLS-хендшейка — не свойство исходящего соединения, а ОПЦИЯ ДЕЙСТВИЯ
-      // ПРАВИЛА МАРШРУТИЗАЦИИ (`route`/`route-options`, поле `tls_fragment`,
-      // см. sing-box.sagernet.org/configuration/route/rule_action и
-      // /changelog — "Compatibility for old formats will be removed in
-      // sing-box 1.14.0"). Этот пакет использует именно ядро 1.14.0-alpha —
-      // старый булев `fragment` внутри `tls` там не существует как поле
-      // вообще, поэтому `checkConfig()`/`connect()` с ним гарантированно
-      // упали бы, как только пользователь включил тумблер "Обход DPI" в
-      // настройках (по умолчанию тумблер выключен, поэтому раньше это не
-      // всплывало на каждом подключении, но всплыло бы при первом же
-      // включении). Правильная замена — отдельное правило, которое явно
-      // направляет TCP-трафик пользователя на `proxy` с включённой
-      // фрагментацией именно TLS-хендшейка ВНУТРИ туннеля (обычный HTTPS
-      // пользователя, а не сам VLESS+Reality хендшейк до сервера — тот и
-      // так не детектируется DPI по конструкции REALITY, фрагментировать
-      // его незачем и нечем на этом уровне).
+      // В sing-box 1.14 `tls_fragment` — булева опция route-action.
+      // Объект `{enabled: true}` не соответствует Go-схеме ядра и
+      // отклоняется ещё на `checkConfig()` с INVALID_CONFIG.
       if (dpiBypass)
         {
           'network': 'tcp',
           'action': 'route',
           'outbound': 'proxy',
-          'tls_fragment': {'enabled': true},
+          'tls_fragment': true,
         },
     ];
 
@@ -859,16 +1105,18 @@ class TunnelService {
     'adjust.com',
   ];
 
-  Future<List<_ParsedVless>> _loadProfiles(String connectionString, {bool forceRefresh = false}) async {
+  Future<List<_ParsedVless>> _loadProfiles(String connectionString,
+      {bool forceRefresh = false}) async {
     final source = connectionString.trim();
     if (source.isEmpty) {
-      throw TunnelException('Не разместили ссылку на конфигурацию VLESS Reality.');
+      throw TunnelException(
+          'Не разместили ссылку на конфигурацию VLESS Reality.');
     }
 
-    if (!forceRefresh && 
-        _cachedProfiles != null && 
-        _cachedSource == source && 
-        _cachedAt != null && 
+    if (!forceRefresh &&
+        _cachedProfiles != null &&
+        _cachedSource == source &&
+        _cachedAt != null &&
         DateTime.now().difference(_cachedAt!) < _cacheTtl) {
       return _cachedProfiles!;
     }
@@ -894,19 +1142,22 @@ class TunnelService {
           },
         ).timeout(Duration(seconds: 12));
         if (res.statusCode >= 400) {
-          throw TunnelException('Подписка недоступна (${res.statusCode}). Попробуйте позднее.');
+          throw TunnelException(
+              'Подписка недоступна (${res.statusCode}). Попробуйте позднее.');
         }
         body = res.body;
       } on TunnelException {
         rethrow;
       } catch (e) {
-        throw TunnelException('Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
+        throw TunnelException(
+            'Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
       }
     }
 
     final profiles = _parseSubscriptionBody(body);
     if (profiles.isEmpty) {
-      throw TunnelException('Конфигурация не содержит рабочих серверов VLESS+Reality.');
+      throw TunnelException(
+          'Конфигурация не содержит рабочих серверов VLESS+Reality.');
     }
 
     _cachedSource = source;
@@ -933,16 +1184,18 @@ class TunnelService {
     if (!text.contains('vless://')) {
       try {
         final normalized = text.replaceAll('-', '+').replaceAll('_', '/');
-        final padded = normalized.padRight(normalized.length + (4 - normalized.length % 4) % 4, '=');
+        final padded = normalized.padRight(
+            normalized.length + (4 - normalized.length % 4) % 4, '=');
         final decoded = utf8.decode(base64.decode(padded));
         if (decoded.contains('vless://')) text = decoded;
       } catch (_) {}
     }
 
-    final lines = text.split(RegExp(r'[\r\n]+'))
-      .map((line) => line.trim())
-      .where((line) => line.startsWith('vless://'))
-      .toList();
+    final lines = text
+        .split(RegExp(r'[\r\n]+'))
+        .map((line) => line.trim())
+        .where((line) => line.startsWith('vless://'))
+        .toList();
 
     final result = <_ParsedVless>[];
     for (final line in lines) {
@@ -980,7 +1233,12 @@ class TunnelService {
         final uuid = item['uuid'] as String?;
         final host = item['server'] as String?;
         final port = (item['server_port'] as num?)?.toInt();
-        if (uuid == null || uuid.isEmpty || host == null || host.isEmpty || port == null || port == 0) {
+        if (uuid == null ||
+            uuid.isEmpty ||
+            host == null ||
+            host.isEmpty ||
+            port == null ||
+            port == 0) {
           continue;
         }
 
@@ -1001,12 +1259,14 @@ class TunnelService {
               (transportHostList is List && transportHostList.isNotEmpty
                   ? transportHostList.first as String?
                   : null);
-          transportPath = transport['path'] as String? ?? transport['service_name'] as String?;
+          transportPath = transport['path'] as String? ??
+              transport['service_name'] as String?;
         }
 
         // security=reality без public_key нативное ядро не примет — та же
         // защита, что и в _ParsedVless.tryParse ниже для vless://-ссылок.
-        final security = realityEnabled ? 'reality' : (tlsEnabled ? 'tls' : 'none');
+        final security =
+            realityEnabled ? 'reality' : (tlsEnabled ? 'tls' : 'none');
         final pbk = reality?['public_key'] as String?;
         if (security == 'reality' && (pbk == null || pbk.isEmpty)) continue;
 
@@ -1022,7 +1282,9 @@ class TunnelService {
           sni: tls?['server_name'] as String?,
           sid: reality?['short_id'] as String?,
           flow: item['flow'] as String?,
-          alpn: (alpnList is List && alpnList.isNotEmpty) ? alpnList.join(',') : null,
+          alpn: (alpnList is List && alpnList.isNotEmpty)
+              ? alpnList.join(',')
+              : null,
           transportType: (transport?['type'] as String?) ?? 'tcp',
           transportHost: transportHost,
           transportPath: transportPath,
@@ -1078,9 +1340,11 @@ class TunnelService {
       // собой (loopback), оно не подчиняется системной маршрутизации VPN и
       // потому реально проходит именно через только что поднятый туннель.
       // Проверка тут валидна как есть — трогать не стал.
-      final client = IOClient(HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
+      final client = IOClient(
+          HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
       try {
-        final response = await client.head(probeUri).timeout(const Duration(seconds: 8));
+        final response =
+            await client.head(probeUri).timeout(const Duration(seconds: 8));
         return response.statusCode > 0;
       } catch (_) {
         return false;
@@ -1134,6 +1398,8 @@ class TunnelService {
     if (_hardKillSwitchEngaged) {
       await _disengageHardKillSwitch();
       connectedServerName.value = null;
+      _connectedHost = null;
+      _connectedPort = null;
       localProxyAddress.value = null;
       return;
     }
@@ -1143,6 +1409,8 @@ class TunnelService {
       lastError.value = 'Отключение не удалось: $e';
     } finally {
       connectedServerName.value = null;
+      _connectedHost = null;
+      _connectedPort = null;
       localProxyAddress.value = null;
     }
   }
@@ -1161,21 +1429,45 @@ class TunnelService {
   /// ссылка формата `https://.../sub/<uuid>` (или любая другая) реально
   /// расшифровывается и содержит пригодные для подключения профили, не
   /// поднимая сам туннель.
-  Future<SubscriptionCheckResult> checkSubscription(String connectionString) async {
+  Future<SubscriptionCheckResult> checkSubscription(
+      String connectionString) async {
     try {
-      final profiles = await _loadProfiles(connectionString, forceRefresh: true);
+      final profiles =
+          await _loadProfiles(connectionString, forceRefresh: true);
       return SubscriptionCheckResult(
         ok: true,
-        serverNames: profiles.map((p) => p.remark.isNotEmpty ? p.remark : p.host).toList(),
+        serverNames: profiles
+            .map((p) => p.remark.isNotEmpty ? p.remark : p.host)
+            .toList(),
       );
     } on TunnelException catch (e) {
       return SubscriptionCheckResult(ok: false, error: e.message);
     } catch (e) {
-      return SubscriptionCheckResult(ok: false, error: 'Не удалось проверить ключ: $e');
+      return SubscriptionCheckResult(
+          ok: false, error: 'Не удалось проверить ключ: $e');
     }
   }
 
-  Future<int?> connectedDelayMs() async => null;
+  /// TCP-задержка до VLESS-узла текущей сессии. Для неё не нужны ICMP/root;
+  /// проверяется тот же адрес и порт, куда подключено ядро sing-box.
+  Future<int?> connectedDelayMs() async {
+    final host = _connectedHost;
+    final port = _connectedPort;
+    if (!isConnected || host == null || port == null) return null;
+
+    final stopwatch = Stopwatch()..start();
+    Socket? socket;
+    try {
+      socket =
+          await Socket.connect(host, port, timeout: const Duration(seconds: 4));
+      stopwatch.stop();
+      return stopwatch.elapsedMilliseconds.clamp(1, 9999);
+    } catch (_) {
+      return null;
+    } finally {
+      socket?.destroy();
+    }
+  }
 
   Future<void> dispose() async {
     _restartDurationTicker(false);
@@ -1191,7 +1483,8 @@ class TunnelService {
 /// [НОВОЕ] Результат `TunnelService.checkSubscription()` — см. докстринг
 /// метода. `serverNames` заполнен только когда `ok == true`.
 class SubscriptionCheckResult {
-  SubscriptionCheckResult({required this.ok, this.serverNames = const [], this.error});
+  SubscriptionCheckResult(
+      {required this.ok, this.serverNames = const [], this.error});
   final bool ok;
   final List<String> serverNames;
   final String? error;
@@ -1206,12 +1499,16 @@ class TunnelStatus {
     required this.duration,
     required this.download,
     required this.upload,
+    this.downloadTotalBytes = 0,
+    this.uploadTotalBytes = 0,
   });
 
   final TunnelConnState state;
   final int duration;
   final num download;
   final num upload;
+  final int downloadTotalBytes;
+  final int uploadTotalBytes;
 }
 
 class _ParsedVless {
@@ -1237,17 +1534,18 @@ class _ParsedVless {
   final String host;
   final int port;
   final String security; // reality | tls | none
-  final String? pbk;     // Публичный ключ для Reality
-  final String? fp;      // TLS-отпечаток
-  final String? sni;     // Server Name Indication
-  final String? sid;     // Short ID для Reality
-  final String? flow;    // Тип потока (xtls-rprx-vision и т.д.)
-  final String? spx;     // SpiderX (путь для Reality)
-  final String? alpn;    // ALPN, через запятую
-  final String? transportType; // tcp | ws | grpc | http (headerType/type в ссылке)
+  final String? pbk; // Публичный ключ для Reality
+  final String? fp; // TLS-отпечаток
+  final String? sni; // Server Name Indication
+  final String? sid; // Short ID для Reality
+  final String? flow; // Тип потока (xtls-rprx-vision и т.д.)
+  final String? spx; // SpiderX (путь для Reality)
+  final String? alpn; // ALPN, через запятую
+  final String?
+      transportType; // tcp | ws | grpc | http (headerType/type в ссылке)
   final String? transportHost; // Host-заголовок для ws/http-маскировки
   final String? transportPath; // path для ws / service_name-путь для grpc
-  final String remark;   // Имя сервера
+  final String remark; // Имя сервера
 
   static _ParsedVless? tryParse(String line) {
     try {
@@ -1294,7 +1592,8 @@ class _ParsedVless {
       // падения всего приложения.
       final security = (q['security'] ?? 'none').toLowerCase();
       final pbkValue = q['pbk'];
-      if (security == 'reality' && (pbkValue == null || pbkValue.isEmpty)) return null;
+      if (security == 'reality' && (pbkValue == null || pbkValue.isEmpty))
+        return null;
 
       return _ParsedVless(
         uuid: uuid,

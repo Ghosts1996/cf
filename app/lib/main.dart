@@ -104,13 +104,16 @@ class _AppEntryPointState extends State<AppEntryPoint> {
   Widget build(BuildContext context) {
     switch (_stage) {
       case _Stage.loading:
-        return const Scaffold(backgroundColor: AppColors.bg, body: SizedBox.shrink());
+        return const Scaffold(
+            backgroundColor: AppColors.bg, body: SizedBox.shrink());
       case _Stage.onboarding:
         return OnboardingScreen(onDone: () => _checkSession());
       case _Stage.auth:
-        return AuthScreen(onAuthenticated: () => setState(() => _stage = _Stage.app));
+        return AuthScreen(
+            onAuthenticated: () => setState(() => _stage = _Stage.app));
       case _Stage.app:
-        return RootShell(onLoggedOut: () => setState(() => _stage = _Stage.auth));
+        return RootShell(
+            onLoggedOut: () => setState(() => _stage = _Stage.auth));
     }
   }
 }
@@ -128,6 +131,11 @@ class _RootShellState extends State<RootShell> {
 
   @override
   Widget build(BuildContext context) {
+    // Вкладки должны оставаться смонтированными. Иначе при возврате на
+    // «Главную» создаётся новый ConnectScreen, его _autoConnectTried снова
+    // false и настройка автоподключения воспринимает переключение вкладки
+    // как новый запуск приложения. IndexedStack запускает эту логику только
+    // при настоящем старте RootShell и сохраняет актуальный VPN-статус.
     final screens = [
       const ConnectScreen(),
       const KeysScreen(),
@@ -143,15 +151,21 @@ class _RootShellState extends State<RootShell> {
       MenuScreen(onLoggedOut: widget.onLoggedOut),
     ];
     return Scaffold(
-      body: SafeArea(child: screens[_index]),
+      body: SafeArea(
+        child: IndexedStack(index: _index, children: screens),
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.home_rounded), label: 'Главная'),
-          NavigationDestination(icon: Icon(Icons.vpn_key_rounded), label: 'Ключи'),
-          NavigationDestination(icon: Icon(Icons.payments_rounded), label: 'Баланс'),
-          NavigationDestination(icon: Icon(Icons.public_rounded), label: 'Серверы'),
+          NavigationDestination(
+              icon: Icon(Icons.home_rounded), label: 'Главная'),
+          NavigationDestination(
+              icon: Icon(Icons.vpn_key_rounded), label: 'Ключи'),
+          NavigationDestination(
+              icon: Icon(Icons.payments_rounded), label: 'Баланс'),
+          NavigationDestination(
+              icon: Icon(Icons.public_rounded), label: 'Серверы'),
           NavigationDestination(icon: Icon(Icons.menu_rounded), label: 'Меню'),
         ],
       ),

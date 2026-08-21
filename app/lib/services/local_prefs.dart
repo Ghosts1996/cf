@@ -33,7 +33,8 @@ class LocalPrefs {
 
   SharedPreferences? _prefs;
 
-  Future<SharedPreferences> get _sp async => _prefs ??= await SharedPreferences.getInstance();
+  Future<SharedPreferences> get _sp async =>
+      _prefs ??= await SharedPreferences.getInstance();
 
   // ── generic bool ──────────────────────────────────────────────────────
   Future<bool> getBool(String key, {bool fallback = false}) async {
@@ -104,6 +105,10 @@ class LocalPrefs {
 class PrefKeys {
   PrefKeys._();
   static const autoConnect = 'settings.auto_connect';
+  // Момент старта работающего туннеля. Нужен, чтобы после пересоздания
+  // Flutter Activity восстановить реальный счётчик сессии, если foreground
+  // VpnService Android продолжал работать.
+  static const tunnelConnectedAtMillis = 'vpn.tunnel_connected_at_millis';
   static const smartWifi = 'settings.smart_wifi';
   static const killSwitch = 'settings.kill_switch';
   static const dnsProtection = 'settings.dns_protection';
@@ -216,13 +221,16 @@ class ManualKeyStore {
   Future<void> ensureLoaded() async {
     if (_loaded) return;
     _loaded = true;
-    final saved = await LocalPrefs.instance.getString(PrefKeys.manualConnectionString);
-    notifier.value = (saved == null || saved.trim().isEmpty) ? null : saved.trim();
+    final saved =
+        await LocalPrefs.instance.getString(PrefKeys.manualConnectionString);
+    notifier.value =
+        (saved == null || saved.trim().isEmpty) ? null : saved.trim();
   }
 
   Future<void> set(String rawValue) async {
     final trimmed = rawValue.trim();
-    await LocalPrefs.instance.setString(PrefKeys.manualConnectionString, trimmed);
+    await LocalPrefs.instance
+        .setString(PrefKeys.manualConnectionString, trimmed);
     notifier.value = trimmed.isEmpty ? null : trimmed;
   }
 
