@@ -4,6 +4,7 @@ import '../widgets/neon.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
 import '../services/app_log_service.dart';
+import 'logs_viewer_screen.dart';
 
 /// Безопасность (Kill Switch, DNS) — пункт меню из макета.
 ///
@@ -460,6 +461,21 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         ),
                       ),
                       const Divider(height: 20),
+                      // [НОВОЕ] Кнопка "Просмотреть логи" — ведёт на
+                      // LogsViewerScreen, который читает те же записи через
+                      // AppLogService.instance.getAll() и показывает их
+                      // списком в стиле остальных экранов приложения.
+                      Center(
+                        child: PillButton(
+                          label: 'Просмотреть логи',
+                          icon: '🗒️',
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const LogsViewerScreen()),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
                       Center(
                         child: OutlinedButton.icon(
                           onPressed: _deleteAllLogs,
