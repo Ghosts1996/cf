@@ -144,6 +144,17 @@ class _ServersScreenState extends State<ServersScreen> {
             () => _livePing[hostName] = -2); // -2 = нет connect_host от бэкенда
       return;
     }
+    // [НОВОЕ — диагностика] Пишем в logcat, какой ИМЕННО адрес пингуется
+    // для каждой локации: реальный из `_realEndpoints` (VLESS-профиль) или
+    // запасной, угаданный из subscription_url/host_url (см. `_pingEndpoint`
+    // выше). Если у всех локаций в логе будет один и тот же host — значит
+    // либо не удалось получить реальные адреса (см. `_loadActiveConnectionString`
+    // — там тоже есть лог) и мы на запасном варианте, либо VLESS-профили
+    // в самой подписке физически ведут на один и тот же адрес (общая точка
+    // входа) — тогда TCP-пинг принципиально не может их различить.
+    final real = _realEndpoints[hostName];
+    debugPrint('[servers] пинг $hostName -> $host:${port ?? 443} '
+        '(${real != null ? "реальный VLESS-адрес" : "запасной вариант из /hosts"})');
     final sw = Stopwatch()..start();
     try {
       final socket = await Socket.connect(host, port ?? 443,
@@ -177,7 +188,48 @@ class _ServersScreenState extends State<ServersScreen> {
   /// падает и не мешает остальной загрузке экрана, если пользователь не
   /// залогинен/нет активного ключа/сеть недоступна — в этом случае просто
   /// остаёмся на запасном варианте пинга через subscription_url/host_url.
+  ///
+  /// [ИСПРАВЛЕНО] Две реальные причины, по которым сюда раньше можно было
+  /// не дойти до реальных адресов вообще (и молча свалиться на общий
+  /// subscription_url — тот самый "у всех локаций одинаковый пинг"):
+  ///
+  /// 1. Ручной ключ игнорировался полностью — бралcя ТОЛЬКО ключ из
+  ///    личного кабинета (`_api.getKeys()`), хотя ConnectScreen подключает
+  ///    туннель по ручному ключу В ПРИОРИТЕТЕ, если он задан (см.
+  ///    `_effectiveConnectionString` в connect_screen.dart). Если
+  ///    подключение реально идёт по ручному ключу — измерение пинга шло
+  ///    по СОВЕРШЕННО ДРУГОЙ подписке, а то и вовсе без неё.
+  /// 2. Бэкенд (`backend-patch/api.py::api_user_keys()`) на любой ошибке
+  ///    запроса к конкретной 3x-ui-панели молча пишет `connection_string:
+  ///    ''` для этого ключа, проглатывая исключение. Раньше брался только
+  ///    `active.first` — если у САМОГО свежего по сроку ключа
+  ///    connection_string оказывался пустым (например, именно в этот
+  ///    момент не ответила одна из панелей), функция полностью сдавалась,
+  ///    хотя у пользователя мог быть ещё один активный ключ с рабочей
+  ///    подпиской. Теперь перебираем ВСЕ активные ключи по порядку, пока
+  ///    не найдём непустую и реально парсящуюся подписку.
   Future<void> _loadActiveConnectionString() async {
+    // Ручной ключ имеет приоритет — именно по нему реально подключается
+    // ConnectScreen, если он задан. `ensureLoaded()` идемпотентен (внутри
+    // флаг `_loaded`) — безопасно звать здесь же, не полагаясь на то, что
+    // ConnectScreen успеет прочитать значение из SharedPreferences раньше
+    // нас (оба экрана создаются практически одновременно в IndexedStack).
+    await ManualKeyStore.instance.ensureLoaded();
+    final manual = ManualKeyStore.instance.value?.trim();
+    if (manual != null && manual.isNotEmpty) {
+      final endpoints = await _tunnel.listProfileEndpoints(manual);
+      debugPrint('[servers] ручной ключ: найдено ${endpoints.length} '
+          'локаций -> ${endpoints.entries.map((e) => '${e.key}=${e.value.host}:${e.value.port}').join(', ')}');
+      if (mounted && endpoints.isNotEmpty) {
+        setState(() => _realEndpoints = endpoints);
+        return;
+      }
+      // Ручной ключ задан, но подписка не распарсилась — не переходим на
+      // ключи аккаунта молча (ConnectScreen в этой ситуации тоже не
+      // подключится по аккаунту), просто остаёмся без реальных адресов.
+      return;
+    }
+
     try {
       final keys = await _api.getKeys();
       final active = keys.cast<Map<String, dynamic>>().where((k) {
@@ -193,14 +245,22 @@ class _ServersScreenState extends State<ServersScreen> {
           if (eb == null) return -1;
           return eb.compareTo(ea);
         });
-      if (active.isEmpty) return;
-      final connectionString = active.first['connection_string'] as String?;
-      if (connectionString == null || connectionString.isEmpty) return;
-      final endpoints = await _tunnel.listProfileEndpoints(connectionString);
-      if (mounted && endpoints.isNotEmpty) {
-        setState(() => _realEndpoints = endpoints);
+      for (final key in active) {
+        final connectionString = key['connection_string'] as String?;
+        if (connectionString == null || connectionString.isEmpty) continue;
+        final endpoints = await _tunnel.listProfileEndpoints(connectionString);
+        if (endpoints.isEmpty) continue;
+        debugPrint('[servers] ключ ${key['key_id']}: найдено '
+            '${endpoints.length} локаций -> ${endpoints.entries.map((e) => '${e.key}=${e.value.host}:${e.value.port}').join(', ')}');
+        if (mounted) setState(() => _realEndpoints = endpoints);
+        return;
       }
-    } catch (_) {
+      debugPrint('[servers] ни у одного активного ключа не нашлось '
+          'рабочей подписки — остаёмся на запасном варианте пинга '
+          '(subscription_url/host_url из /hosts)');
+    } catch (e) {
+      debugPrint('[servers] не удалось получить ключи для реального '
+          'пинга: $e — остаёмся на запасном варианте');
       // Нет ключа/сети — не критично, экран просто останется на запасном
       // варианте измерения пинга (см. _pingEndpoint).
     }
