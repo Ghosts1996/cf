@@ -6,6 +6,7 @@ import '../widgets/neon.dart';
 import '../services/api_client.dart';
 import '../state/selected_server.dart';
 import '../services/local_prefs.dart';
+import '../services/tunnel_service.dart';
 
 /// Экран выбора сервера.
 ///
@@ -45,6 +46,7 @@ class ServersScreen extends StatefulWidget {
 class _ServersScreenState extends State<ServersScreen> {
   final _api = ApiClient.instance;
   final _prefs = LocalPrefs.instance;
+  final _tunnel = TunnelService.instance;
   List<dynamic>? _hosts;
   String? _error;
   bool _loading = true;
@@ -56,6 +58,68 @@ class _ServersScreenState extends State<ServersScreen> {
   // была статичная надпись "сервер онлайн", которая не отражала реальную
   // задержку ни разу — просто константный текст.
   final Map<String, int?> _livePing = {};
+
+  // [НОВОЕ] Реальные адреса серверов (host_name -> host:port), взятые из
+  // самой VLESS-ссылки активного ключа (см. TunnelService.listProfileEndpoints).
+  // [ИСПРАВЛЕНО — причина "все сервера показывают одинаковый пинг и
+  // автобалансировка не переключается"] Раньше пинг мерился до
+  // `connect_host`, который бэкенд считает из домена `subscription_url`
+  // (см. backend-patch/api.py -> api_hosts()) — а этот домен часто ОБЩИЙ
+  // для всех локаций сразу (единая точка выдачи подписки), а не адрес
+  // конкретного VLESS-сервера страны. Поэтому все локации "мерили" по сути
+  // один и тот же хост и получали одинаковый пинг — выбирать лучший было
+  // не из чего. Теперь, если удаётся получить connection_string активного
+  // ключа, пингуем РЕАЛЬНЫЙ адрес каждой локации (тот же, на который идёт
+  // трафик при подключении). Старая логика через connect_host/subscription_url
+  // остаётся запасным вариантом, если ключа/сети нет.
+  Map<String, ({String host, int port})> _realEndpoints = {};
+
+  // [НОВОЕ] Раз в 30 секунд, пока включена авто-балансировка, повторяем
+  // замер пинга и пересчитываем лучший сервер — даже если пользователь
+  // ушёл с этого экрана на другую вкладку (экран остаётся смонтированным
+  // внутри IndexedStack в main.dart, см. RootShell, поэтому таймер не
+  // прерывается переключением вкладок). Раньше замер происходил ровно один
+  // раз при открытии экрана — "автобалансировка" не реагировала вообще ни
+  // на что, что происходило после первой отрисовки.
+  Timer? _autoBalanceTimer;
+  static const _autoBalanceInterval = Duration(seconds: 30);
+  // Минимальное преимущество нового сервера над тем, на котором реально
+  // поднят туннель, прежде чем реально рвать рабочее соединение ради
+  // переключения — без порога автобалансировка дёргала бы туннель туда-
+  // обратно между двумя серверами с почти одинаковым (в пределах шума
+  // сети) пингом.
+  static const _switchThresholdMs = 20;
+  // Не переключаем чаще, чем раз в это время, даже если каждый новый замер
+  // формально находит сервер чуть быстрее — та же причина, что и порог выше.
+  static const _switchCooldown = Duration(seconds: 45);
+  DateTime? _lastSwitchAt;
+  String? _lastSwitchTarget;
+  bool _switching = false;
+
+  ({String? host, int? port}) _pingEndpoint(
+      String hostName, Map<String, dynamic> server) {
+    final real = _realEndpoints[hostName];
+    if (real != null && real.host.isNotEmpty) {
+      return (host: real.host, port: real.port);
+    }
+
+    final explicitHost = server['connect_host'] as String?;
+    final explicitPort = (server['connect_port'] as num?)?.toInt();
+    if (explicitHost != null && explicitHost.isNotEmpty) {
+      return (host: explicitHost, port: explicitPort ?? 443);
+    }
+
+    // Рабочий /hosts пока отдаёт subscription_url/host_url без отдельных
+    // connect_host/connect_port. Извлекаем адрес из уже имеющегося URL.
+    for (final key in const ['subscription_url', 'host_url']) {
+      final raw = server[key] as String?;
+      if (raw == null || raw.isEmpty) continue;
+      final uri = Uri.tryParse(raw);
+      if (uri == null || uri.host.isEmpty) continue;
+      return (host: uri.host, port: uri.hasPort ? uri.port : 443);
+    }
+    return (host: null, port: null);
+  }
 
   /// TCP-connect до connect_host:connect_port (см. api.py -> api_hosts()).
   /// Не ICMP-пинг (для него на Android нужны root-права/raw sockets,
@@ -72,14 +136,18 @@ class _ServersScreenState extends State<ServersScreen> {
   /// скриншоте, скорее всего, не в этом файле, а в том, что бэкенд ещё
   /// отдаёт старый ответ без этих полей. Но теперь UI хотя бы не врёт
   /// бесконечным "измеряю..." — покажет честное "нет данных для пинга".
-  Future<void> _measureLivePing(String hostName, String? host, int? port) async {
+  Future<void> _measureLivePing(
+      String hostName, String? host, int? port) async {
     if (host == null || host.isEmpty) {
-      if (mounted) setState(() => _livePing[hostName] = -2); // -2 = нет connect_host от бэкенда
+      if (mounted)
+        setState(
+            () => _livePing[hostName] = -2); // -2 = нет connect_host от бэкенда
       return;
     }
     final sw = Stopwatch()..start();
     try {
-      final socket = await Socket.connect(host, port ?? 443, timeout: const Duration(seconds: 4));
+      final socket = await Socket.connect(host, port ?? 443,
+          timeout: const Duration(seconds: 4));
       sw.stop();
       socket.destroy();
       if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds);
@@ -99,19 +167,65 @@ class _ServersScreenState extends State<ServersScreen> {
       final host = s as Map<String, dynamic>;
       final hostName = host['host_name'] as String? ?? '';
       if (hostName.isEmpty) continue;
-      _measureLivePing(hostName, host['connect_host'] as String?, host['connect_port'] as int?);
+      final endpoint = _pingEndpoint(hostName, host);
+      _measureLivePing(hostName, endpoint.host, endpoint.port);
     }
   }
 
-  /// [НОВОЕ] Раньше тумблер "Авто-балансировка" только сохранял своё
-  /// положение в LocalPrefs и больше НИЧЕГО не делал — ни на что не влиял
-  /// фактически, ровно то, о чём предупреждал сам пользователь ("не просто
-  /// глухо прогуливаться, а работать"). Теперь при включённой
-  /// авто-балансировке — как только приходит новый результат пинга,
-  /// пересчитываем сервер с наименьшим реальным пингом среди уже
-  /// измеренных и делаем его выбранным. Ключевой нюанс: если пользователь
-  /// САМ только что выбрал сервер вручную (см. onTap ниже), авто-выбор его
-  /// молча не перебивает в ту же секунду — ждёт следующего цикла замера.
+  /// [НОВОЕ] Подтягивает connection_string активного ключа и реальные
+  /// адреса локаций из него (см. докстринг `_realEndpoints` выше). Не
+  /// падает и не мешает остальной загрузке экрана, если пользователь не
+  /// залогинен/нет активного ключа/сеть недоступна — в этом случае просто
+  /// остаёмся на запасном варианте пинга через subscription_url/host_url.
+  Future<void> _loadActiveConnectionString() async {
+    try {
+      final keys = await _api.getKeys();
+      final active = keys.cast<Map<String, dynamic>>().where((k) {
+        final expiryStr = k['expiry_date'] as String?;
+        final expiry = expiryStr != null ? DateTime.tryParse(expiryStr) : null;
+        return expiry != null && expiry.isAfter(DateTime.now());
+      }).toList()
+        ..sort((a, b) {
+          final ea = DateTime.tryParse(a['expiry_date'] as String? ?? '');
+          final eb = DateTime.tryParse(b['expiry_date'] as String? ?? '');
+          if (ea == null && eb == null) return 0;
+          if (ea == null) return 1;
+          if (eb == null) return -1;
+          return eb.compareTo(ea);
+        });
+      if (active.isEmpty) return;
+      final connectionString = active.first['connection_string'] as String?;
+      if (connectionString == null || connectionString.isEmpty) return;
+      final endpoints = await _tunnel.listProfileEndpoints(connectionString);
+      if (mounted && endpoints.isNotEmpty) {
+        setState(() => _realEndpoints = endpoints);
+      }
+    } catch (_) {
+      // Нет ключа/сети — не критично, экран просто останется на запасном
+      // варианте измерения пинга (см. _pingEndpoint).
+    }
+  }
+
+  /// [ИСПРАВЛЕНО — сама жалоба "автопереключение не работает"] Раньше эта
+  /// функция при включённой авто-балансировке только меняла "предпочтение"
+  /// (`_selectedId`/`SelectedServer`/LocalPrefs) — то, какой сервер
+  /// возьмётся при СЛЕДУЮЩЕМ ручном нажатии "Подключить". На уже
+  /// работающий туннель это никак не влияло: если пользователь был
+  /// подключён к Германии, а через минуту Нидерланды оказывались быстрее,
+  /// приложение молча продолжало гнать трафик через Германию — тумблер
+  /// был чисто косметическим.
+  ///
+  /// Теперь, если туннель ПОДНЯТ прямо сейчас и он поднят на одном из
+  /// известных нам хостов (см. `_livePing`, не тронет ручной ключ с чужим
+  /// remark'ом, для него живого пинга в этой таблице просто не найдётся),
+  /// а среди измеренных серверов нашёлся ощутимо более быстрый — реально
+  /// переключаем сам туннель на него (см. `TunnelService.switchPreferredHost`).
+  /// Порог `_switchThresholdMs` и пауза `_switchCooldown` — чтобы не рвать
+  /// рабочее соединение из-за шума в 3-5 мс или не дёргать его каждые
+  /// 30 секунд туда-обратно между двумя почти равными серверами.
+  ///
+  /// Если туннель сейчас не поднят — ведём себя как раньше: просто
+  /// обновляем предпочтение, которое подхватится при следующем подключении.
   void _maybeApplyAutoBalance() {
     if (!_autoBalance || _hosts == null || _hosts!.isEmpty) return;
     String? bestId;
@@ -121,17 +235,67 @@ class _ServersScreenState extends State<ServersScreen> {
       final id = host['host_name'] as String? ?? '';
       if (id.isEmpty) continue;
       final ping = _livePing[id];
-      if (ping == null || ping < 0) continue; // ещё не измерен / недоступен / нет данных
+      if (ping == null || ping < 0)
+        continue; // ещё не измерен / недоступен / нет данных
       if (bestPing == null || ping < bestPing) {
         bestPing = ping;
         bestId = id;
       }
     }
-    if (bestId != null && bestId != _selectedId) {
-      setState(() => _selectedId = bestId);
-      SelectedServer.select(bestId, bestId);
-      _prefs.setString(PrefKeys.selectedServerId, bestId);
+    if (bestId == null) return;
+
+    final tunnelConnected = _tunnel.isConnected;
+    final connectedName = _tunnel.connectedServerName.value;
+
+    if (!tunnelConnected) {
+      // Туннель не поднят — просто держим предпочтение актуальным, как и
+      // раньше. Реального переключения делать не из чего.
+      if (bestId != _selectedId) {
+        setState(() => _selectedId = bestId);
+        SelectedServer.select(bestId, bestId);
+        _prefs.setString(PrefKeys.selectedServerId, bestId);
+      }
+      return;
     }
+
+    // Туннель поднят. Сравниваем реальный текущий сервер с лучшим найденным.
+    if (bestId == connectedName) return; // уже и так на лучшем сервере
+    if (_switching || _tunnel.isBusy) return; // уже идёт подключение/отключение
+    if (connectedName == null || !_livePing.containsKey(connectedName)) {
+      // Не наш известный хост (например, вставленный вручную ключ с
+      // произвольным remark'ом) — не трогаем чужое соединение.
+      return;
+    }
+    final currentPing = _livePing[connectedName];
+    if (currentPing == null || currentPing < 0) return;
+    if (bestPing == null || (currentPing - bestPing) < _switchThresholdMs) {
+      return; // разница в пределах шума — не стоит рвать рабочее соединение
+    }
+    final now = DateTime.now();
+    if (_lastSwitchAt != null &&
+        now.difference(_lastSwitchAt!) < _switchCooldown) {
+      return; // недавно уже переключались — ждём остывания
+    }
+
+    _switching = true;
+    _lastSwitchAt = now;
+    final target = bestId;
+    _tunnel.switchPreferredHost(target).then((_) {
+      if (!mounted) return;
+      setState(() {
+        _selectedId = target;
+        _lastSwitchTarget = target;
+      });
+      SelectedServer.select(target, target);
+      _prefs.setString(PrefKeys.selectedServerId, target);
+    }).catchError((_) {
+      // Не удалось переключиться (например, целевой сервер как раз лёг) —
+      // это не критично, TunnelService сам к этому моменту уже попытался
+      // восстановить соединение по своей обычной логике (см. connect()).
+      // Следующий цикл замера (через _autoBalanceInterval) попробует снова.
+    }).whenComplete(() {
+      _switching = false;
+    });
   }
 
   @override
@@ -139,6 +303,12 @@ class _ServersScreenState extends State<ServersScreen> {
     super.initState();
     _loadPrefs();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _autoBalanceTimer?.cancel();
+    super.dispose();
   }
 
   /// [НОВОЕ] Восстанавливаем избранное/авто-баланс/ранее выбранный сервер
@@ -159,6 +329,24 @@ class _ServersScreenState extends State<ServersScreen> {
       _autoBalance = results[1] as bool;
       _selectedId = results[2] as String?;
     });
+    // Тумблер мог остаться включённым с прошлого запуска приложения —
+    // возобновляем фоновый цикл замеров, а не только читаем его значение.
+    _syncAutoBalanceTimer();
+  }
+
+  /// [НОВОЕ] Включает/выключает фоновый периодический замер пинга в
+  /// зависимости от текущего состояния тумблера "Авто-балансировка".
+  /// Идемпотентно — можно звать сколько угодно раз подряд.
+  void _syncAutoBalanceTimer() {
+    if (_autoBalance) {
+      _autoBalanceTimer ??= Timer.periodic(_autoBalanceInterval, (_) {
+        if (_hosts == null || _hosts!.isEmpty) return;
+        _measureAllPings(_hosts!);
+      });
+    } else {
+      _autoBalanceTimer?.cancel();
+      _autoBalanceTimer = null;
+    }
   }
 
   Future<void> _load() async {
@@ -179,7 +367,8 @@ class _ServersScreenState extends State<ServersScreen> {
           // текущий _selectedId не найден среди актуальных хостов —
           // выбираем первый доступный.
           final stillExists = _selectedId != null &&
-              hosts.any((h) => (h as Map<String, dynamic>)['host_name'] == _selectedId);
+              hosts.any((h) =>
+                  (h as Map<String, dynamic>)['host_name'] == _selectedId);
           if (!stillExists) {
             final first = hosts.first as Map<String, dynamic>;
             _selectedId = first['host_name'] as String?;
@@ -198,6 +387,7 @@ class _ServersScreenState extends State<ServersScreen> {
         }
         _loading = false;
       });
+      await _loadActiveConnectionString();
       _measureAllPings(hosts);
     } catch (e) {
       // Ожидаемо, пока backend/.env не настроены под реальную БД/панели —
@@ -216,17 +406,26 @@ class _ServersScreenState extends State<ServersScreen> {
     final trimmed = name.trim();
     if (trimmed.isEmpty) return '??';
     final firstWord = trimmed.split(RegExp(r'\s+')).first;
-    return firstWord.length >= 2 ? firstWord.substring(0, 2).toUpperCase() : firstWord.toUpperCase();
+    return firstWord.length >= 2
+        ? firstWord.substring(0, 2).toUpperCase()
+        : firstWord.toUpperCase();
   }
 
   @override
   Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: SingleChildScrollView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-        child: Column(
+    // ServersScreen используется и во вкладке RootShell, и как
+    // отдельный MaterialPageRoute с главного экрана. Во втором
+    // случае без Scaffold текст вне NeonCard попадал под аварийный
+    // DefaultTextStyle Flutter с жёлтым двойным подчёркиванием.
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: _load,
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+            child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             AppHeader(
@@ -239,16 +438,22 @@ class _ServersScreenState extends State<ServersScreen> {
               style: TextStyle(fontSize: 10, color: AppColors.textDim),
             ),
             const SizedBox(height: 10),
-            if (_loading) const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator())),
+            if (_loading)
+              const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: CircularProgressIndicator())),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(_error!, style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+                child: Text(_error!,
+                    style:
+                        const TextStyle(color: AppColors.danger, fontSize: 12)),
               ),
             if (_hosts != null && _hosts!.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 20),
-                child: Text('В панелях 3x-ui пока нет активных локаций.', style: TextStyle(color: AppColors.textDim)),
+                child: Text('В панелях 3x-ui пока нет активных локаций.',
+                    style: TextStyle(color: AppColors.textDim)),
               ),
             if (_hosts != null)
               ..._hosts!.map((s) {
@@ -302,19 +507,25 @@ class _ServersScreenState extends State<ServersScreen> {
                               _favorites.add(id);
                             }
                           });
-                          _prefs.setStringSet(PrefKeys.favoriteServers, _favorites);
+                          _prefs.setStringSet(
+                              PrefKeys.favoriteServers, _favorites);
                         },
                         child: Icon(
-                          isFav ? Icons.star_rounded : Icons.star_border_rounded,
+                          isFav
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
                           size: 18,
-                          color: isFav ? const Color(0xFFF5C451) : const Color(0xFF372A52),
+                          color: isFav
+                              ? const Color(0xFFF5C451)
+                              : const Color(0xFF372A52),
                         ),
                       ),
                       const SizedBox(width: 8),
                       if (isSelected)
                         const NeonBadge('выбран')
                       else
-                        const Icon(Icons.chevron_right_rounded, color: AppColors.textDim, size: 18),
+                        const Icon(Icons.chevron_right_rounded,
+                            color: AppColors.textDim, size: 18),
                     ],
                   ),
                 );
@@ -330,19 +541,35 @@ class _ServersScreenState extends State<ServersScreen> {
                     height: 32,
                     decoration: const BoxDecoration(
                       shape: BoxShape.circle,
-                      gradient: LinearGradient(colors: [AppColors.success, Color(0xFF1D9A6C)]),
+                      gradient: LinearGradient(
+                          colors: [AppColors.success, Color(0xFF1D9A6C)]),
                     ),
                     alignment: Alignment.center,
                     child: const Text('⚡', style: TextStyle(fontSize: 14)),
                   ),
                   const SizedBox(width: 12),
-                  const Expanded(
+                  Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Авто-балансировка', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                        SizedBox(height: 2),
-                        Text('выбор лучшего сервера', style: TextStyle(fontSize: 10, color: AppColors.textDim)),
+                        const Text('Авто-балансировка',
+                            style: TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 2),
+                        Text(
+                          // [НОВОЕ] Честно показываем, что тумблер реально
+                          // делает — реальный факт последнего переключения
+                          // вместо статичной надписи "выбор лучшего
+                          // сервера", которая никак не показывала, работает
+                          // функция на самом деле или нет.
+                          _autoBalance
+                              ? (_lastSwitchTarget != null
+                                  ? 'реально переключились на $_lastSwitchTarget'
+                                  : 'следим за пингом каждые 30 с и переключаем туннель сами')
+                              : 'выбор лучшего сервера',
+                          style: const TextStyle(
+                              fontSize: 10, color: AppColors.textDim),
+                        ),
                       ],
                     ),
                   ),
@@ -351,13 +578,18 @@ class _ServersScreenState extends State<ServersScreen> {
                     onChanged: (v) {
                       setState(() => _autoBalance = v);
                       _prefs.setBool(PrefKeys.autoBalance, v);
-                      if (v) _maybeApplyAutoBalance();
+                      _syncAutoBalanceTimer();
+                      if (v && _hosts != null && _hosts!.isNotEmpty) {
+                        _measureAllPings(_hosts!);
+                      }
                     },
                   ),
                 ],
               ),
             ),
           ],
+            ),
+          ),
         ),
       ),
     );
