@@ -9,6 +9,8 @@ import 'screens/menu_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/auth_screen.dart';
 import 'services/api_client.dart';
+import 'services/app_log_service.dart';
+import 'services/tunnel_service.dart';
 
 void main() {
   // [ИСПРАВЛЕНО — критично перед публикацией репозитория] Раньше здесь
@@ -46,7 +48,38 @@ void main() {
       systemNavigationBarIconBrightness: Brightness.light,
     ),
   );
+  // [НОВОЕ] Наполняет локальный журнал (см. services/app_log_service.dart и
+  // экран "Безопасность" -> "Хранение логов") реальными событиями туннеля —
+  // подключение/отключение и ошибки. Слушает уже существующие публичные
+  // ValueNotifier'ы TunnelService снаружи, ничего не меняя в самом
+  // tunnel_service.dart. main() вызывается ровно один раз за время жизни
+  // процесса, поэтому здесь не нужен dispose()/отписка — в отличие от
+  // подписки внутри State какого-либо экрана, повторной регистрации при
+  // навигации по приложению тут не будет.
+  _wireAppLogging();
   runApp(const VpnOnlineApp());
+}
+
+void _wireAppLogging() {
+  String? lastLoggedStateLabel;
+  TunnelService.instance.status.addListener(() {
+    final state = TunnelService.instance.status.value?.state;
+    if (state == null) return;
+    final label = switch (state) {
+      TunnelConnState.connected => 'Туннель подключён',
+      TunnelConnState.disconnected => 'Туннель отключён',
+      TunnelConnState.connecting => 'Подключение к туннелю…',
+      TunnelConnState.disconnecting => 'Отключение туннеля…',
+    };
+    if (label == lastLoggedStateLabel) return;
+    lastLoggedStateLabel = label;
+    AppLogService.instance.log(label);
+  });
+  TunnelService.instance.lastError.addListener(() {
+    final error = TunnelService.instance.lastError.value;
+    if (error == null || error.isEmpty) return;
+    AppLogService.instance.log('Ошибка: $error', level: AppLogLevel.error);
+  });
 }
 
 class VpnOnlineApp extends StatelessWidget {
