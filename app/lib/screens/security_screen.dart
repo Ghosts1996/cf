@@ -31,11 +31,13 @@ class SecurityScreen extends StatefulWidget {
 class _SecurityScreenState extends State<SecurityScreen> {
   final _prefs = LocalPrefs.instance;
 
-  bool _killSwitch = true;
+  // [ИСПРАВЛЕНО] Все тумблеры этого экрана по умолчанию выключены — до
+  // первого явного действия пользователя ничего не включается само.
+  bool _killSwitch = false;
   bool _strictKillSwitch = false;
   bool _dnsProtection = false;
   bool _blockAds = false;
-  bool _bypassLan = true;
+  bool _bypassLan = false;
   bool _muxEnabled = false;
   String _muxProtocol = 'h2mux';
   bool _fakeIpDns = false;
@@ -71,14 +73,15 @@ class _SecurityScreenState extends State<SecurityScreen> {
 
   Future<void> _load() async {
     final results = await Future.wait([
-      _prefs.getBool(PrefKeys.killSwitch, fallback: true),
-      _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
       // [ИСПРАВЛЕНО] По умолчанию выключено — совпадает с fallback в
-      // tunnel_service.dart, чтобы UI не расходился с реальным конфигом.
+      // tunnel_service.dart, чтобы UI не расходился с реальным конфигом,
+      // и пользователь сам решает, что включать.
+      _prefs.getBool(PrefKeys.killSwitch, fallback: false),
+      _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
       _prefs.getBool(PrefKeys.dnsProtection, fallback: false),
       _prefs.getBool(PrefKeys.blockAds, fallback: false),
       _prefs.getInt(PrefKeys.reconnectAttempts, fallback: 3),
-      _prefs.getBool(PrefKeys.bypassLan, fallback: true),
+      _prefs.getBool(PrefKeys.bypassLan, fallback: false),
       _prefs.getBool(PrefKeys.muxEnabled, fallback: false),
       _prefs.getBool(PrefKeys.fakeIpDns, fallback: false),
     ]);
@@ -363,8 +366,9 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         ),
                       ),
                       const Divider(height: 20),
-                      // [НОВОЕ] Обход локальной сети (LAN) — включён по
-                      // умолчанию, как в Hiddify.
+                      // [ИСПРАВЛЕНО] Обход локальной сети (LAN) — по
+                      // умолчанию выключено, включается вручную (как и все
+                      // остальные тумблеры на этом экране).
                       _Row(
                         icon: Icons.lan_rounded,
                         title: 'Обход локальной сети',
