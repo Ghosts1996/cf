@@ -17,7 +17,10 @@ class TunnelService {
   final SingboxClient _client = SingboxClient();
   static const _nativeStatsChannel = MethodChannel('vpnonline/native_stats');
   bool _initialized = false;
-  bool _killSwitchEnabled = true;
+  // [ИСПРАВЛЕНО] Выключен по умолчанию — совпадает с fallback при чтении
+  // из LocalPrefs ниже (см. connect()), пока не переопределится реальным
+  // сохранённым значением после первого connect().
+  bool _killSwitchEnabled = false;
   // [НОВОЕ] См. PrefKeys.strictKillSwitch — включает поведение "физически
   // блокировать трафик", а не только "пытаться переподключиться".
   bool _strictKillSwitchEnabled = false;
@@ -610,10 +613,17 @@ class TunnelService {
     _lastNativeTxBytes = null;
     _lastNativeStatsAt = null;
 
+    // [ИСПРАВЛЕНО] fallback приведён к false везде ниже — раньше значения
+    // тут расходились с UI-экранами (Безопасность/Настройки читали
+    // fallback: false для тех же самых ключей), из-за чего первое же
+    // подключение включало часть защит "втихую", хотя в интерфейсе
+    // соответствующие тумблеры показывались выключенными. Теперь
+    // поведение туннеля совпадает с тем, что реально видит пользователь
+    // на экране — ничего не активируется, пока он не включит это сам.
     final dnsProtection = await LocalPrefs.instance
-        .getBool(PrefKeys.dnsProtection, fallback: true);
+        .getBool(PrefKeys.dnsProtection, fallback: false);
     final blockAds =
-        await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: true);
+        await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: false);
     final dpiBypass =
         await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: false);
     final proxyOnly = await LocalPrefs.instance
@@ -623,16 +633,19 @@ class TunnelService {
             'cloudflare';
     final customDns =
         await LocalPrefs.instance.getString(PrefKeys.customDnsServer);
-    _killSwitchEnabled =
-        await LocalPrefs.instance.getBool(PrefKeys.killSwitch, fallback: true);
+    _killSwitchEnabled = await LocalPrefs.instance
+        .getBool(PrefKeys.killSwitch, fallback: false);
     // [НОВОЕ] Строгий Kill Switch — см. докстринг PrefKeys.strictKillSwitch
     // и _engageHardKillSwitch ниже. Читается заранее, чтобы _onStatusChanged
     // знал, нужно ли поднимать служебную блокирующую сессию, когда обычное
     // авто-переподключение исчерпает попытки.
     _strictKillSwitchEnabled = await LocalPrefs.instance
         .getBool(PrefKeys.strictKillSwitch, fallback: false);
+    // [ИСПРАВЛЕНО] fallback приведён к 3 — совпадает с "Агрессивное
+    // переподключение" (security_screen.dart), которое по умолчанию
+    // выключено и соответствует именно 3 попыткам, а не 8.
     _maxAutoReconnectAttempts = await LocalPrefs.instance
-        .getInt(PrefKeys.reconnectAttempts, fallback: 8);
+        .getInt(PrefKeys.reconnectAttempts, fallback: 3);
     final bypassedMap =
         await LocalPrefs.instance.getBoolMap(PrefKeys.splitTunnelBypass);
     final splitTunnelMode =
@@ -642,14 +655,14 @@ class TunnelService {
         bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
     final bypassLan =
         await LocalPrefs.instance.getBool(PrefKeys.bypassLan, fallback: false);
-    final muxEnabled =
-        await LocalPrefs.instance.getBool(PrefKeys.muxEnabled, fallback: true);
+    final muxEnabled = await LocalPrefs.instance
+        .getBool(PrefKeys.muxEnabled, fallback: false);
     final muxProtocol =
         await LocalPrefs.instance.getString(PrefKeys.muxProtocol) ?? 'smux';
     final fakeIpDns =
-        await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: true);
+        await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: false);
     final ipv6Enabled = await LocalPrefs.instance
-        .getBool(PrefKeys.ipv6Enabled, fallback: true);
+        .getBool(PrefKeys.ipv6Enabled, fallback: false);
 
     // Если сейчас активна служебная "блокирующая" сессия Kill Switch (см.
     // _engageHardKillSwitch), её нужно снять перед обычным подключением —
