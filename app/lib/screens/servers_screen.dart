@@ -72,7 +72,7 @@ class _ServersScreenState extends State<ServersScreen> {
   // ключа, пингуем РЕАЛЬНЫЙ адрес каждой локации (тот же, на который идёт
   // трафик при подключении). Старая логика через connect_host/subscription_url
   // остаётся запасным вариантом, если ключа/сети нет.
-  Map<String, ({String host, int port})> _realEndpoints = {};
+  Map<String, ({String host, int port, String security, String? sni})> _realEndpoints = {};
 
   // [НОВОЕ] Раз в 30 секунд, пока включена авто-балансировка, повторяем
   // замер пинга и пересчитываем лучший сервер — даже если пользователь
@@ -96,17 +96,19 @@ class _ServersScreenState extends State<ServersScreen> {
   String? _lastSwitchTarget;
   bool _switching = false;
 
-  ({String? host, int? port}) _pingEndpoint(
+  ({String? host, int? port, String? security, String? sni}) _pingEndpoint(
       String hostName, Map<String, dynamic> server) {
     final real = _realEndpoints[hostName];
     if (real != null && real.host.isNotEmpty) {
-      return (host: real.host, port: real.port);
+      return (host: real.host, port: real.port, security: real.security, sni: real.sni);
     }
 
     final explicitHost = server['connect_host'] as String?;
     final explicitPort = (server['connect_port'] as num?)?.toInt();
     if (explicitHost != null && explicitHost.isNotEmpty) {
-      return (host: explicitHost, port: explicitPort ?? 443);
+      // Запасной вариант из /hosts не несёт security/sni — там их нет,
+      // проверяем только TCP (см. _measureLivePing).
+      return (host: explicitHost, port: explicitPort ?? 443, security: null, sni: null);
     }
 
     // Рабочий /hosts пока отдаёт subscription_url/host_url без отдельных
@@ -116,9 +118,9 @@ class _ServersScreenState extends State<ServersScreen> {
       if (raw == null || raw.isEmpty) continue;
       final uri = Uri.tryParse(raw);
       if (uri == null || uri.host.isEmpty) continue;
-      return (host: uri.host, port: uri.hasPort ? uri.port : 443);
+      return (host: uri.host, port: uri.hasPort ? uri.port : 443, security: null, sni: null);
     }
-    return (host: null, port: null);
+    return (host: null, port: null, security: null, sni: null);
   }
 
   /// TCP-connect до connect_host:connect_port (см. api.py -> api_hosts()).
@@ -136,8 +138,43 @@ class _ServersScreenState extends State<ServersScreen> {
   /// скриншоте, скорее всего, не в этом файле, а в том, что бэкенд ещё
   /// отдаёт старый ответ без этих полей. Но теперь UI хотя бы не врёт
   /// бесконечным "измеряю..." — покажет честное "нет данных для пинга".
+  ///
+  /// [ИСПРАВЛЕНО — реальный баг: "5 мс · отлично" в этом приложении на
+  /// локации, которая в Hiddify (реальный клиент, который действительно
+  /// поднимает VLESS-сессию) полностью недоступна] Открытый TCP-порт — это
+  /// НЕ то же самое, что рабочий VLESS-сервис на нём: панель 3x-ui может
+  /// быть выключена, инбаунд удалён или неверно настроен, а TCP SYN/ACK на
+  /// уровне ОС/файрвола сервера всё равно ответит мгновенно — раньше
+  /// именно это принималось за "сервер отличный". Теперь для профилей с
+  /// `security=tls` (обычный TLS, не Reality) после успешного TCP
+  /// дополнительно делаем настоящее TLS-рукопожатие с тем же SNI, что и в
+  /// самой VLESS-ссылке (`SecureSocket.connect`) — если сертификат/TLS-стек
+  /// на той стороне не поднят или отдаёт не то, что ожидается, рукопожатие
+  /// провалится, и локация честно покажется недоступной, а не "отлично".
+  ///
+  /// [ВАЖНО — то, что клиент принципиально не может проверить] Для
+  /// профилей с `security=reality` (а судя по всему, это как раз случай
+  /// Финляндии/Англии на скриншотах) TLS-рукопожатие в принципе не может
+  /// отличить рабочий Reality-сервер от нерабочего: сервер под Reality,
+  /// увидев обычное TLS-приветствие без правильного Reality-ключа
+  /// (которого нет ни у этого приложения, ни у любого стороннего
+  /// TLS-клиента — это и есть весь смысл маскировки Reality), сам
+  /// действует как прозрачный прокси на настоящий сайт-приманку (например,
+  /// www.microsoft.com) с ЕГО настоящим, доверенным сертификатом —
+  /// рукопожатие успешно завершится ДАЖЕ ЕСЛИ реальный VLESS-инбаунд за
+  /// ним полностью сломан. Полноценно проверить Reality-сервер можно
+  /// только настоящим VLESS/Reality-рукопожатием — то есть кодом уровня
+  /// sing-box/xray, а не парой строк Dart-сети. Если Финляндия/Англия — это
+  /// security=reality (это легко проверить по логу `[servers] пинг ...` —
+  /// см. debugPrint ниже, либо просто по самой VLESS-ссылке в панели
+  /// 3x-ui), то "5/10 мс" на этом экране для них — не столько баг
+  /// клиента, сколько архитектурное ограничение: единственный надёжный
+  /// способ узнать, что конкретный Reality-хост сломан — реально
+  /// подключиться к нему (что и делает Hiddify) или проверить панель
+  /// 3x-ui/инбаунд на сервере напрямую.
   Future<void> _measureLivePing(
-      String hostName, String? host, int? port) async {
+      String hostName, String? host, int? port,
+      {String? security, String? sni}) async {
     if (host == null || host.isEmpty) {
       if (mounted)
         setState(
@@ -154,14 +191,43 @@ class _ServersScreenState extends State<ServersScreen> {
     // входа) — тогда TCP-пинг принципиально не может их различить.
     final real = _realEndpoints[hostName];
     debugPrint('[servers] пинг $hostName -> $host:${port ?? 443} '
-        '(${real != null ? "реальный VLESS-адрес" : "запасной вариант из /hosts"})');
+        '(${real != null ? "реальный VLESS-адрес" : "запасной вариант из /hosts"}, '
+        'security=${security ?? "?"})');
     final sw = Stopwatch()..start();
+    Socket? socket;
     try {
-      final socket = await Socket.connect(host, port ?? 443,
+      socket = await Socket.connect(host, port ?? 443,
           timeout: const Duration(seconds: 4));
-      sw.stop();
-      socket.destroy();
-      if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds);
+      // TCP прошёл — для обычного TLS (не Reality, не "none"/plaintext)
+      // дополнительно проверяем настоящим TLS-рукопожатием с правильным
+      // SNI, см. докстринг метода выше про то, почему это осмысленно
+      // именно для security=tls и принципиально бесполезно для reality.
+      if (security == 'tls') {
+        final tlsSw = Stopwatch()..start();
+        SecureSocket? secureSocket;
+        try {
+          secureSocket = await SecureSocket.secure(
+            socket,
+            host: (sni != null && sni.isNotEmpty) ? sni : host,
+          ).timeout(const Duration(seconds: 4));
+          tlsSw.stop();
+          if (mounted) setState(() => _livePing[hostName] = tlsSw.elapsedMilliseconds + sw.elapsedMilliseconds);
+          secureSocket.destroy();
+        } catch (_) {
+          // TCP-порт открыт, но TLS не поднимается — сервис за ним
+          // фактически не работает, честно показываем "недоступен", а не
+          // "отлично". SecureSocket.secure() не гарантированно закрывает
+          // исходный TCP-сокет при неудаче — закрываем сами, иначе сокет
+          // повиснет открытым до системного таймаута (маленькая, но
+          // реальная утечка на каждый неудачный TLS-замер).
+          socket.destroy();
+          if (mounted) setState(() => _livePing[hostName] = -1);
+        }
+      } else {
+        sw.stop();
+        if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds);
+        socket.destroy();
+      }
     } catch (_) {
       if (mounted) setState(() => _livePing[hostName] = -1);
     }
@@ -179,7 +245,8 @@ class _ServersScreenState extends State<ServersScreen> {
       final hostName = host['host_name'] as String? ?? '';
       if (hostName.isEmpty) continue;
       final endpoint = _pingEndpoint(hostName, host);
-      _measureLivePing(hostName, endpoint.host, endpoint.port);
+      _measureLivePing(hostName, endpoint.host, endpoint.port,
+          security: endpoint.security, sni: endpoint.sni);
     }
   }
 
