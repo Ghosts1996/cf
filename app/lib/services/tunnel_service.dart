@@ -1,597 +1,1677 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/material.dart';
-import '../theme.dart';
-import '../widgets/neon.dart';
-import '../services/api_client.dart';
-import '../state/selected_server.dart';
-import '../services/local_prefs.dart';
-import '../services/tunnel_service.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MethodChannel, PlatformException;
+import 'package:flutter_singbox_client/flutter_singbox_client.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
+import 'package:app_settings/app_settings.dart';
+import 'local_prefs.dart';
 
-/// Экран выбора сервера.
-///
-/// НАМЕРЕННО не содержит захардкоженного списка стран — список приходит из
-/// backend (`GET /hosts`), который берёт его из таблицы `xui_hosts` (те же
-/// 6 панелей 3x-ui, что видит бот). Добавил новую локацию в 3x-ui и в БД
-/// бота -> она появится тут сама.
-///
-/// [ИСПРАВЛЕНО] Раньше экран звал несуществующий `getServers()` и ожидал
-/// поля `id`/`country_code`/`ping_ms`, которых реальный `/hosts` не отдаёт.
-/// Реальный ответ (см. api.py -> api_hosts()) — это ТОЛЬКО `host_name`,
-/// `host_url`, `subscription_url` (сервер намеренно не отдаёт
-/// host_username/host_pass — это чувствительные данные для входа в саму
-/// панель). Значит: id сервера = сам `host_name` (он уникален), ping
-/// реального замера не будет — сервер таких данных не считает и не хранит.
-///
-/// [ВАЖНО] Этот экран больше НЕ шаг покупки. Покупка выдаёт ключ сразу на
-/// всех локациях (единый GLOBAL-бандл, см. plans_screen.dart). "Выбор"
-/// здесь влияет только на то, какая локация подсвечивается как
-/// приоритетная в ConnectScreen — чисто клиентская настройка.
-///
-/// [ИСПРАВЛЕНО] "Избранное" и "авто-балансировка" раньше были локальным
-/// `Set`/`bool` полем State — сбрасывались при уходе с экрана/перезапуске
-/// приложения (то же семейство багов, что и тумблеры в
-/// SettingsScreen/SecurityScreen — см. services/local_prefs.dart). Теперь
-/// сохраняются через LocalPrefs на устройство. Backend по-прежнему не
-/// хранит избранное на сервере (это чисто клиентское предпочтение, не
-/// синхронизируется между устройствами одного аккаунта) — если понадобится
-/// синхронизация между устройствами, нужен отдельный эндпоинт на бэкенде,
-/// это уже другая задача.
-class ServersScreen extends StatefulWidget {
-  const ServersScreen({super.key});
-  @override
-  State<ServersScreen> createState() => _ServersScreenState();
-}
+class TunnelService {
+  TunnelService._();
+  static final TunnelService instance = TunnelService._();
 
-class _ServersScreenState extends State<ServersScreen> {
-  final _api = ApiClient.instance;
-  final _prefs = LocalPrefs.instance;
-  final _tunnel = TunnelService.instance;
-  List<dynamic>? _hosts;
-  String? _error;
-  bool _loading = true;
-  String? _selectedId;
-  final Set<String> _favorites = {};
-  bool _autoBalance = false;
-  // [НОВОЕ] Живой пинг с телефона до каждого сервера — host_name -> мс,
-  // null пока не измерено, -1 если сервер недоступен. Раньше здесь везде
-  // была статичная надпись "сервер онлайн", которая не отражала реальную
-  // задержку ни разу — просто константный текст.
-  final Map<String, int?> _livePing = {};
+  final SingboxClient _client = SingboxClient();
+  static const _nativeStatsChannel = MethodChannel('vpnonline/native_stats');
+  bool _initialized = false;
+  bool _killSwitchEnabled = true;
+  // [НОВОЕ] См. PrefKeys.strictKillSwitch — включает поведение "физически
+  // блокировать трафик", а не только "пытаться переподключиться".
+  bool _strictKillSwitchEnabled = false;
+  // [НОВОЕ] true, пока активна служебная блокирующая сессия (см.
+  // _engageHardKillSwitch) — используется, чтобы не пытаться поднять её
+  // повторно и чтобы disconnect()/connect() знали, что нужно сначала снять
+  // именно её, а не обычную сессию.
+  bool _hardKillSwitchEngaged = false;
+  bool _userInitiatedDisconnect = false;
+  String? _lastConnectionString;
+  String? _lastPreferredHostName;
+  int _autoReconnectAttempt = 0;
+  // [ИЗМЕНЕНО] Было жёстко зашитой константой — теперь читается из
+  // LocalPrefs при каждом connect() (см. ниже), настраивается тумблером
+  // "Агрессивное переподключение" на экране Безопасность.
+  int _maxAutoReconnectAttempts = 3;
 
-  // [НОВОЕ] Реальные адреса серверов (host_name -> host:port), взятые из
-  // самой VLESS-ссылки активного ключа (см. TunnelService.listProfileEndpoints).
-  // [ИСПРАВЛЕНО — причина "все сервера показывают одинаковый пинг и
-  // автобалансировка не переключается"] Раньше пинг мерился до
-  // `connect_host`, который бэкенд считает из домена `subscription_url`
-  // (см. backend-patch/api.py -> api_hosts()) — а этот домен часто ОБЩИЙ
-  // для всех локаций сразу (единая точка выдачи подписки), а не адрес
-  // конкретного VLESS-сервера страны. Поэтому все локации "мерили" по сути
-  // один и тот же хост и получали одинаковый пинг — выбирать лучший было
-  // не из чего. Теперь, если удаётся получить connection_string активного
-  // ключа, пингуем РЕАЛЬНЫЙ адрес каждой локации (тот же, на который идёт
-  // трафик при подключении). Старая логика через connect_host/subscription_url
-  // остаётся запасным вариантом, если ключа/сети нет.
-  Map<String, ({String host, int port})> _realEndpoints = {};
+  StreamSubscription? _stateSub;
+  StreamSubscription? _statsSub;
+  StreamSubscription? _faultSub;
+  DateTime? _connectStartedAt;
+  int _downloadTotalBytes = 0;
+  int _uploadTotalBytes = 0;
+  int _displayDownloadBytes = 0;
+  int _displayUploadBytes = 0;
+  DateTime? _lastTrafficAt;
+  int? _lastNativeRxBytes;
+  int? _lastNativeTxBytes;
+  DateTime? _lastNativeStatsAt;
+  bool _nativeStatsPolling = false;
+  String? _connectedHost;
+  int? _connectedPort;
+  // [НОВОЕ — см. _restartDurationTicker] Тикает раз в секунду, пока
+  // статус connected, чтобы таймер сессии на экране реально считал время,
+  // а не был заморожен на 00:00:00.
+  Timer? _durationTicker;
+  bool _runtimeStateSynced = false;
 
-  // [НОВОЕ] Раз в 30 секунд, пока включена авто-балансировка, повторяем
-  // замер пинга и пересчитываем лучший сервер — даже если пользователь
-  // ушёл с этого экрана на другую вкладку (экран остаётся смонтированным
-  // внутри IndexedStack в main.dart, см. RootShell, поэтому таймер не
-  // прерывается переключением вкладок). Раньше замер происходил ровно один
-  // раз при открытии экрана — "автобалансировка" не реагировала вообще ни
-  // на что, что происходило после первой отрисовки.
-  Timer? _autoBalanceTimer;
-  static const _autoBalanceInterval = Duration(seconds: 30);
-  // Минимальное преимущество нового сервера над тем, на котором реально
-  // поднят туннель, прежде чем реально рвать рабочее соединение ради
-  // переключения — без порога автобалансировка дёргала бы туннель туда-
-  // обратно между двумя серверами с почти одинаковым (в пределах шума
-  // сети) пингом.
-  static const _switchThresholdMs = 20;
-  // Не переключаем чаще, чем раз в это время, даже если каждый новый замер
-  // формально находит сервер чуть быстрее — та же причина, что и порог выше.
-  static const _switchCooldown = Duration(seconds: 45);
-  DateTime? _lastSwitchAt;
-  String? _lastSwitchTarget;
-  bool _switching = false;
+  final ValueNotifier<TunnelStatus?> status = ValueNotifier(null);
+  final ValueNotifier<String?> lastError = ValueNotifier(null);
+  final ValueNotifier<bool> killSwitchBlocking = ValueNotifier(false);
+  // [НОВОЕ] true, когда именно строгий Kill Switch физически держит
+  // интернет заблокированным (после исчерпания попыток авто-переподключения)
+  // — отдельно от killSwitchBlocking (тот включается уже на первой попытке
+  // переподключения и означает просто "сейчас идёт восстановление").
+  final ValueNotifier<bool> hardKillSwitchActive = ValueNotifier(false);
+  final ValueNotifier<String?> connectedServerName = ValueNotifier(null);
+  final ValueNotifier<String?> localProxyAddress = ValueNotifier(null);
 
-  ({String? host, int? port}) _pingEndpoint(
-      String hostName, Map<String, dynamic> server) {
-    final real = _realEndpoints[hostName];
-    if (real != null && real.host.isNotEmpty) {
-      return (host: real.host, port: real.port);
-    }
+  bool get isConnected => status.value?.state == TunnelConnState.connected;
+  bool get isBusy =>
+      status.value?.state == TunnelConnState.connecting ||
+      status.value?.state == TunnelConnState.disconnecting;
 
-    final explicitHost = server['connect_host'] as String?;
-    final explicitPort = (server['connect_port'] as num?)?.toInt();
-    if (explicitHost != null && explicitHost.isNotEmpty) {
-      return (host: explicitHost, port: explicitPort ?? 443);
-    }
+  String? _cachedSource;
+  List<_ParsedVless>? _cachedProfiles;
+  DateTime? _cachedAt;
+  static const _cacheTtl = Duration(seconds: 45);
 
-    // Рабочий /hosts пока отдаёт subscription_url/host_url без отдельных
-    // connect_host/connect_port. Извлекаем адрес из уже имеющегося URL.
-    for (final key in const ['subscription_url', 'host_url']) {
-      final raw = server[key] as String?;
-      if (raw == null || raw.isEmpty) continue;
-      final uri = Uri.tryParse(raw);
-      if (uri == null || uri.host.isEmpty) continue;
-      return (host: uri.host, port: uri.hasPort ? uri.port : 443);
-    }
-    return (host: null, port: null);
+  Future<void> _ensureInitialized() async {
+    if (_initialized) return;
+    await _client.initialize();
+
+    _stateSub = _client.serviceStateStream.listen(_applyServiceState);
+    _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
+    _faultSub = _client.faultStream.listen((error) {
+      lastError.value = error.toString();
+    });
+
+    _initialized = true;
   }
 
-  /// TCP-connect до connect_host:connect_port (см. api.py -> api_hosts()).
-  /// Не ICMP-пинг (для него на Android нужны root-права/raw sockets,
-  /// недоступные обычному приложению) — время TCP-рукопожатия достаточно
-  /// точно отражает задержку до сервера для целей UI.
-  ///
-  /// [ИСПРАВЛЕНО — реальный баг со скриншота] Раньше при `host == null`
-  /// функция просто делала `return` и НИКОГДА не писала значение в
-  /// `_livePing[hostName]` — экран трактует `null` как "ещё измеряю" (см.
-  /// build()), поэтому надпись "измеряю..." оставалась НАВСЕГДА, если у
-  /// хоста нет connect_host. А это ровно то, что произойдёт для КАЖДОГО
-  /// хоста, если на живом сервере ещё не задеплоен патч `backend-patch/api.py`
-  /// с полями connect_host/connect_port в ответе `/hosts` — то есть баг на
-  /// скриншоте, скорее всего, не в этом файле, а в том, что бэкенд ещё
-  /// отдаёт старый ответ без этих полей. Но теперь UI хотя бы не врёт
-  /// бесконечным "измеряю..." — покажет честное "нет данных для пинга".
-  Future<void> _measureLivePing(
-      String hostName, String? host, int? port) async {
-    if (host == null || host.isEmpty) {
-      if (mounted)
-        setState(
-            () => _livePing[hostName] = -2); // -2 = нет connect_host от бэкенда
-      return;
-    }
-    final sw = Stopwatch()..start();
-    try {
-      final socket = await Socket.connect(host, port ?? 443,
-          timeout: const Duration(seconds: 4));
-      sw.stop();
-      socket.destroy();
-      if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds);
-    } catch (_) {
-      if (mounted) setState(() => _livePing[hostName] = -1);
-    }
-    // [НОВОЕ] Авто-балансировка — реагируем на КАЖДЫЙ завершившийся замер,
-    // а не только после того, как отмерятся все хосты разом (при большом
-    // количестве серверов первый результат может прийти намного раньше
-    // последнего — нет смысла ждать самый медленный/недоступный сервер,
-    // чтобы применить уже имеющиеся данные).
-    _maybeApplyAutoBalance();
-  }
+  void _applyServiceState(dynamic state) {
+    // [НОВОЕ] Пока активна служебная блокирующая сессия строгого Kill
+    // Switch (см. _engageHardKillSwitch/_disengageHardKillSwitch) — её
+    // собственные события состояния не должны затрагивать публичный
+    // status/duration/трафик обычного туннеля и не должны запускать
+    // обычную логику авто-переподключения через _onStatusChanged.
+    if (_hardKillSwitchEngaged) return;
+    final mapped = _mapServiceState(state);
+    final prevDownload = status.value?.download ?? 0;
+    final prevUpload = status.value?.upload ?? 0;
 
-  void _measureAllPings(List<dynamic> hosts) {
-    for (final s in hosts) {
-      final host = s as Map<String, dynamic>;
-      final hostName = host['host_name'] as String? ?? '';
-      if (hostName.isEmpty) continue;
-      final endpoint = _pingEndpoint(hostName, host);
-      _measureLivePing(hostName, endpoint.host, endpoint.port);
-    }
-  }
-
-  /// [НОВОЕ] Подтягивает connection_string активного ключа и реальные
-  /// адреса локаций из него (см. докстринг `_realEndpoints` выше). Не
-  /// падает и не мешает остальной загрузке экрана, если пользователь не
-  /// залогинен/нет активного ключа/сеть недоступна — в этом случае просто
-  /// остаёмся на запасном варианте пинга через subscription_url/host_url.
-  Future<void> _loadActiveConnectionString() async {
-    try {
-      final keys = await _api.getKeys();
-      final active = keys.cast<Map<String, dynamic>>().where((k) {
-        final expiryStr = k['expiry_date'] as String?;
-        final expiry = expiryStr != null ? DateTime.tryParse(expiryStr) : null;
-        return expiry != null && expiry.isAfter(DateTime.now());
-      }).toList()
-        ..sort((a, b) {
-          final ea = DateTime.tryParse(a['expiry_date'] as String? ?? '');
-          final eb = DateTime.tryParse(b['expiry_date'] as String? ?? '');
-          if (ea == null && eb == null) return 0;
-          if (ea == null) return 1;
-          if (eb == null) return -1;
-          return eb.compareTo(ea);
-        });
-      if (active.isEmpty) return;
-      final connectionString = active.first['connection_string'] as String?;
-      if (connectionString == null || connectionString.isEmpty) return;
-      final endpoints = await _tunnel.listProfileEndpoints(connectionString);
-      if (mounted && endpoints.isNotEmpty) {
-        setState(() => _realEndpoints = endpoints);
-      }
-    } catch (_) {
-      // Нет ключа/сети — не критично, экран просто останется на запасном
-      // варианте измерения пинга (см. _pingEndpoint).
-    }
-  }
-
-  /// [ИСПРАВЛЕНО — сама жалоба "автопереключение не работает"] Раньше эта
-  /// функция при включённой авто-балансировке только меняла "предпочтение"
-  /// (`_selectedId`/`SelectedServer`/LocalPrefs) — то, какой сервер
-  /// возьмётся при СЛЕДУЮЩЕМ ручном нажатии "Подключить". На уже
-  /// работающий туннель это никак не влияло: если пользователь был
-  /// подключён к Германии, а через минуту Нидерланды оказывались быстрее,
-  /// приложение молча продолжало гнать трафик через Германию — тумблер
-  /// был чисто косметическим.
-  ///
-  /// Теперь, если туннель ПОДНЯТ прямо сейчас и он поднят на одном из
-  /// известных нам хостов (см. `_livePing`, не тронет ручной ключ с чужим
-  /// remark'ом, для него живого пинга в этой таблице просто не найдётся),
-  /// а среди измеренных серверов нашёлся ощутимо более быстрый — реально
-  /// переключаем сам туннель на него (см. `TunnelService.switchPreferredHost`).
-  /// Порог `_switchThresholdMs` и пауза `_switchCooldown` — чтобы не рвать
-  /// рабочее соединение из-за шума в 3-5 мс или не дёргать его каждые
-  /// 30 секунд туда-обратно между двумя почти равными серверами.
-  ///
-  /// Если туннель сейчас не поднят — ведём себя как раньше: просто
-  /// обновляем предпочтение, которое подхватится при следующем подключении.
-  void _maybeApplyAutoBalance() {
-    if (!_autoBalance || _hosts == null || _hosts!.isEmpty) return;
-    String? bestId;
-    int? bestPing;
-    for (final s in _hosts!) {
-      final host = s as Map<String, dynamic>;
-      final id = host['host_name'] as String? ?? '';
-      if (id.isEmpty) continue;
-      final ping = _livePing[id];
-      if (ping == null || ping < 0)
-        continue; // ещё не измерен / недоступен / нет данных
-      if (bestPing == null || ping < bestPing) {
-        bestPing = ping;
-        bestId = id;
+    if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
+      _connectStartedAt = DateTime.now();
+      if (_runtimeStateSynced) {
+        unawaited(LocalPrefs.instance.setInt(
+          PrefKeys.tunnelConnectedAtMillis,
+          _connectStartedAt!.millisecondsSinceEpoch,
+        ));
       }
     }
-    if (bestId == null) return;
-
-    final tunnelConnected = _tunnel.isConnected;
-    final connectedName = _tunnel.connectedServerName.value;
-
-    if (!tunnelConnected) {
-      // Туннель не поднят — просто держим предпочтение актуальным, как и
-      // раньше. Реального переключения делать не из чего.
-      if (bestId != _selectedId) {
-        setState(() => _selectedId = bestId);
-        SelectedServer.select(bestId, bestId);
-        _prefs.setString(PrefKeys.selectedServerId, bestId);
+    if (mapped != TunnelConnState.connected) {
+      _connectStartedAt = null;
+      if (_runtimeStateSynced) {
+        unawaited(
+            LocalPrefs.instance.setInt(PrefKeys.tunnelConnectedAtMillis, 0));
       }
-      return;
     }
 
-    // Туннель поднят. Сравниваем реальный текущий сервер с лучшим найденным.
-    if (bestId == connectedName) return; // уже и так на лучшем сервере
-    if (_switching || _tunnel.isBusy) return; // уже идёт подключение/отключение
-    if (connectedName == null || !_livePing.containsKey(connectedName)) {
-      // Не наш известный хост (например, вставленный вручную ключ с
-      // произвольным remark'ом) — не трогаем чужое соединение.
-      return;
-    }
-    final currentPing = _livePing[connectedName];
-    if (currentPing == null || currentPing < 0) return;
-    if (bestPing == null || (currentPing - bestPing) < _switchThresholdMs) {
-      return; // разница в пределах шума — не стоит рвать рабочее соединение
-    }
+    // [ИСПРАВЛЕНО — таймер сессии стоял на 00:00:00]
+    // duration раньше пересчитывался ТОЛЬКО здесь, внутри листенера
+    // serviceStateStream. Но этот стрим шлёт событие один раз при смене
+    // состояния (…→connecting→connected), а не каждую секунду — сразу
+    // после перехода в connected новых событий больше нет, пока туннель
+    // не отвалится, поэтому значение застывало на 0 у самого момента
+    // подключения. trafficStatsStream ниже, который реально тикает
+    // ~1 Гц, duration просто копировал не пересчитывая — тоже не помогало.
+    // Теперь отдельный Timer.periodic (см. _restartDurationTicker)
+    // обновляет duration каждую секунду сам по себе, независимо от того,
+    // прислал ли плагин очередное событие.
+    _restartDurationTicker(mapped == TunnelConnState.connected);
+
+    status.value = TunnelStatus(
+      state: mapped,
+      duration: mapped == TunnelConnState.connected
+          ? DateTime.now()
+              .difference(_connectStartedAt ?? DateTime.now())
+              .inSeconds
+          : 0,
+      download: prevDownload,
+      upload: prevUpload,
+      downloadTotalBytes:
+          mapped == TunnelConnState.connected ? _downloadTotalBytes : 0,
+      uploadTotalBytes:
+          mapped == TunnelConnState.connected ? _uploadTotalBytes : 0,
+    );
+    _onStatusChanged(mapped);
+  }
+
+  void _applyTrafficStats(dynamic stats) {
+    final current = status.value;
+    if (current == null) return;
     final now = DateTime.now();
-    if (_lastSwitchAt != null &&
-        now.difference(_lastSwitchAt!) < _switchCooldown) {
-      return; // недавно уже переключались — ждём остывания
-    }
-
-    _switching = true;
-    _lastSwitchAt = now;
-    final target = bestId;
-    _tunnel.switchPreferredHost(target).then((_) {
-      if (!mounted) return;
-      setState(() {
-        _selectedId = target;
-        _lastSwitchTarget = target;
-      });
-      SelectedServer.select(target, target);
-      _prefs.setString(PrefKeys.selectedServerId, target);
-    }).catchError((_) {
-      // Не удалось переключиться (например, целевой сервер как раз лёг) —
-      // это не критично, TunnelService сам к этому моменту уже попытался
-      // восстановить соединение по своей обычной логике (см. connect()).
-      // Следующий цикл замера (через _autoBalanceInterval) попробует снова.
-    }).whenComplete(() {
-      _switching = false;
-    });
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _loadPrefs();
-    _load();
-  }
-
-  @override
-  void dispose() {
-    _autoBalanceTimer?.cancel();
-    super.dispose();
-  }
-
-  /// [НОВОЕ] Восстанавливаем избранное/авто-баланс/ранее выбранный сервер
-  /// из LocalPrefs — раньше эти три значения были обычными полями State и
-  /// всегда стартовали с дефолтов (пустое избранное, авто-баланс выкл,
-  /// выбранный сервер = null) при каждом открытии экрана.
-  Future<void> _loadPrefs() async {
-    final results = await Future.wait([
-      _prefs.getStringSet(PrefKeys.favoriteServers),
-      _prefs.getBool(PrefKeys.autoBalance, fallback: false),
-      _prefs.getString(PrefKeys.selectedServerId),
-    ]);
-    if (!mounted) return;
-    setState(() {
-      _favorites
-        ..clear()
-        ..addAll(results[0] as Set<String>);
-      _autoBalance = results[1] as bool;
-      _selectedId = results[2] as String?;
-    });
-    // Тумблер мог остаться включённым с прошлого запуска приложения —
-    // возобновляем фоновый цикл замеров, а не только читаем его значение.
-    _syncAutoBalanceTimer();
-  }
-
-  /// [НОВОЕ] Включает/выключает фоновый периодический замер пинга в
-  /// зависимости от текущего состояния тумблера "Авто-балансировка".
-  /// Идемпотентно — можно звать сколько угодно раз подряд.
-  void _syncAutoBalanceTimer() {
-    if (_autoBalance) {
-      _autoBalanceTimer ??= Timer.periodic(_autoBalanceInterval, (_) {
-        if (_hosts == null || _hosts!.isEmpty) return;
-        _measureAllPings(_hosts!);
-      });
-    } else {
-      _autoBalanceTimer?.cancel();
-      _autoBalanceTimer = null;
-    }
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final hosts = await _api.getHosts();
-      setState(() {
-        _hosts = hosts;
-        if (hosts.isNotEmpty) {
-          // [ИСПРАВЛЕНО] Раньше проверка "_selectedId == null" срабатывала
-          // ТОЛЬКО в первый заход — если сохранённый ранее _selectedId
-          // (например через LocalPrefs) больше не встречается в свежем
-          // списке хостов (сервер удалили/переименовали), экран продолжал
-          // бы указывать на несуществующий host_name молча. Теперь если
-          // текущий _selectedId не найден среди актуальных хостов —
-          // выбираем первый доступный.
-          final stillExists = _selectedId != null &&
-              hosts.any((h) =>
-                  (h as Map<String, dynamic>)['host_name'] == _selectedId);
-          if (!stillExists) {
-            final first = hosts.first as Map<String, dynamic>;
-            _selectedId = first['host_name'] as String?;
-            _prefs.setString(PrefKeys.selectedServerId, _selectedId ?? '');
-          }
-          if (SelectedServer.hostName.value == null) {
-            final selectedHost = hosts.firstWhere(
-              (h) => (h as Map<String, dynamic>)['host_name'] == _selectedId,
-              orElse: () => hosts.first,
-            ) as Map<String, dynamic>;
-            SelectedServer.select(
-              selectedHost['host_name'] as String? ?? '',
-              selectedHost['host_name'] as String? ?? 'Без названия',
-            );
-          }
-        }
-        _loading = false;
-      });
-      await _loadActiveConnectionString();
-      _measureAllPings(hosts);
-    } catch (e) {
-      // Ожидаемо, пока backend/.env не настроены под реальную БД/панели —
-      // это не заглушка, а честная ошибка сети/интеграции.
-      setState(() {
-        _error = 'Не удалось получить список серверов: $e';
-        _loading = false;
-      });
-    }
-  }
-
-  /// В имени хоста (remark в 3x-ui) обычно уже есть код страны первыми
-  /// буквами, например "DE Frankfurt" -> "DE". Если формат другой в твоей
-  /// панели — просто поправь эту функцию, на данные с сервера это не влияет.
-  String _codeFromName(String name) {
-    final trimmed = name.trim();
-    if (trimmed.isEmpty) return '??';
-    final firstWord = trimmed.split(RegExp(r'\s+')).first;
-    return firstWord.length >= 2
-        ? firstWord.substring(0, 2).toUpperCase()
-        : firstWord.toUpperCase();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // ServersScreen используется и во вкладке RootShell, и как
-    // отдельный MaterialPageRoute с главного экрана. Во втором
-    // случае без Scaffold текст вне NeonCard попадал под аварийный
-    // DefaultTextStyle Flutter с жёлтым двойным подчёркиванием.
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      body: SafeArea(
-        child: RefreshIndicator(
-          onRefresh: _load,
-          child: SingleChildScrollView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-            child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AppHeader(
-              trailing: Icons.refresh_rounded,
-              onTrailingTap: _load,
-              screenLabel: 'Выбор сервера',
-            ),
-            const Text(
-              'Список подтягивается напрямую из панелей 3x-ui через backend — новая локация появляется здесь автоматически.',
-              style: TextStyle(fontSize: 10, color: AppColors.textDim),
-            ),
-            const SizedBox(height: 10),
-            if (_loading)
-              const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Center(child: CircularProgressIndicator())),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(_error!,
-                    style:
-                        const TextStyle(color: AppColors.danger, fontSize: 12)),
-              ),
-            if (_hosts != null && _hosts!.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 20),
-                child: Text('В панелях 3x-ui пока нет активных локаций.',
-                    style: TextStyle(color: AppColors.textDim)),
-              ),
-            if (_hosts != null)
-              ..._hosts!.map((s) {
-                final host = s as Map<String, dynamic>;
-                final id = host['host_name'] as String? ?? '';
-                final name = id.isEmpty ? 'Без названия' : id;
-                final code = _codeFromName(name);
-                final isSelected = id == _selectedId;
-                final isFav = _favorites.contains(id);
-                final ping = _livePing[id];
-                final String pingLabel;
-                final Color pingColor;
-                if (ping == null) {
-                  pingLabel = 'измеряю...';
-                  pingColor = AppColors.textDim;
-                } else if (ping == -2) {
-                  pingLabel = 'нет данных для пинга';
-                  pingColor = AppColors.textDim;
-                } else if (ping < 0) {
-                  pingLabel = 'недоступен';
-                  pingColor = AppColors.danger;
-                } else if (ping < 80) {
-                  pingLabel = '$ping мс · отлично';
-                  pingColor = AppColors.success;
-                } else if (ping < 180) {
-                  pingLabel = '$ping мс';
-                  pingColor = AppColors.warning;
-                } else {
-                  pingLabel = '$ping мс · медленно';
-                  pingColor = AppColors.danger;
-                }
-                return ServerPill(
-                  code: code,
-                  name: name,
-                  pingLabel: pingLabel,
-                  pingColor: pingColor,
-                  onTap: () {
-                    setState(() => _selectedId = id);
-                    SelectedServer.select(id, name);
-                    _prefs.setString(PrefKeys.selectedServerId, id);
-                  },
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      GestureDetector(
-                        onTap: () {
-                          setState(() {
-                            if (isFav) {
-                              _favorites.remove(id);
-                            } else {
-                              _favorites.add(id);
-                            }
-                          });
-                          _prefs.setStringSet(
-                              PrefKeys.favoriteServers, _favorites);
-                        },
-                        child: Icon(
-                          isFav
-                              ? Icons.star_rounded
-                              : Icons.star_border_rounded,
-                          size: 18,
-                          color: isFav
-                              ? const Color(0xFFF5C451)
-                              : const Color(0xFF372A52),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      if (isSelected)
-                        const NeonBadge('выбран')
-                      else
-                        const Icon(Icons.chevron_right_rounded,
-                            color: AppColors.textDim, size: 18),
-                    ],
-                  ),
-                );
-              }),
-            const SectionTitle('Автовыбор'),
-            NeonCard(
-              margin: const EdgeInsets.only(bottom: 10),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              child: Row(
-                children: [
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                          colors: [AppColors.success, Color(0xFF1D9A6C)]),
-                    ),
-                    alignment: Alignment.center,
-                    child: const Text('⚡', style: TextStyle(fontSize: 14)),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Авто-балансировка',
-                            style: TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.w600)),
-                        const SizedBox(height: 2),
-                        Text(
-                          // [НОВОЕ] Честно показываем, что тумблер реально
-                          // делает — реальный факт последнего переключения
-                          // вместо статичной надписи "выбор лучшего
-                          // сервера", которая никак не показывала, работает
-                          // функция на самом деле или нет.
-                          _autoBalance
-                              ? (_lastSwitchTarget != null
-                                  ? 'реально переключились на $_lastSwitchTarget'
-                                  : 'следим за пингом каждые 30 с и переключаем туннель сами')
-                              : 'выбор лучшего сервера',
-                          style: const TextStyle(
-                              fontSize: 10, color: AppColors.textDim),
-                        ),
-                      ],
-                    ),
-                  ),
-                  NeonToggle(
-                    value: _autoBalance,
-                    onChanged: (v) {
-                      setState(() => _autoBalance = v);
-                      _prefs.setBool(PrefKeys.autoBalance, v);
-                      _syncAutoBalanceTimer();
-                      if (v && _hosts != null && _hosts!.isNotEmpty) {
-                        _measureAllPings(_hosts!);
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ],
-            ),
-          ),
-        ),
-      ),
+    final nextDownloadTotal = stats.downlinkTotalBytes as int;
+    final nextUploadTotal = stats.uplinkTotalBytes as int;
+    // На части версий libbox total остаётся нулевым, хотя каждый тик
+    // содержит throughput. Накапливаем его сами, чтобы UI не сбрасывался.
+    final reportedDownload = nextDownloadTotal > _displayDownloadBytes
+        ? nextDownloadTotal
+        : _displayDownloadBytes +
+            ((stats.downlinkBps as num).toDouble().clamp(0, 1e12)).round();
+    final reportedUpload = nextUploadTotal > _displayUploadBytes
+        ? nextUploadTotal
+        : _displayUploadBytes +
+            ((stats.uplinkBps as num).toDouble().clamp(0, 1e12)).round();
+    _displayDownloadBytes = reportedDownload;
+    _displayUploadBytes = reportedUpload;
+    final elapsedSeconds = _lastTrafficAt == null
+        ? 0.0
+        : now.difference(_lastTrafficAt!).inMilliseconds / 1000.0;
+    final derivedDownload = elapsedSeconds > 0
+        ? ((nextDownloadTotal - _downloadTotalBytes) / elapsedSeconds)
+            .round()
+            .clamp(0, 1 << 62)
+        : 0;
+    final derivedUpload = elapsedSeconds > 0
+        ? ((nextUploadTotal - _uploadTotalBytes) / elapsedSeconds)
+            .round()
+            .clamp(0, 1 << 62)
+        : 0;
+    _lastTrafficAt = now;
+    _downloadTotalBytes = reportedDownload;
+    _uploadTotalBytes = reportedUpload;
+    status.value = TunnelStatus(
+      state: current.state,
+      duration: current.state == TunnelConnState.connected
+          ? DateTime.now()
+              .difference(_connectStartedAt ?? DateTime.now())
+              .inSeconds
+          : current.duration,
+      // На некоторых версиях libbox мгновенные up/down приходят нулевыми,
+      // хотя session total растёт. Считаем скорость по дельте totals и
+      // используем её как надёжный fallback.
+      // Android plugin already receives the live sing-box counters. Раньше
+      // здесь всегда оставлялся `current.*`, а он изначально равен нулю;
+      // native UID fallback не видел трафик других приложений и поэтому
+      // тоже возвращал нули. Берём показания ядра, а fallback используем
+      // только если конкретный тик действительно нулевой.
+      download: stats.downlinkBps > 0 ? stats.downlinkBps : current.download,
+      upload: stats.uplinkBps > 0 ? stats.uplinkBps : current.upload,
+      downloadTotalBytes: reportedDownload,
+      uploadTotalBytes: reportedUpload,
     );
   }
+
+  /// Перечитывает фактическое состояние нативного foreground-сервиса.
+  /// Пока Flutter Activity была в фоне или пересоздавалась Android, старое
+  /// событие Dart-стрима могло потеряться, хотя VPN продолжает работать.
+  Future<void> syncRuntimeState() async {
+    await _ensureInitialized();
+    try {
+      final actualState = await _client.getServiceState();
+      // Сначала восстанавливаем момент подключения и лишь затем публикуем
+      // состояние. Иначе экран кратко покажет 00:00:00 при возвращении в
+      // приложение, хотя foreground VPN всё это время был подключён.
+      if (_mapServiceState(actualState) == TunnelConnState.connected) {
+        final savedAt = await LocalPrefs.instance
+            .getInt(PrefKeys.tunnelConnectedAtMillis, fallback: 0);
+        if (savedAt > 0) {
+          _connectStartedAt = DateTime.fromMillisecondsSinceEpoch(savedAt);
+        }
+      }
+      _runtimeStateSynced = true;
+      _applyServiceState(actualState);
+      if (_mapServiceState(actualState) == TunnelConnState.connected) {
+        _applyTrafficStats(await _client.getTrafficStats());
+      }
+    } catch (e) {
+      lastError.value = 'Не удалось обновить состояние VPN: $e';
+    }
+  }
+
+  TunnelConnState _mapServiceState(dynamic state) {
+    final s = state.toString().toLowerCase();
+    if (s.contains('connecting') || s.contains('starting'))
+      return TunnelConnState.connecting;
+    if (s.contains('disconnecting') || s.contains('stopping'))
+      return TunnelConnState.disconnecting;
+    if (s.contains('connected') ||
+        s.contains('started') ||
+        s.contains('running')) return TunnelConnState.connected;
+    return TunnelConnState.disconnected;
+  }
+
+  /// [НОВОЕ] Держит секундный тик, пока туннель connected, чтобы таймер
+  /// сессии на экране считал реальное время, а не ждал редких событий от
+  /// плагина. Безопасно вызывать многократно — старый таймер всегда
+  /// гасится перед тем, как (возможно) завести новый.
+  void _restartDurationTicker(bool shouldRun) {
+    _durationTicker?.cancel();
+    _durationTicker = null;
+    if (!shouldRun) {
+      _lastNativeRxBytes = null;
+      _lastNativeTxBytes = null;
+      _lastNativeStatsAt = null;
+      return;
+    }
+    if (Platform.isAndroid) unawaited(_pollNativeTraffic());
+    _durationTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      final current = status.value;
+      if (current == null || current.state != TunnelConnState.connected) return;
+      status.value = TunnelStatus(
+        state: current.state,
+        duration: DateTime.now()
+            .difference(_connectStartedAt ?? DateTime.now())
+            .inSeconds,
+        download: current.download,
+        upload: current.upload,
+        downloadTotalBytes: current.downloadTotalBytes,
+        uploadTotalBytes: current.uploadTotalBytes,
+      );
+      if (Platform.isAndroid) unawaited(_pollNativeTraffic());
+    });
+  }
+
+  /// Android продолжает учитывать байты VPN на UID приложения даже тогда,
+  /// когда Flutter Activity была выгружена, а foreground VpnService остался
+  /// работать. Это надёжный fallback для бага плагина, у которого после
+  /// восстановления процесса больше не возобновлялся trafficStatsStream.
+  Future<void> _pollNativeTraffic() async {
+    if (_nativeStatsPolling || !isConnected) return;
+    _nativeStatsPolling = true;
+    try {
+      final raw = await _nativeStatsChannel
+          .invokeMapMethod<String, dynamic>('getUidTraffic');
+      final rx = (raw?['rxBytes'] as num?)?.toInt();
+      final tx = (raw?['txBytes'] as num?)?.toInt();
+      if (rx == null || tx == null) return;
+
+      final now = DateTime.now();
+      final elapsedSeconds = _lastNativeStatsAt == null
+          ? 0.0
+          : now.difference(_lastNativeStatsAt!).inMilliseconds / 1000.0;
+      final current = status.value;
+      if (current != null &&
+          current.state == TunnelConnState.connected &&
+          elapsedSeconds > 0 &&
+          _lastNativeRxBytes != null &&
+          _lastNativeTxBytes != null) {
+        final download = ((rx - _lastNativeRxBytes!) / elapsedSeconds)
+            .round()
+            .clamp(0, 1 << 62);
+        final upload = ((tx - _lastNativeTxBytes!) / elapsedSeconds)
+            .round()
+            .clamp(0, 1 << 62);
+        // UID-счётчики Android не включают трафик других приложений при
+        // split/full VPN и часто дают одинаковые значения. Не затираем ими
+        // уже полученную от sing-box скорость нулями.
+        if (download > 0 || upload > 0) {
+          status.value = TunnelStatus(
+            state: current.state,
+            duration: current.duration,
+            download: download > 0 ? download : current.download,
+            upload: upload > 0 ? upload : current.upload,
+            downloadTotalBytes: current.downloadTotalBytes,
+            uploadTotalBytes: current.uploadTotalBytes,
+          );
+        }
+      }
+      _lastNativeRxBytes = rx;
+      _lastNativeTxBytes = tx;
+      _lastNativeStatsAt = now;
+    } catch (_) {
+      // Не-Android платформы и старые сборки нативного слоя продолжают
+      // использовать штатный trafficStatsStream выше.
+    } finally {
+      _nativeStatsPolling = false;
+    }
+  }
+
+  void _onStatusChanged(TunnelConnState state) {
+    if (state != TunnelConnState.disconnected) return;
+    if (_userInitiatedDisconnect) return;
+    if (_lastConnectionString == null) return;
+    if (!_killSwitchEnabled) return;
+    // [ИЗМЕНЕНО] Раньше при исчерпании попыток авто-переподключения метод
+    // просто молча выходил (return) — устройство оставалось с обычным,
+    // незащищённым интернетом, а UI по-прежнему мог показывать
+    // killSwitchBlocking == true чуть раньше в цикле. Теперь при
+    // исчерпании попыток, если включён строгий Kill Switch, физически
+    // поднимаем блокирующую сессию вместо того, чтобы просто сдаться.
+    if (_autoReconnectAttempt >= _maxAutoReconnectAttempts) {
+      if (_strictKillSwitchEnabled) _engageHardKillSwitch();
+      return;
+    }
+
+    killSwitchBlocking.value = true;
+    _autoReconnectAttempt++;
+    Future.delayed(Duration(seconds: 3), () async {
+      if (_userInitiatedDisconnect) return;
+      try {
+        await connect(_lastConnectionString!,
+            preferredHostName: _lastPreferredHostName);
+        killSwitchBlocking.value = false;
+        _autoReconnectAttempt = 0;
+      } catch (_) {
+        // connect() сам исчерпает попытки и снова придёт сюда через
+        // _onStatusChanged при следующем disconnected — здесь специально
+        // ничего не делаем, чтобы не задваивать логику исчерпания попыток.
+      }
+    });
+  }
+
+  /// [НОВОЕ] Настоящий Kill Switch — физически блокирует трафик, поднимая
+  /// служебную VPN-сессию с конфигом, у которого нет рабочего внешнего
+  /// outbound'а (route.final = 'block'): пакеты, которые раньше улетали бы
+  /// напрямую через мобильную сеть/Wi-Fi в обход упавшего туннеля, теперь
+  /// просто отбрасываются на уровне TUN-интерфейса. Именно так реализован
+  /// Kill Switch в Hiddify — это не настройка ОС, а собственная "заглушка"
+  /// вместо реального туннеля, которая держит системный маршрут на себя.
+  /// Автоматически снимается, как только пользователь нажмёт "Отключить"
+  /// (disconnect()) или начнётся новое обычное подключение (connect()).
+  Future<void> _engageHardKillSwitch() async {
+    if (_hardKillSwitchEngaged) return;
+    if (_userInitiatedDisconnect) return;
+    // [ВАЖНО] Флаг взводится ДО await, а не после успешного connect() —
+    // serviceStateStream у плагина может прислать промежуточные события
+    // ('connecting'/'connected' самой блокирующей сессии) ещё во время
+    // выполнения await ниже. Guard в _ensureInitialized (см. выше по файлу)
+    // проверяет именно этот флаг, чтобы не дать состоянию служебной сессии
+    // просочиться в публичный status/duration/трафик обычного туннеля.
+    _hardKillSwitchEngaged = true;
+    try {
+      final blockConfig = _buildBlockAllConfig();
+      await _client.checkConfig(blockConfig);
+      await _client.connect(SessionOptions(
+        config: blockConfig,
+        networkMode: NetworkMode.vpn,
+        notification: const NotificationConfig(
+          title: 'VPNOnline — трафик заблокирован',
+          showTrafficStats: false,
+          showStopButton: true,
+          stopButtonLabel: 'Отключить',
+        ),
+      ));
+      hardKillSwitchActive.value = true;
+    } catch (e) {
+      // Если даже блокирующую сессию поднять не удалось (например, нет
+      // самого VPN-разрешения) — честно откатываем флаг и оставляем
+      // lastError, но не рушим остальной поток управления. killSwitchBlocking
+      // всё ещё сигнализирует пользователю в UI, что защиты сейчас нет.
+      _hardKillSwitchEngaged = false;
+      lastError.value = 'Не удалось включить строгую блокировку трафика: $e';
+    }
+  }
+
+  /// Снимает служебную блокирующую сессию (см. _engageHardKillSwitch), если
+  /// она сейчас активна. Безопасно вызывать всегда — если сессии нет, ничего
+  /// не делает.
+  Future<void> _disengageHardKillSwitch() async {
+    if (!_hardKillSwitchEngaged) return;
+    try {
+      await _client.disconnect();
+    } catch (_) {}
+    // [ВАЖНО] _hardKillSwitchEngaged намеренно остаётся true ещё чуть-чуть
+    // после disconnect() — пока флаг true, guard в serviceStateStream-
+    // листенере (_ensureInitialized) игнорирует событие 'disconnected' от
+    // ИМЕННО этой блокирующей сессии. Без этой паузы событие прошло бы как
+    // обычный обрыв туннеля и заново запустило бы цикл авто-переподключения
+    // поверх того подключения, которое и так следующим шагом запускает
+    // вызвавший этот метод код (connect()/disconnect()).
+    await Future.delayed(const Duration(milliseconds: 250));
+    _hardKillSwitchEngaged = false;
+    hardKillSwitchActive.value = false;
+    _autoReconnectAttempt = 0;
+  }
+
+  /// Минимальный конфиг sing-box без внешнего outbound'а — только TUN-
+  /// инбаунд, чей единственный маршрут (`route.final`) — `block`. Валидный
+  /// sing-box-конфиг обязан содержать хотя бы один outbound, поэтому
+  /// добавлены `block` и `dns-out` (стандартные встроенные типы) — оба
+  /// ничего никуда не пересылают.
+  String _buildBlockAllConfig() {
+    final config = <String, dynamic>{
+      'log': {'level': 'warn'},
+      'dns': {
+        'servers': [
+          {'type': 'local', 'tag': 'local-dns'},
+        ],
+        'final': 'local-dns',
+      },
+      'inbounds': [
+        {
+          'type': 'tun',
+          'tag': 'tun-in',
+          'interface_name': 'vpnonline-killswitch',
+          'mtu': 1500,
+          'strict_route': true,
+          'stack': 'mixed',
+          'auto_route': true,
+          'endpoint_independent_nat': true,
+        },
+      ],
+      'outbounds': [
+        {'type': 'block', 'tag': 'block'},
+        {'type': 'dns', 'tag': 'dns-out'},
+      ],
+      'route': {
+        'auto_detect_interface': true,
+        'final': 'block',
+        'rules': [
+          {'protocol': 'dns', 'outbound': 'dns-out'},
+        ],
+      },
+    };
+    return jsonEncode(config);
+  }
+
+  Future<List<String>> listProfileNames(String connectionString) async {
+    try {
+      final profiles = await _loadProfiles(connectionString);
+      return profiles.map((p) => p.remark).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// [НОВОЕ] Реальные адреса серверов из подписки — host_name (совпадает с
+  /// remark в самой VLESS-ссылке, см. _matchProfile выше) -> (host, port),
+  /// на который реально пойдёт трафик при подключении к этой локации.
+  ///
+  /// Нужен для настоящей автобалансировки на ServersScreen. Раньше "живой
+  /// пинг" там мерился до `connect_host`, который бэкенд вычисляет из
+  /// домена `subscription_url` (см. backend-patch/api.py -> api_hosts()) —
+  /// а этот домен может быть ОБЩИМ сервисом подписки на все локации сразу,
+  /// а не самим VLESS-сервером конкретной страны. Из-за этого все локации
+  /// показывали одинаковый пинг и автовыбор не мог их отличить друг от
+  /// друга. Здесь возвращается адрес, который реально зашит в саму
+  /// VLESS-ссылку этой локации — тот же код, что использует connect().
+  Future<Map<String, ({String host, int port})>> listProfileEndpoints(
+      String connectionString) async {
+    try {
+      final profiles = await _loadProfiles(connectionString);
+      final result = <String, ({String host, int port})>{};
+      for (final p in profiles) {
+        if (p.remark.isEmpty) continue;
+        result[p.remark] = (host: p.host, port: p.port);
+      }
+      return result;
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// [НОВОЕ] Переключить УЖЕ ПОДНЯТЫЙ туннель на другую локацию той же
+  /// подписки — без повторного похода за connection_string в бэкенд,
+  /// используем ту же подписку, на которой сейчас реально висит трафик
+  /// (см. `_lastConnectionString`, connect() выше).
+  ///
+  /// Без этого метода "Авто-балансировка" на ServersScreen была чисто
+  /// косметическим тумблером: она умела подобрать сервер с лучшим пингом,
+  /// но никак не могла применить свой выбор к уже работающему туннелю —
+  /// он оставался висеть на прежнем сервере до следующего ручного
+  /// подключения. Это и была причина жалобы "не переключается на другие
+  /// сервера, функция не работает".
+  ///
+  /// [ВАЖНО] `disconnect()` обнуляет `_lastConnectionString` — поэтому
+  /// сохраняем его в локальную переменную ДО вызова disconnect().
+  Future<String> switchPreferredHost(String hostName) async {
+    final connectionString = _lastConnectionString;
+    if (connectionString == null || connectionString.isEmpty) {
+      throw TunnelException(
+          'Нет активного туннеля, который можно переключить.');
+    }
+    await disconnect();
+    return connect(connectionString, preferredHostName: hostName);
+  }
+
+  _ParsedVless? _matchProfile(List<_ParsedVless> profiles, String? hostName) {
+    if (hostName == null || hostName.isEmpty) return null;
+    final needle = hostName.trim().toLowerCase();
+    for (final p in profiles) {
+      if (p.remark.trim().toLowerCase() == needle) return p;
+    }
+    for (final p in profiles) {
+      final remark = p.remark.trim().toLowerCase();
+      if (remark.isEmpty) continue;
+      if (remark.contains(needle) || needle.contains(remark)) return p;
+    }
+    return null;
+  }
+
+  Future<String> connect(String connectionString,
+      {String? preferredHostName}) async {
+    lastError.value = null;
+    await _ensureInitialized();
+    // На Android 13+ одного объявления POST_NOTIFICATIONS в манифесте
+    // недостаточно: пока пользователь не подтвердит runtime-разрешение,
+    // foreground VPN продолжает работать, но его карточка скрыта в шторке.
+    // Запрашиваем его до старта VpnService, чтобы первое подключение уже
+    // показало постоянное уведомление с кнопкой отключения.
+    if (Platform.isAndroid) {
+      try {
+        final notificationsAllowed = await _nativeStatsChannel
+                .invokeMethod<bool>('requestNotificationPermission') ??
+            false;
+        if (!notificationsAllowed) {
+          lastError.value =
+              'Разрешите уведомления, чтобы видеть статус VPN в шторке.';
+        }
+      } on PlatformException {
+        // Не прерываем VPN на старых сборках/устройствах: разрешение влияет
+        // только на видимость уведомления, а не на безопасность туннеля.
+      }
+    }
+    // Обычное подключение может получить событие connected раньше, чем
+    // ConnectScreen вызовет syncRuntimeState(), поэтому с этого момента
+    // разрешаем сохранить время старта сессии.
+    _runtimeStateSynced = true;
+    _downloadTotalBytes = 0;
+    _uploadTotalBytes = 0;
+    _displayDownloadBytes = 0;
+    _displayUploadBytes = 0;
+    _lastTrafficAt = null;
+    _lastNativeRxBytes = null;
+    _lastNativeTxBytes = null;
+    _lastNativeStatsAt = null;
+
+    final dnsProtection = await LocalPrefs.instance
+        .getBool(PrefKeys.dnsProtection, fallback: true);
+    final blockAds =
+        await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: true);
+    final dpiBypass =
+        await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: false);
+    final proxyOnly = await LocalPrefs.instance
+        .getBool(PrefKeys.proxyOnlyMode, fallback: false);
+    final dnsProvider =
+        await LocalPrefs.instance.getString(PrefKeys.dnsServerProvider) ??
+            'cloudflare';
+    final customDns =
+        await LocalPrefs.instance.getString(PrefKeys.customDnsServer);
+    _killSwitchEnabled =
+        await LocalPrefs.instance.getBool(PrefKeys.killSwitch, fallback: true);
+    // [НОВОЕ] Строгий Kill Switch — см. докстринг PrefKeys.strictKillSwitch
+    // и _engageHardKillSwitch ниже. Читается заранее, чтобы _onStatusChanged
+    // знал, нужно ли поднимать служебную блокирующую сессию, когда обычное
+    // авто-переподключение исчерпает попытки.
+    _strictKillSwitchEnabled = await LocalPrefs.instance
+        .getBool(PrefKeys.strictKillSwitch, fallback: false);
+    _maxAutoReconnectAttempts = await LocalPrefs.instance
+        .getInt(PrefKeys.reconnectAttempts, fallback: 8);
+    final bypassedMap =
+        await LocalPrefs.instance.getBoolMap(PrefKeys.splitTunnelBypass);
+    final splitTunnelMode =
+        await LocalPrefs.instance.getString(PrefKeys.splitTunnelMode) ??
+            'exclude';
+    final selectedPackages =
+        bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
+    final bypassLan =
+        await LocalPrefs.instance.getBool(PrefKeys.bypassLan, fallback: false);
+    final muxEnabled =
+        await LocalPrefs.instance.getBool(PrefKeys.muxEnabled, fallback: true);
+    final muxProtocol =
+        await LocalPrefs.instance.getString(PrefKeys.muxProtocol) ?? 'smux';
+    final fakeIpDns =
+        await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: true);
+    final ipv6Enabled = await LocalPrefs.instance
+        .getBool(PrefKeys.ipv6Enabled, fallback: true);
+
+    // Если сейчас активна служебная "блокирующая" сессия Kill Switch (см.
+    // _engageHardKillSwitch), её нужно снять перед обычным подключением —
+    // иначе новая сессия конкурирует с ней за системный TUN-интерфейс.
+    await _disengageHardKillSwitch();
+
+    // [ИСПРАВЛЕНО — причина краша приложения при нажатии "Подключить"]
+    // Раньше здесь сразу шёл _loadProfiles()/_client.connect() без запроса
+    // системного разрешения на поднятие VPN. По README пакета
+    // flutter_singbox_client разрешение обязано быть запрошено ДО connect()
+    // в режиме VPN: `if (!await client.requestVPNPermission()) return;`.
+    // Без этого шага Android получает от нативного кода VpnService.prepare(),
+    // который не был согласован пользователем через системный диалог — и
+    // падает НАТИВНО (Kotlin/JNI), минуя Dart try/catch целиком. Именно это
+    // выглядит как "приложение вылетает" без единого сообщения об ошибке в
+    // интерфейсе. В proxy-only режиме (SOCKS5/HTTP локальный прокси, без
+    // системного VPN-интерфейса) этот диалог не нужен — запрашиваем только
+    // когда реально поднимаем VPN.
+    if (!proxyOnly) {
+      final granted = await _client.requestVPNPermission();
+      if (!granted) {
+        throw TunnelException(
+          'Нужно разрешение на VPN-подключение — без него Android не даст поднять туннель. '
+          'Нажми "Подключить" ещё раз и разреши в системном диалоге.',
+        );
+      }
+      // [ИСПРАВЛЕНО — вторая причина PlatformException(CONNECT_FAILED,
+      // "Service failed to start"), кроме отсутствовавшего раньше
+      // разрешения] Системный диалог VPN-разрешения открывается в отдельной
+      // Activity поверх нашей; `requestVPNPermission()` возвращает `true` в
+      // момент, когда Flutter-engine получает onActivityResult — то есть ДО
+      // того, как наша Activity гарантированно вернулась в состояние
+      // RESUMED и система полностью зафиксировала выданное разрешение на
+      // своей стороне. Если сразу в этот момент запустить VpnService (что
+      // раньше и происходило — `_loadProfiles()`/`_client.connect()` шли
+      // немедленно следующей строкой), нативный старт сервиса иногда падает
+      // с этой самой ошибкой — есть же разрешение, но ОС ещё не готова
+      // поднять сервис. Короткая пауза даёт Activity долистать жизненный
+      // цикл до RESUMED перед первой попыткой подключения.
+      await Future.delayed(const Duration(milliseconds: 350));
+    }
+
+    final profiles = await _loadProfiles(connectionString);
+    final preferred = _matchProfile(profiles, preferredHostName);
+    final ordered = preferred != null
+        ? [preferred, ...profiles.where((p) => !identical(p, preferred))]
+        : profiles;
+
+    Object? lastFailure;
+    for (final profile in ordered) {
+      try {
+        final config = _buildSingBoxConfig(
+          profile,
+          dnsProtection: dnsProtection,
+          blockAds: blockAds,
+          dpiBypass: dpiBypass,
+          selectedPackages: selectedPackages,
+          splitTunnelMode: splitTunnelMode,
+          proxyOnly: proxyOnly,
+          dnsProvider: dnsProvider,
+          customDns: customDns,
+          bypassLan: bypassLan,
+          muxEnabled: muxEnabled,
+          muxProtocol: muxProtocol,
+          fakeIpDns: fakeIpDns,
+          ipv6Enabled: ipv6Enabled,
+        );
+        await _client.checkConfig(config);
+
+        Future<void> startSession() => _client.connect(SessionOptions(
+              config: config,
+              networkMode: proxyOnly ? NetworkMode.proxy : NetworkMode.vpn,
+              // На Android split-tunnel должен задаваться не только
+              // в JSON sing-box, но и на VpnService.Builder ДО establish().
+              // Именно нативный allow/disallow-список определяет,
+              // попадёт ли UID в VPN-сеть Android. Раньше плагину
+              // perAppProxy не передавался, поэтому VpnService захватывал
+              // все UID-ы, включая отмеченные в экране исключений.
+              perAppProxy: !proxyOnly && selectedPackages.isNotEmpty
+                  ? PerAppProxyOptions(
+                      mode: splitTunnelMode == 'include'
+                          ? PerAppProxyMode.include
+                          : PerAppProxyMode.exclude,
+                      packages: selectedPackages,
+                    )
+                  : null,
+              notification: NotificationConfig(
+                title: 'VPN подключён',
+                channelName: 'VPNOnline — подключение',
+                showTrafficStats: true,
+                showStopButton: true,
+                stopButtonLabel: 'Отключить',
+              ),
+            ));
+
+        try {
+          await startSession();
+        } on PlatformException catch (e) {
+          // [ИСПРАВЛЕНО — главная причина PlatformException(CONNECT_FAILED,
+          // "Service failed to start") на скриншоте, повторяющаяся на ВСЕХ
+          // серверах подряд] Это код ошибки, который нативный слой пакета
+          // отдаёт, когда Android ещё не успел освободить/поднять
+          // VpnService/foreground-сервис — типичная гонка между остановкой
+          // предыдущей сессии (или самим системным диалогом разрешения) и
+          // стартом новой, а не проблема конкретного ключа. Раньше любая
+          // ошибка здесь сразу считалась "сервер не подошёл" и цикл шёл к
+          // следующему профилю — из-за чего одна и та же гонка воспроизводи-
+          // лась заново на каждом из 5 серверов подряд и результат выглядел
+          // как "не работает вообще ничего", хотя сами ключи были рабочими.
+          // Теперь для именно этого кода ошибки сначала честно ждём, чтобы
+          // сервис реально освободился, и пробуем ЕЩЁ РАЗ тот же профиль
+          // один раз, прежде чем переходить к следующему серверу.
+          if (e.code != 'CONNECT_FAILED') rethrow;
+          await _settleAfterDisconnect();
+          await startSession();
+        }
+
+        final reallyConnected = await _waitForConnected(Duration(seconds: 12));
+        if (!reallyConnected) {
+          await _settleAfterDisconnect();
+          lastFailure =
+              'VPN не подключился за 12 сек (ядра sing-box требуют время для инициализации туннеля)';
+          continue;
+        }
+
+        // [ИСПРАВЛЕНО — главная причина "подключено, но интернет не
+        // работает" (0 МБ приём/отдача, "нет данных о задержке")]
+        // Раньше успешным подключением считался сам факт перехода
+        // serviceStateStream в connected. А это означает ТОЛЬКО то, что
+        // нативный VpnService/TUN-интерфейс на Android поднялся — Android
+        // принял системный VPN-туннель. Это НЕ гарантирует, что пакеты
+        // реально доходят до VLESS-сервера и обратно: интерфейс может
+        // подняться штатно, а сам handshake до конкретного узла зависнуть
+        // (сеть/провайдер режет именно этот сервер, конкретный узел лёг,
+        // или ядро sing-box подвисает на резолве домена в IPv6 — см. ниже
+        // fix strategy: ipv4_only). Android в этом случае как ни в чём не
+        // бывало показывает "подключено", а трафик так и остаётся на 0 —
+        // ровно то, что видно на скриншоте. Полноценный клиент в такой
+        // ситуации реально проверяет соединение и переключается на следующий
+        // сервер подписки; здесь такой проверки не было вовсе.
+        // Поэтому теперь ПОСЛЕ подъёма интерфейса делаем один короткий
+        // HTTP HEAD-запрос, который реально должен пройти через туннель:
+        // в VPN-режиме — обычный запрос (весь трафик процесса и так идёт
+        // через TUN благодаря auto_route); в proxy-режиме туннеля нет,
+        // поэтому запрос принудительно направляем через локальный
+        // SOCKS/HTTP-прокси на 127.0.0.1:$_proxyPort — иначе проверка бы
+        // молча тестировала обычный мобильный интернет в обход прокси и
+        // всегда была бы "зелёной", даже если прокси не работает.
+        // Если запрос не прошёл — это тот же случай, что и любая другая
+        // ошибка подключения: отключаемся и идём к следующему серверу в
+        // списке (см. цикл for выше) — то есть просто доиспользуем уже
+        // существующий фолбэк по профилям вместо того, чтобы городить
+        // отдельную ветку.
+        final internetReachable =
+            await _verifyInternetReachable(proxyOnly: proxyOnly);
+        if (!internetReachable) {
+          await _settleAfterDisconnect();
+          lastFailure =
+              'Туннель поднялся, но интернет через него не идёт (сервер "${profile.remark}" не отвечает) — пробуем следующий';
+          continue;
+        }
+
+        final connectedName = profile.remark.isNotEmpty
+            ? profile.remark
+            : (preferredHostName ?? 'VPNOnline');
+        connectedServerName.value = connectedName;
+        _connectedHost = profile.host;
+        _connectedPort = profile.port;
+        localProxyAddress.value =
+            proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
+
+        _lastConnectionString = connectionString;
+        _lastPreferredHostName = preferredHostName;
+        _userInitiatedDisconnect = false;
+        killSwitchBlocking.value = false;
+        return connectedName;
+      } catch (e) {
+        lastFailure = e;
+        await _settleAfterDisconnect();
+        continue;
+      }
+    }
+    throw TunnelException(
+      'Не удалось подключиться ни к одному серверу (${ordered.length} исп.): $lastFailure',
+    );
+  }
+
+  /// [НОВОЕ] Останавливает текущую сессию и ждёт, пока сервис реально
+  /// перейдёт в disconnected (не дольше 1.5 сек), прежде чем возвращать
+  /// управление — вместо fire-and-forget `_client.disconnect()`, который
+  /// раньше стоял здесь. Останавливать VpnService/foreground-сервис на
+  /// Android — асинхронная операция; если следующая попытка подключения
+  /// (следующий сервер в списке) стартует РАНЬШЕ, чем ОС успела освободить
+  /// предыдущую сессию, нативный старт падает с той же
+  /// PlatformException(CONNECT_FAILED, "Service failed to start"), что и на
+  /// скриншоте — даже если сам ключ и конфиг полностью рабочие. Небольшая
+  /// пауза после подтверждённого disconnected — дополнительный запас,
+  /// потому что событие "disconnected" от плагина не всегда означает, что
+  /// ОС уже освободила системные ресурсы сервиса (порт TUN, foreground-
+  /// уведомление и т.д.) на 100%.
+  Future<void> _settleAfterDisconnect() async {
+    try {
+      await _client.disconnect();
+    } catch (_) {}
+    if (status.value?.state != TunnelConnState.disconnected) {
+      final completer = Completer<void>();
+      VoidCallback? listener;
+      final timer = Timer(const Duration(milliseconds: 1500), () {
+        if (!completer.isCompleted) completer.complete();
+      });
+      listener = () {
+        if (status.value?.state == TunnelConnState.disconnected &&
+            !completer.isCompleted) {
+          completer.complete();
+        }
+      };
+      status.addListener(listener);
+      try {
+        await completer.future;
+      } finally {
+        timer.cancel();
+        status.removeListener(listener);
+      }
+    }
+    await Future.delayed(const Duration(milliseconds: 350));
+  }
+
+  static const _proxyPort = 2080;
+
+  String _buildSingBoxConfig(
+    _ParsedVless p, {
+    required bool dnsProtection,
+    required bool blockAds,
+    required bool dpiBypass,
+    required List<String> selectedPackages,
+    bool proxyOnly = false,
+    String dnsProvider = 'cloudflare',
+    String? customDns,
+    // 'exclude' — selectedPackages идут в обход VPN (старое поведение).
+    // 'include' — ТОЛЬКО selectedPackages идут через VPN.
+    String splitTunnelMode = 'exclude',
+    bool bypassLan = false,
+    bool muxEnabled = true,
+    String muxProtocol = 'smux',
+    bool fakeIpDns = true,
+    bool ipv6Enabled = false,
+  }) {
+    final outbound = <String, dynamic>{
+      'type': 'vless',
+      'tag': 'proxy',
+      'server': p.host,
+      'server_port': p.port,
+      'uuid': p.uuid,
+      if (p.flow != null && p.flow!.isNotEmpty) 'flow': p.flow,
+      // [НОВОЕ] Mux — см. PrefKeys.muxEnabled. Несовместим с flow
+      // (xtls-rprx-vision и подобные потоки сами управляют TCP-соединением
+      // на уровне TLS и не могут быть завёрнуты в дополнительный
+      // мультиплексор) — поэтому включается, только если flow не задан,
+      // ровно как это ограничение работает и в самом sing-box/Hiddify.
+      if (muxEnabled && (p.flow == null || p.flow!.isEmpty))
+        'multiplex': {
+          'enabled': true,
+          'protocol': muxProtocol,
+          'max_streams': 8,
+        },
+    };
+
+    if (p.security == 'reality' || p.security == 'tls') {
+      outbound['tls'] = {
+        'enabled': true,
+        'server_name': p.sni ?? p.host,
+        if (p.alpn != null && p.alpn!.isNotEmpty) 'alpn': p.alpn!.split(','),
+        'utls': {
+          'enabled': true,
+          'fingerprint': (p.fp == null || p.fp!.isEmpty) ? 'chrome' : p.fp
+        },
+        if (p.security == 'reality')
+          'reality': {
+            'enabled': true,
+            'public_key': p.pbk,
+            if (p.sid != null && p.sid!.isNotEmpty) 'short_id': p.sid,
+          },
+      };
+    }
+
+    // Маскировка/транспорт (ws, grpc, http) — обязателен для ключей, где
+    // сервер ожидает не голый TCP, а конкретный транспортный "конверт".
+    // Без этого блока такие ключи (например, экспортированные с
+    // http-заголовками из другого клиента) не подключаются: сервер отвергает handshake.
+    final transportType = p.transportType ?? 'tcp';
+    if (transportType == 'ws') {
+      outbound['transport'] = {
+        'type': 'ws',
+        'path': (p.transportPath == null || p.transportPath!.isEmpty)
+            ? '/'
+            : p.transportPath,
+        if (p.transportHost != null && p.transportHost!.isNotEmpty)
+          'headers': {'Host': p.transportHost},
+      };
+    } else if (transportType == 'grpc') {
+      outbound['transport'] = {
+        'type': 'grpc',
+        'service_name': (p.transportPath == null || p.transportPath!.isEmpty)
+            ? ''
+            : p.transportPath,
+      };
+    } else if (transportType == 'http') {
+      outbound['transport'] = {
+        'type': 'http',
+        if (p.transportHost != null && p.transportHost!.isNotEmpty)
+          'host': [p.transportHost],
+        'path': (p.transportPath == null || p.transportPath!.isEmpty)
+            ? '/'
+            : p.transportPath,
+      };
+    }
+    // transportType == 'tcp' (или неизвестный) — без блока "transport",
+    // как и раньше: sing-box по умолчанию использует голый TCP.
+
+    // DNS должен быть доступен ещё до первого DNS-ответа через туннель.
+    // Поэтому для встроенных провайдеров используем DoT с фиксированным IP
+    // и корректным TLS SNI, а не DoH к голому IP. Иначе часть устройств
+    // поднимает TUN, но не может установить защищённое DNS-соединение —
+    // внешне это выглядит как «подключено, а интернета нет».
+    const dnsProviders = {
+      'cloudflare': {'server': '1.1.1.1', 'server_name': 'cloudflare-dns.com'},
+      'google': {'server': '8.8.8.8', 'server_name': 'dns.google'},
+      'adguard': {
+        'server': '94.140.14.14',
+        'server_name': 'dns.adguard-dns.com'
+      },
+      'quad9': {'server': '9.9.9.9', 'server_name': 'dns.quad9.net'},
+    };
+    // [НОВОЕ] Провайдер 'custom' — пользовательский DNS-адрес с экрана
+    // "Настройки" (см. PrefKeys.customDnsServer). Если пользователь выбрал
+    // custom, но не указал адрес — тихо откатываемся на Cloudflare, чтобы
+    // не отправлять sing-box заведомо пустой server и не ронять конфиг.
+    final selectedDns =
+        dnsProviders[dnsProvider] ?? dnsProviders['cloudflare']!;
+    final hasCustomDns = dnsProvider == 'custom' &&
+        customDns != null &&
+        customDns.trim().isNotEmpty;
+
+    // [НОВОЕ] Fake IP (см. PrefKeys.fakeIpDns, как в Hiddify: Settings ->
+    // DNS -> Fake IP). Домены внутри туннеля резолвятся в адреса из
+    // служебных диапазонов 198.18.0.0/15 (IPv4) и fc00::/18 (IPv6) —
+    // реальный домен подставляется обратно за счёт того же sniffing,
+    // который уже используется для блокировки рекламы (route.rules
+    // 'action': 'sniff' ниже). Формат — официальный dns.fakeip блок
+    // sing-box, ничего специфичного не выдумано.
+    final dnsServers = <Map<String, dynamic>>[
+      {
+        // Для произвольного сервера оставляем прежний DoH-режим: у него нет
+        // известного имени сертификата/SNI, необходимого для безопасного DoT.
+        'type': hasCustomDns ? 'https' : 'tls',
+        'tag': 'remote-dns',
+        'server': hasCustomDns ? customDns!.trim() : selectedDns['server'],
+        if (!hasCustomDns) 'server_port': 853,
+        if (!hasCustomDns)
+          'tls': {
+            'enabled': true,
+            'server_name': selectedDns['server_name'],
+          },
+        // DNS перехватывается правилом hijack-dns ниже, поэтому должен
+        // направляться через VLESS при любом положении UI-тумблера.
+        'detour': 'proxy',
+      },
+      if (fakeIpDns)
+        {
+          'type': 'fakeip',
+          'tag': 'fakeip',
+          'inet4_range': '198.18.0.0/15',
+          'inet6_range': 'fc00::/18',
+        },
+    ];
+    final dnsRules = <Map<String, dynamic>>[
+      if (fakeIpDns)
+        {
+          'query_type': ['A', 'AAAA'],
+          'server': 'fakeip',
+        },
+    ];
+
+    final routeRules = <Map<String, dynamic>>[
+      // [ИСПРАВЛЕНО] geoip:'private' убран — база GeoIP объявлена deprecated
+      // в sing-box 1.8.0 и полностью удалена в 1.12.0 (см. официальный
+      // Migration guide: sing-box.sagernet.org/migration). Именно это
+      // вызывало ошибку "geoip database is deprecated ... removed in
+      // sing-box 1.12.0" и разрыв соединения на 5 из 5 серверов.
+      // Официальная замена — булево поле ip_is_private: не требует
+      // скачивания/хранения никакой базы данных, матчит приватные диапазоны
+      // (10.0.0.0/8, 192.168.0.0/16, 127.0.0.0/8 и т.д.) прямо в бинарнике
+      // sing-box.
+      // [НОВОЕ] Теперь под условием bypassLan (по умолчанию true, как в
+      // Hiddify) — выключив тумблер "Обход локальной сети" на экране
+      // "Безопасность", пользователь заворачивает LAN-трафик в туннель тоже
+      // (например, чтобы достучаться до ресурсов в сети самого VPN-сервера).
+      if (bypassLan) {'ip_is_private': true, 'outbound': 'direct'},
+      // [ИСПРАВЛЕНО] 'sniff' переставлен ПЕРЕД доменной блокировкой
+      // рекламы. В TUN-режиме на вход попадают голые IP-пакеты без домена
+      // — единственный источник поля "domain" для правила ниже это как
+      // раз сниффинг SNI из TLS ClientHello, который выполняет действие
+      // 'sniff'. Если правило по domain_suffix стоит РАНЬШЕ сниффинга, у
+      // соединения на тот момент ещё нет домена вообще, и правило просто
+      // никогда не совпадает — блокировка рекламы молча не работает. На
+      // сам факт наличия интернета это не влияло (реклама просто не
+      // блокировалась), но раз чиним маршрутизацию — заодно чиним и это;
+      // при выключенном blockAds порядок ничего не меняет.
+      {'action': 'sniff'},
+      if (blockAds) {'domain_suffix': _adBlockDomains, 'action': 'reject'},
+      {'protocol': 'dns', 'action': 'hijack-dns'},
+      // В sing-box 1.14 `tls_fragment` — булева опция route-action.
+      // Объект `{enabled: true}` не соответствует Go-схеме ядра и
+      // отклоняется ещё на `checkConfig()` с INVALID_CONFIG.
+      if (dpiBypass)
+        {
+          'network': 'tcp',
+          'action': 'route',
+          'outbound': 'proxy',
+          'tls_fragment': true,
+        },
+    ];
+
+    final outbounds = <Map<String, dynamic>>[
+      outbound,
+      {'type': 'direct', 'tag': 'direct'},
+    ];
+
+    final inbounds = <Map<String, dynamic>>[];
+    if (proxyOnly) {
+      inbounds.add({
+        'type': 'mixed',
+        'tag': 'mixed-in',
+        'listen': '127.0.0.1',
+        'listen_port': _proxyPort,
+      });
+    } else {
+      inbounds.add({
+        'type': 'tun',
+        'tag': 'tun-in',
+        'interface_name': 'vpnonline-tun',
+        'mtu': 1500,
+        // strict_route обязателен на Android именно потому, что без него
+        // не работает 'hijack-dns' ниже (см. официальную документацию
+        // sing-box: strict_route "prevents IP address leaks and makes DNS
+        // hijacking work on Android") — трогать не стал.
+        'strict_route': true,
+        // [ИСПРАВЛЕНО — вторая по важности причина "туннель поднялся, а
+        // трафик не идёт"] Стек 'system' у sing-box на Android заметно
+        // капризнее к конкретному устройству/прошивке/ядру, чем 'mixed':
+        // на части устройств (в первую очередь — с двумя SIM/несколькими
+        // одновременно активными сетевыми интерфейсами, как на скриншоте
+        // пользователя) системный стек не может корректно поднять
+        // маршруты, при этом ошибку наружу не бросает — просто трафик
+        // молча не идёт, а Android всё равно показывает интерфейс как
+        // рабочий. 'mixed' (TCP через системный стек + UDP через gVisor)
+        // — рекомендуемый sing-box'ом баланс совместимости и
+        // производительности для Android — стандартная практика для sing-box на Android.
+        'stack': 'mixed',
+        'auto_route': true,
+        'endpoint_independent_nat': true,
+        // `hijack-dns` на Android требует явный IPv4-адрес TUN. Без него
+        // sing-box завершает запуск с ошибкой "need one more IPv4 address
+        // for DNS hijacking". IPv6 при необходимости добавляется вторым
+        // адресом, не заменяя обязательный IPv4.
+        'address': [
+          '172.19.0.1/28',
+          if (ipv6Enabled) 'fdfe:dcba:9876::1/126',
+        ],
+        // [НОВОЕ] Режим split-tunnel — см. PrefKeys.splitTunnelMode и
+        // докстринг параметра splitTunnelMode выше. sing-box не позволяет
+        // задать include_package и exclude_package одновременно, поэтому
+        // всегда ровно одно из двух полей, в зависимости от режима.
+        if (selectedPackages.isNotEmpty && splitTunnelMode == 'include')
+          'include_package': selectedPackages,
+        if (selectedPackages.isNotEmpty && splitTunnelMode != 'include')
+          'exclude_package': selectedPackages,
+      });
+    }
+
+    final config = <String, dynamic>{
+      'log': {'level': 'warn'},
+      // [ИСПРАВЛЕНО] Добавлена явная 'strategy': 'ipv4_only'. Без неё
+      // sing-box может резолвить и адрес самого VLESS-сервера (если он
+      // задан доменом, а не IP), и обычные сайты, в IPv6, если провайдер
+      // формально его "поддерживает", но реально режет/не маршрутизирует
+      // AAAA-адреса (частая ситуация именно у мобильных операторов и на
+      // двух-SIM телефонах, как на скриншоте). Результат — TCP SYN на
+      // IPv6-адрес уходит в никуда без ошибки, соединение просто висит:
+      // те же самые "подключено, 0 МБ туда/обратно", что и на скриншоте,
+      // но уже не из-за самого туннеля, а из-за резолва. ipv4_only убирает
+      // этот сценарий целиком; IPv4 достаточно для полноценной работы
+      // VLESS+Reality.
+      // [НОВОЕ] Когда пользователь осознанно включил IPv6 (ipv6Enabled) —
+      // используем 'prefer_ipv4' вместо жёсткого 'ipv4_only': резолвер
+      // по-прежнему предпочитает IPv4-адрес при прочих равных (не
+      // возвращается тот же самый баг с висящими SYN на части сетей), но
+      // при отсутствии A-записи честно отдаёт AAAA, а не молча отбрасывает
+      // домен целиком, как было бы со strategy: 'ipv4_only'.
+      'dns': {
+        'servers': dnsServers,
+        if (dnsRules.isNotEmpty) 'rules': dnsRules,
+        // 'final' — это фолбэк, когда ни одно правило (dnsRules) не
+        // сработало. fakeIpDns подключается через отдельное правило выше
+        // (query_type A/AAAA -> server fakeip), поэтому final всегда
+        // остаётся настоящим резолвером, а не fakeip — иначе, например,
+        // запросы других типов (TXT, MX и т.д.) тоже ушли бы в fakeip и
+        // просто не получили бы ответа.
+        'final': 'remote-dns',
+        'strategy': ipv6Enabled ? 'prefer_ipv4' : 'ipv4_only',
+        'independent_cache': true,
+      },
+      'inbounds': inbounds,
+      'outbounds': outbounds,
+      'route': {
+        'auto_detect_interface': true,
+        'final': 'proxy',
+        'rules': routeRules,
+      },
+    };
+
+    return jsonEncode(config);
+  }
+
+  static const _adBlockDomains = [
+    'doubleclick.net',
+    'googlesyndication.com',
+    'googleadservices.com',
+    'google-analytics.com',
+    'admob.com',
+    'connect.facebook.net',
+    'ads.mail.ru',
+    'an.yandex.ru',
+    'mc.yandex.ru',
+    'top-fwz1.mail.ru',
+    'amplitude.com',
+    'appsflyer.com',
+    'adjust.com',
+  ];
+
+  Future<List<_ParsedVless>> _loadProfiles(String connectionString,
+      {bool forceRefresh = false}) async {
+    final source = connectionString.trim();
+    if (source.isEmpty) {
+      throw TunnelException(
+          'Не разместили ссылку на конфигурацию VLESS Reality.');
+    }
+
+    if (!forceRefresh &&
+        _cachedProfiles != null &&
+        _cachedSource == source &&
+        _cachedAt != null &&
+        DateTime.now().difference(_cachedAt!) < _cacheTtl) {
+      return _cachedProfiles!;
+    }
+
+    String body;
+    if (source.startsWith('vless://')) {
+      body = source;
+    } else {
+      try {
+        // [НОВОЕ] Заголовки как у обычного подписочного клиента (тот же
+        // принцип, что у большинства подписочных клиентов) — некоторые панели подписок
+        // (3x-ui, Marzban и т.п.) отдают РАЗНОЕ содержимое в зависимости от
+        // User-Agent запроса (например пустой ответ или HTML-страницу
+        // логина для нераспознанных клиентов вместо самой подписки). Без
+        // этого заголовка `http.get()` уходил с дефолтным Dart-агентом
+        // ("Dart/3.x (dart:io)"), который часть панелей не распознаёт как
+        // подписочный клиент вообще.
+        final res = await http.get(
+          Uri.parse(source),
+          headers: const {
+            'User-Agent': 'VPNonLine/1.0 (sing-box-client; compatible)',
+            'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
+          },
+        ).timeout(Duration(seconds: 12));
+        if (res.statusCode >= 400) {
+          throw TunnelException(
+              'Подписка недоступна (${res.statusCode}). Попробуйте позднее.');
+        }
+        body = res.body;
+      } on TunnelException {
+        rethrow;
+      } catch (e) {
+        throw TunnelException(
+            'Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
+      }
+    }
+
+    final profiles = _parseSubscriptionBody(body);
+    if (profiles.isEmpty) {
+      throw TunnelException(
+          'Конфигурация не содержит рабочих серверов VLESS+Reality.');
+    }
+
+    _cachedSource = source;
+    _cachedProfiles = profiles;
+    _cachedAt = DateTime.now();
+    return profiles;
+  }
+
+  List<_ParsedVless> _parseSubscriptionBody(String body) {
+    String text = body.trim();
+
+    // [НОВОЕ — принимать больше форматов подписки] Некоторые панели/подписки
+    // отдают не base64-список vless://-ссылок, а готовый JSON-конфиг
+    // sing-box (полный объект с полем "outbounds", либо просто массив
+    // outbound'ов). Некоторые другие клиенты такой формат подписки понимают нативно — эта
+    // ветка добавляет то же самое: пробуем распарсить как sing-box JSON
+    // ДО попытки трактовать текст как список ссылок, чтобы для JSON-тела
+    // не проваливаться сразу в пустой список профилей.
+    if (text.startsWith('{') || text.startsWith('[')) {
+      final fromJson = _parseSingboxJsonOutbounds(text);
+      if (fromJson.isNotEmpty) return fromJson;
+    }
+
+    if (!text.contains('vless://')) {
+      try {
+        final normalized = text.replaceAll('-', '+').replaceAll('_', '/');
+        final padded = normalized.padRight(
+            normalized.length + (4 - normalized.length % 4) % 4, '=');
+        final decoded = utf8.decode(base64.decode(padded));
+        if (decoded.contains('vless://')) text = decoded;
+      } catch (_) {}
+    }
+
+    final lines = text
+        .split(RegExp(r'[\r\n]+'))
+        .map((line) => line.trim())
+        .where((line) => line.startsWith('vless://'))
+        .toList();
+
+    final result = <_ParsedVless>[];
+    for (final line in lines) {
+      final parsed = _ParsedVless.tryParse(line);
+      if (parsed != null) result.add(parsed);
+    }
+    return result;
+  }
+
+  /// [НОВОЕ] Достаёт vless-профили напрямую из JSON-конфига sing-box —
+  /// либо из `{"outbounds":[...]}`, либо из голого массива outbound'ов.
+  /// Молча пропускает outbound'ы других типов (direct/block/urltest и
+  /// т.д.) и любые vless-записи с полями, которых не хватает для рабочего
+  /// подключения (см. те же проверки, что и в `_ParsedVless.tryParse`).
+  /// Ошибки парсинга самого JSON не бросает наружу — просто возвращает
+  /// пустой список, и вызывающий код (`_parseSubscriptionBody`) в этом
+  /// случае идёт дальше по обычному пути (vless://-ссылки/base64).
+  List<_ParsedVless> _parseSingboxJsonOutbounds(String text) {
+    try {
+      final decoded = jsonDecode(text);
+      final List<dynamic> outbounds;
+      if (decoded is Map<String, dynamic> && decoded['outbounds'] is List) {
+        outbounds = decoded['outbounds'] as List;
+      } else if (decoded is List) {
+        outbounds = decoded;
+      } else {
+        return const [];
+      }
+
+      final result = <_ParsedVless>[];
+      for (final item in outbounds) {
+        if (item is! Map<String, dynamic>) continue;
+        if ((item['type'] as String?)?.toLowerCase() != 'vless') continue;
+
+        final uuid = item['uuid'] as String?;
+        final host = item['server'] as String?;
+        final port = (item['server_port'] as num?)?.toInt();
+        if (uuid == null ||
+            uuid.isEmpty ||
+            host == null ||
+            host.isEmpty ||
+            port == null ||
+            port == 0) {
+          continue;
+        }
+
+        final tls = item['tls'] as Map<String, dynamic>?;
+        final tlsEnabled = tls?['enabled'] == true;
+        final reality = tls?['reality'] as Map<String, dynamic>?;
+        final realityEnabled = reality?['enabled'] == true;
+        final utls = tls?['utls'] as Map<String, dynamic>?;
+
+        final transport = item['transport'] as Map<String, dynamic>?;
+        String? transportHost;
+        String? transportPath;
+        if (transport != null) {
+          final headers = transport['headers'] as Map<String, dynamic>?;
+          final headerHost = headers?['Host'] ?? headers?['host'];
+          final transportHostList = transport['host'];
+          transportHost = headerHost as String? ??
+              (transportHostList is List && transportHostList.isNotEmpty
+                  ? transportHostList.first as String?
+                  : null);
+          transportPath = transport['path'] as String? ??
+              transport['service_name'] as String?;
+        }
+
+        // security=reality без public_key нативное ядро не примет — та же
+        // защита, что и в _ParsedVless.tryParse ниже для vless://-ссылок.
+        final security =
+            realityEnabled ? 'reality' : (tlsEnabled ? 'tls' : 'none');
+        final pbk = reality?['public_key'] as String?;
+        if (security == 'reality' && (pbk == null || pbk.isEmpty)) continue;
+
+        final alpnList = tls?['alpn'];
+
+        result.add(_ParsedVless(
+          uuid: uuid,
+          host: host,
+          port: port,
+          security: security,
+          pbk: pbk,
+          fp: utls?['fingerprint'] as String?,
+          sni: tls?['server_name'] as String?,
+          sid: reality?['short_id'] as String?,
+          flow: item['flow'] as String?,
+          alpn: (alpnList is List && alpnList.isNotEmpty)
+              ? alpnList.join(',')
+              : null,
+          transportType: (transport?['type'] as String?) ?? 'tcp',
+          transportHost: transportHost,
+          transportPath: transportPath,
+          remark: (item['tag'] as String?) ?? host,
+        ));
+      }
+      return result;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<bool> _waitForConnected(Duration timeout) async {
+    if (status.value?.state == TunnelConnState.connected) return true;
+    final completer = Completer<bool>();
+    VoidCallback? listener;
+
+    final timer = Timer(timeout, () {
+      if (!completer.isCompleted) completer.complete(false);
+    });
+
+    listener = () {
+      if (status.value?.state == TunnelConnState.connected) {
+        completer.complete(true);
+      } else if (status.value?.state == TunnelConnState.disconnected) {
+        completer.complete(false);
+      }
+    };
+
+    status.addListener(listener);
+    try {
+      return await completer.future;
+    } finally {
+      timer.cancel();
+      status.removeListener(listener);
+    }
+  }
+
+  /// [НОВОЕ] Реальная проверка того, что пакеты действительно доходят до
+  /// интернета через только что поднятый туннель — см. подробное
+  /// объяснение в вызывающем коде (connect()). Возвращает true, только
+  /// если удалённый сервер реально ответил на запрос за отведённое время.
+  Future<bool> _verifyInternetReachable({required bool proxyOnly}) async {
+    // generate_204 — лёгкий, ничего не весящий эндпоинт для проверки
+    // связности (тот же принцип, что использует сам Android для проверки
+    // captive portal): любой полученный ответ, а не таймаут/исключение,
+    // означает, что соединение реально прошло туда и обратно.
+    final probeUri = Uri.parse('https://cp.cloudflare.com/generate_204');
+
+    if (proxyOnly) {
+      // В proxy-режиме запрос явно направлен через локальный SOCKS/HTTP-порт
+      // (127.0.0.1:$_proxyPort) — это соединение процесса приложения с самим
+      // собой (loopback), оно не подчиняется системной маршрутизации VPN и
+      // потому реально проходит именно через только что поднятый туннель.
+      // Проверка тут валидна как есть — трогать не стал.
+      final client = IOClient(
+          HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
+      try {
+        final response =
+            await client.head(probeUri).timeout(const Duration(seconds: 8));
+        return response.statusCode > 0;
+      } catch (_) {
+        return false;
+      } finally {
+        client.close();
+      }
+    }
+
+    // [ИСПРАВЛЕНО — вероятная главная причина "туннель поднялся, но
+    // интернет не идёт" / "не удалось подключиться ни к одному серверу"
+    // сразу на ВСЕХ серверах подряд в VPN-режиме] Раньше здесь, как и в
+    // proxy-режиме, слался обычный http.Client().head(probeUri) — то есть
+    // запрос из ТОГО ЖЕ процесса приложения. Но системный VpnService на
+    // Android ОБЯЗАН исключать трафик самого VPN-приложения из своего же
+    // TUN-интерфейса (иначе пакет, отправленный приложением в TUN, тут же
+    // попал бы в тот же TUN и зациклился бы навсегда — это не особенность
+    // конкретного пакета, а стандартное поведение платформы, иначе это же
+    // приложение физически не могло бы открыть сокет до самого
+    // VLESS-сервера). Из этого прямо следует: HTTP-запрос из процесса
+    // приложения идёт МИМО туннеля, обычным прямым путём телефона, а не
+    // через него — то есть эта проверка НИКОГДА не тестировала реальный
+    // туннель. В лучшем случае она просто дублировала обычный доступ в
+    // интернет (если он и так есть — маскируя проблему), в худшем — ложно
+    // проваливалась на КАЖДОМ сервере подряд, если именно прямой путь
+    // телефона к cp.cloudflare.com чем-то ограничен (сетью/провайдером,
+    // ровно тем, что и должен обходить сам VPN) — и тогда приложение видит
+    // "интернет не идёт" на полностью рабочем туннеле и одинаково
+    // безрезультатно перебирает все 5 серверов подписки подряд.
+    // Поэтому в VPN-режиме такой самопроверочный запрос из процесса
+    // приложения больше не шлём. Доверяем событию serviceStateStream о
+    // реально поднятом интерфейсе (это уже подтверждено в
+    // _waitForConnected выше) и дополнительно ждём короткое окно — этого
+    // достаточно, чтобы отсеять интерфейсы, которые поднимаются и тут же
+    // падают обратно (реальный признак нерабочего сервера), не полагаясь
+    // при этом на в принципе нерабочий self-probe.
+    await Future.delayed(const Duration(milliseconds: 1200));
+    return status.value?.state == TunnelConnState.connected;
+  }
+
+  Future<void> disconnect() async {
+    if (!_initialized) return;
+    _userInitiatedDisconnect = true;
+    _lastConnectionString = null;
+    _autoReconnectAttempt = 0;
+    killSwitchBlocking.value = false;
+    _restartDurationTicker(false);
+    // [НОВОЕ] Если сейчас активна служебная блокирующая сессия строгого Kill
+    // Switch — снимаем именно её. _disengageHardKillSwitch сама проверяет
+    // _hardKillSwitchEngaged и ничего не делает, если её нет, поэтому
+    // безопасно вызывать всегда перед обычным disconnect().
+    if (_hardKillSwitchEngaged) {
+      await _disengageHardKillSwitch();
+      connectedServerName.value = null;
+      _connectedHost = null;
+      _connectedPort = null;
+      localProxyAddress.value = null;
+      return;
+    }
+    try {
+      await _client.disconnect();
+    } catch (e) {
+      lastError.value = 'Отключение не удалось: $e';
+    } finally {
+      connectedServerName.value = null;
+      _connectedHost = null;
+      _connectedPort = null;
+      localProxyAddress.value = null;
+    }
+  }
+
+  Future<void> openSystemVpnSettingsHint() async {
+    await AppSettings.openAppSettings(type: AppSettingsType.vpn);
+  }
+
+  /// [НОВОЕ] Проверка ключа/подписки БЕЗ подключения — используется
+  /// кнопкой "Проверить ключ" на экране "Мои ключи". Реально скачивает и
+  /// разбирает подписку тем же кодом, что и `connect()` (см.
+  /// `_loadProfiles`/`_parseSubscriptionBody` выше — включая base64,
+  /// голые vless://-ссылки и JSON-конфиг sing-box), и честно возвращает,
+  /// сколько рабочих серверов реально нашлось и под какими именами — это
+  /// именно то, что нужно проверить, чтобы убедиться, что конкретная
+  /// ссылка формата `https://.../sub/<uuid>` (или любая другая) реально
+  /// расшифровывается и содержит пригодные для подключения профили, не
+  /// поднимая сам туннель.
+  Future<SubscriptionCheckResult> checkSubscription(
+      String connectionString) async {
+    try {
+      final profiles =
+          await _loadProfiles(connectionString, forceRefresh: true);
+      return SubscriptionCheckResult(
+        ok: true,
+        serverNames: profiles
+            .map((p) => p.remark.isNotEmpty ? p.remark : p.host)
+            .toList(),
+      );
+    } on TunnelException catch (e) {
+      return SubscriptionCheckResult(ok: false, error: e.message);
+    } catch (e) {
+      return SubscriptionCheckResult(
+          ok: false, error: 'Не удалось проверить ключ: $e');
+    }
+  }
+
+  /// TCP-задержка до VLESS-узла текущей сессии. Для неё не нужны ICMP/root;
+  /// проверяется тот же адрес и порт, куда подключено ядро sing-box.
+  Future<int?> connectedDelayMs() async {
+    final host = _connectedHost;
+    final port = _connectedPort;
+    if (!isConnected || host == null || port == null) return null;
+
+    final stopwatch = Stopwatch()..start();
+    Socket? socket;
+    try {
+      socket =
+          await Socket.connect(host, port, timeout: const Duration(seconds: 4));
+      stopwatch.stop();
+      return stopwatch.elapsedMilliseconds.clamp(1, 9999);
+    } catch (_) {
+      return null;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
+  Future<void> dispose() async {
+    _restartDurationTicker(false);
+    await _stateSub?.cancel();
+    await _statsSub?.cancel();
+    await _faultSub?.cancel();
+    _stateSub = null;
+    _statsSub = null;
+    _faultSub = null;
+  }
+}
+
+/// [НОВОЕ] Результат `TunnelService.checkSubscription()` — см. докстринг
+/// метода. `serverNames` заполнен только когда `ok == true`.
+class SubscriptionCheckResult {
+  SubscriptionCheckResult(
+      {required this.ok, this.serverNames = const [], this.error});
+  final bool ok;
+  final List<String> serverNames;
+  final String? error;
+  int get serverCount => serverNames.length;
+}
+
+enum TunnelConnState { disconnected, connecting, connected, disconnecting }
+
+class TunnelStatus {
+  const TunnelStatus({
+    required this.state,
+    required this.duration,
+    required this.download,
+    required this.upload,
+    this.downloadTotalBytes = 0,
+    this.uploadTotalBytes = 0,
+  });
+
+  final TunnelConnState state;
+  final int duration;
+  final num download;
+  final num upload;
+  final int downloadTotalBytes;
+  final int uploadTotalBytes;
+}
+
+class _ParsedVless {
+  _ParsedVless({
+    required this.uuid,
+    required this.host,
+    required this.port,
+    required this.security,
+    this.pbk,
+    this.fp,
+    this.sni,
+    this.sid,
+    this.flow,
+    this.spx,
+    this.alpn,
+    this.transportType,
+    this.transportHost,
+    this.transportPath,
+    required this.remark,
+  });
+
+  final String uuid;
+  final String host;
+  final int port;
+  final String security; // reality | tls | none
+  final String? pbk; // Публичный ключ для Reality
+  final String? fp; // TLS-отпечаток
+  final String? sni; // Server Name Indication
+  final String? sid; // Short ID для Reality
+  final String? flow; // Тип потока (xtls-rprx-vision и т.д.)
+  final String? spx; // SpiderX (путь для Reality)
+  final String? alpn; // ALPN, через запятую
+  final String?
+      transportType; // tcp | ws | grpc | http (headerType/type в ссылке)
+  final String? transportHost; // Host-заголовок для ws/http-маскировки
+  final String? transportPath; // path для ws / service_name-путь для grpc
+  final String remark; // Имя сервера
+
+  static _ParsedVless? tryParse(String line) {
+    try {
+      final uri = Uri.parse(line);
+      if (uri.scheme != 'vless') return null;
+
+      final uuid = uri.userInfo;
+      final host = uri.host;
+      final port = uri.port;
+      if (uuid.isEmpty || host.isEmpty || port == 0) return null;
+
+      final q = uri.queryParameters;
+      // [ИСПРАВЛЕНО] Uri.decodeComponent кидает FormatException, если во
+      // фрагменте (имя сервера после #) встречается одиночный "%", не
+      // являющийся началом валидной %XX-последовательности — такое
+      // бывает в подписках, где имя не было корректно percent-encoded.
+      // Раньше это исключение вылетало из try/catch этого же метода (он
+      // ловит все ошибки — см. ниже), так что сам парсинг не падал, но
+      // ради надёжности декодируем безопасно: если не получилось —
+      // используем фрагмент как есть, а не роняем весь профиль.
+      String remark = host;
+      if (uri.fragment.isNotEmpty) {
+        try {
+          remark = Uri.decodeComponent(uri.fragment);
+        } catch (_) {
+          remark = uri.fragment;
+        }
+      }
+
+      // Xray-совместимые клиенты экспортируют тип транспорта либо как "type", либо как "headerType".
+      final rawType = (q['type'] ?? q['headerType'] ?? 'tcp').toLowerCase();
+      // "http" в поле type у Xray-совместимых ссылок означает HTTP-маскировку поверх tcp,
+      // для sing-box это соответствует transport type "http".
+      final transportType = rawType.isEmpty ? 'tcp' : rawType;
+
+      // [ИСПРАВЛЕНО] Если security=reality, а поле pbk (публичный ключ)
+      // отсутствует или пустое — раньше это тихо уходило в нативный
+      // конфиг sing-box как null/пустая строка. Нативное ядро на Android
+      // такого не прощает: получив reality-блок без публичного ключа, оно
+      // падает НАТИВНО (Kotlin/JNI), а не кидает Dart-исключение — именно
+      // это выглядит как "приложение вылетает" без какой-либо ошибки в
+      // интерфейсе. Теперь такой профиль просто не парсится (return null)
+      // и tunnel_service переходит к следующему серверу в списке вместо
+      // падения всего приложения.
+      final security = (q['security'] ?? 'none').toLowerCase();
+      final pbkValue = q['pbk'];
+      if (security == 'reality' && (pbkValue == null || pbkValue.isEmpty))
+        return null;
+
+      return _ParsedVless(
+        uuid: uuid,
+        host: host,
+        port: port,
+        security: security,
+        pbk: pbkValue,
+        fp: q['fp'],
+        sni: q['sni'],
+        sid: q['sid'],
+        flow: q['flow'],
+        spx: q['spx'],
+        alpn: q['alpn'],
+        transportType: transportType,
+        transportHost: q['host'],
+        transportPath: q['path'] ?? q['serviceName'],
+        remark: remark,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+class TunnelException implements Exception {
+  TunnelException(this.message);
+  final String message;
+  @override
+  String toString() => message;
 }
