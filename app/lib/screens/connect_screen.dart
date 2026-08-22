@@ -448,6 +448,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
     return '$h:$m:$s';
   }
 
+  /// [ИСПРАВЛЕНО — реальный баг со скриншота "ПРИЁМ 0.0 MB / ОТДАЧА 0.0 MB"]
+  /// Принимает именно НАКОПЛЕННЫЙ трафик сессии в байтах (см. вызов ниже —
+  /// теперь `s?.downloadTotalBytes`/`s?.uploadTotalBytes`, а не
+  /// `s?.download`/`s?.upload`).
   String _formatBytes(num? bytes) {
     if (bytes == null || bytes <= 0) return '0 MB';
     final mb = bytes / (1024 * 1024);
@@ -564,9 +568,25 @@ class _ConnectScreenState extends State<ConnectScreen> {
           }),
           Row(
             children: [
-              StatMiniCard(label: 'Приём', value: _formatBytes(s?.download)),
+              // [ИСПРАВЛЕНО — реальный баг со скриншота] `s?.download` /
+              // `s?.upload` — это МГНОВЕННАЯ скорость (байт/сек с последнего
+              // тика от sing-box, поле заполняется из stats.downlinkBps /
+              // stats.uplinkBps в tunnel_service.dart::_applyTrafficStats).
+              // В момент, когда по туннелю в конкретную секунду ничего не
+              // передавалось (пользователь просто открыл экран и ничего не
+              // грузит) — эта мгновенная скорость честно равна 0, и карточки
+              // "Приём"/"Отдача" показывали "0.0 MB" ВСЮ сессию, даже спустя
+              // несколько минут подключения, будто трафика не было вообще.
+              // А подписаны эти карточки как накопленный трафик за сессию
+              // ("Приём"/"Отдача", не "Скорость") — для этого в
+              // TunnelStatus уже отдельно есть `downloadTotalBytes`/
+              // `uploadTotalBytes`, которые как раз накапливаются и не
+              // обнуляются между тиками (см. _applyTrafficStats/
+              // _pollNativeTraffic). Раньше в UI они нигде не
+              // использовались — теперь карточки читают именно их.
+              StatMiniCard(label: 'Приём', value: _formatBytes(s?.downloadTotalBytes)),
               const SizedBox(width: 10),
-              StatMiniCard(label: 'Отдача', value: _formatBytes(s?.upload)),
+              StatMiniCard(label: 'Отдача', value: _formatBytes(s?.uploadTotalBytes)),
               const SizedBox(width: 10),
               StatMiniCard(
                 label: 'Устройств',
