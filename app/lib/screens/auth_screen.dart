@@ -37,6 +37,23 @@ class _AuthScreenState extends State<AuthScreen> {
   String? _error;
   String? _info;
 
+  // [ИСПРАВЛЕНО — утечка памяти] В классе не было ни одного override
+  // dispose(), хотя создаётся 5 TextEditingController. Каждый
+  // TextEditingController держит ChangeNotifier/слушателей и внутренний
+  // TextEditingValue; без dispose() они не освобождаются при закрытии
+  // экрана (например, после успешного входа, когда AuthScreen убирается из
+  // дерева) и остаются в памяти до конца жизни процесса — классическая
+  // утечка на каждый повторный показ экрана входа (после логаута и т.д.).
+  @override
+  void dispose() {
+    _emailCtrl.dispose();
+    _usernameCtrl.dispose();
+    _passwordCtrl.dispose();
+    _codeCtrl.dispose();
+    _newPasswordCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _run(Future<void> Function() action, {String? successInfo, _Mode? nextMode}) async {
     setState(() {
       _loading = true;
