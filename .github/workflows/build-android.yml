@@ -35,6 +35,27 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      # [НОВОЕ — исправление сбоя CI "429 Too Many Requests" от Maven
+      # Central/Gradle Plugin Portal] Раньше зависимости Gradle (Kotlin
+      # Gradle Plugin, AGP и т.д.) скачивались с нуля на КАЖДОМ запуске
+      # workflow — ни разу не кэшировались. Тысячи раннеров GitHub Actions
+      # по всему миру одновременно дёргают те же самые зеркала за теми же
+      # версиями плагинов, и repo.maven.apache.org/plugins.gradle.org
+      # иногда отвечают 429 (rate limit) под этой нагрузкой. Кэш не
+      # устраняет 429 полностью (первый запуск после инвалидации кэша
+      # всё равно качает с нуля), но резко снижает частоту сетевых
+      # обращений на последующих запусках — кэш переживает между запусками
+      # workflow, пока не поменяется gradle-wrapper.properties/*.gradle.kts.
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('app/android/**/*.gradle*', 'app/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Setup Flutter (official)
         uses: flutter-actions/setup-flutter@v2
         with:
@@ -61,8 +82,22 @@ jobs:
       - name: Run tests
         run: flutter test --coverage || true
 
+      # [ИСПРАВЛЕНО — сбой "429 Too Many Requests" от Maven Central при
+      # резолве Kotlin Gradle Plugin] flutter build apk сам ретраит Gradle
+      # один раз при сетевой ошибке (это видно в логе — "Retrying Gradle
+      # Build: #1"), но если внешний репозиторий отвечает 429 два раза
+      # подряд с интервалом в доли секунды, одного повтора недостаточно.
+      # 429 — это ВРЕМЕННЫЙ отказ (rate limit), а не ошибка в проекте:
+      # обёртка nick-fields/retry делает до 3 попыток с паузой 30 секунд
+      # между ними, за которые лимит на стороне Maven Central/Gradle
+      # Plugin Portal успевает сброситься.
       - name: Build debug APK
-        run: flutter build apk --debug --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: cd app && flutter build apk --debug --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -82,7 +117,12 @@ jobs:
         run: mkdir -p android/keystore && echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/keystore/keystore.jks && printf 'storeFile=../keystore/keystore.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" "${{ secrets.ANDROID_KEY_ALIAS }}" "${{ secrets.ANDROID_KEY_PASSWORD }}" > android/key.properties
 
       - name: Build release APK (signed if keystore present)
-        run: if [ -f android/keystore/keystore.jks ]; then flutter build apk --release --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; else echo "Keystore not found, building unsigned release APK" && flutter build apk --release --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; fi
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: cd app && if [ -f android/keystore/keystore.jks ]; then flutter build apk --release --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; else echo "Keystore not found, building unsigned release APK" && flutter build apk --release --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; fi
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
