@@ -158,6 +158,37 @@ class RootShell extends StatefulWidget {
 
 class _RootShellState extends State<RootShell> {
   int _index = 0;
+  // [ИСПРАВЛЕНО — главная причина "пункты меню очень долго грузятся или
+  // вовсе не грузят" на мобильном интернете] IndexedStack ниже держит ВСЕ
+  // 5 вкладок смонтированными одновременно — это специально (см. докстринг
+  // про сохранение State при переключении вкладок), но раньше это же
+  // означало, что все 5 экранов (Главная/Ключи/Баланс/Серверы/Меню)
+  // строились и запускали initState() СРАЗУ при первом же открытии
+  // приложения, ещё до того как пользователь нажал хоть одну вкладку кроме
+  // "Главная". Каждый из них при этом сам лезет в сеть: ConnectScreen ->
+  // getKeys(), KeysScreen -> getKeys(), BalanceScreen -> getProfile()+
+  // getKeys(), ServersScreen -> getKeys()+getHosts() (и сразу следом ещё
+  // открывает TCP-сокеты для замера пинга к каждому серверу), MenuScreen ->
+  // getProfile()+getKeys(). То есть только getKeys() улетал в сеть ПЯТЬ раз
+  // одновременно при каждом холодном старте — на хорошем Wi-Fi разница не
+  // заметна, а на слабом мобильном интернете эти запросы реально
+  // конкурируют за один и тот же канал, и любая вкладка (в том числе
+  // "Меню", хотя сама по себе она ничего тяжёлого не делает) может висеть
+  // в спиннере просто потому, что её запрос застрял в очереди за
+  // остальными четырьмя. `_visited` решает это, не отменяя исходную идею
+  // IndexedStack: экран реально строится (и, соответственно, стартует
+  // свою сетевую загрузку) только один раз — при первом переходе на
+  // вкладку. Уже посещённые вкладки остаются в дереве и не пересоздаются
+  // при последующих переключениях — старое поведение "не перезагружать
+  // вкладку при возврате на неё" полностью сохранено.
+  final Set<int> _visited = {0};
+
+  void _onDestinationSelected(int i) {
+    setState(() {
+      _index = i;
+      _visited.add(i);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -193,12 +224,22 @@ class _RootShellState extends State<RootShell> {
       // нужный по индексу — State (и уже загруженные данные) сохраняется
       // между переключениями вкладок, повторной загрузки при возврате на
       // вкладку больше нет.
+      // [ИСПРАВЛЕНО] Не посещённые вкладки заменяются на дешёвый пустой
+      // виджет вместо реального экрана — см. докстринг `_visited` выше:
+      // это то, что реально убирает одновременный залп из 5 сетевых
+      // запросов при холодном старте.
       body: SafeArea(
-        child: IndexedStack(index: _index, children: screens),
+        child: IndexedStack(
+          index: _index,
+          children: [
+            for (var i = 0; i < screens.length; i++)
+              _visited.contains(i) ? screens[i] : const SizedBox.shrink(),
+          ],
+        ),
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
+        onDestinationSelected: _onDestinationSelected,
         destinations: const [
           NavigationDestination(icon: Icon(Icons.home_rounded), label: 'Главная'),
           NavigationDestination(icon: Icon(Icons.vpn_key_rounded), label: 'Ключи'),
