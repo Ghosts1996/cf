@@ -3,6 +3,7 @@ import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/app_log_service.dart';
 
 /// Безопасность (Kill Switch, DNS) — пункт меню из макета.
 ///
@@ -46,10 +47,20 @@ class _SecurityScreenState extends State<SecurityScreen> {
   bool _aggressiveReconnect = false;
   bool _loaded = false;
 
+  // [НОВОЕ] Срок хранения локальных логов приложения — см.
+  // services/app_log_service.dart и раздел "Хранение логов" ниже.
+  int _logRetentionDays = AppLogService.defaultRetentionDays;
+
   static const _muxProtocolLabels = {
     'h2mux': 'H2Mux',
     'smux': 'SMux',
     'yamux': 'YAMux',
+  };
+
+  static const _logRetentionLabels = {
+    1: '1 день',
+    7: '7 дней',
+    30: '30 дней',
   };
 
   @override
@@ -72,6 +83,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
       _prefs.getBool(PrefKeys.fakeIpDns, fallback: false),
     ]);
     final savedMuxProtocol = await _prefs.getString(PrefKeys.muxProtocol);
+    // [НОВОЕ] Отдельным запросом, как и savedMuxProtocol выше — не трогает
+    // типы/индексы в results, чтобы ничего не сломать в существующей
+    // Future.wait-цепочке.
+    final savedLogRetentionDays = await AppLogService.instance.getRetentionDays();
     if (!mounted) return;
     setState(() {
       _killSwitch = results[0] as bool;
@@ -85,8 +100,53 @@ class _SecurityScreenState extends State<SecurityScreen> {
       _muxProtocol = (savedMuxProtocol != null && _muxProtocolLabels.containsKey(savedMuxProtocol))
           ? savedMuxProtocol
           : 'h2mux';
+      _logRetentionDays = _logRetentionLabels.containsKey(savedLogRetentionDays)
+          ? savedLogRetentionDays
+          : AppLogService.defaultRetentionDays;
       _loaded = true;
     });
+  }
+
+  /// [НОВОЕ] Меняет срок хранения локальных логов — применяется сразу же к
+  /// уже накопленным записям (см. AppLogService.setRetentionDays), а не
+  /// только к новым.
+  Future<void> _setLogRetentionDays(int? days) async {
+    if (days == null) return;
+    setState(() => _logRetentionDays = days);
+    await AppLogService.instance.setRetentionDays(days);
+  }
+
+  /// [НОВОЕ] Кнопка "Удалить все логи" — с подтверждением, как и другие
+  /// необратимые действия в приложении (см. "Выйти из аккаунта" в
+  /// menu_screen.dart/settings_screen.dart, "Очистить кэш" в
+  /// settings_screen.dart).
+  Future<void> _deleteAllLogs() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.bgCard,
+        title: const Text('Удалить все логи?'),
+        content: const Text(
+          'Локальный журнал событий приложения (подключения, ошибки) будет удалён полностью. '
+          'Действие необратимо.',
+          style: TextStyle(color: AppColors.textDim, fontSize: 13),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Отмена')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Удалить', style: TextStyle(color: AppColors.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await AppLogService.instance.clearAll();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Логи удалены')),
+      );
+    }
   }
 
   /// [НОВОЕ] Реальная настройка, не декоративная — TunnelService.connect()
@@ -354,6 +414,59 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         trailing: NeonToggle(
                           value: _aggressiveReconnect,
                           onChanged: _setAggressiveReconnect,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+                // [НОВОЕ] Хранение логов — срок автоудаления (1/7/30 дней)
+                // и ручное удаление всех записей. См. AppLogService.
+                const SectionTitle('Хранение логов'),
+                NeonCard(
+                  child: Column(
+                    children: [
+                      _Row(
+                        icon: Icons.auto_delete_rounded,
+                        title: 'Срок хранения логов',
+                        subtitle:
+                            'Записи старше срока (${_logRetentionLabels[_logRetentionDays]}) удаляются автоматически',
+                        trailing: DropdownButton<int>(
+                          value: _logRetentionDays,
+                          underline: const SizedBox.shrink(),
+                          dropdownColor: AppColors.bgCard,
+                          style: const TextStyle(color: AppColors.textDim, fontSize: 12),
+                          items: _logRetentionLabels.entries
+                              .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
+                              .toList(),
+                          onChanged: _setLogRetentionDays,
+                        ),
+                      ),
+                      const Divider(height: 20),
+                      _Row(
+                        icon: Icons.summarize_rounded,
+                        title: 'Сохранено записей',
+                        subtitle: 'События подключения и ошибки за выбранный период',
+                        trailing: ValueListenableBuilder<int>(
+                          valueListenable: AppLogService.instance.entryCount,
+                          builder: (context, count, _) => Text(
+                            '$count',
+                            style: orbitron(fontSize: 14, color: AppColors.violetGlow),
+                          ),
+                        ),
+                      ),
+                      const Divider(height: 20),
+                      Center(
+                        child: OutlinedButton.icon(
+                          onPressed: _deleteAllLogs,
+                          icon: const Icon(Icons.delete_forever_rounded, size: 16, color: AppColors.danger),
+                          label: const Text('Удалить все логи',
+                              style: TextStyle(color: AppColors.danger, fontSize: 12)),
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: AppColors.danger),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+                          ),
                         ),
                       ),
                     ],
