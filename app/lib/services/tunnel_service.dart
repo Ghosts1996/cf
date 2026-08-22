@@ -477,8 +477,9 @@ class TunnelService {
   }
 
   /// [НОВОЕ] Реальные адреса серверов из подписки — host_name (совпадает с
-  /// remark в самой VLESS-ссылке, см. _matchProfile выше) -> (host, port),
-  /// на который реально пойдёт трафик при подключении к этой локации.
+  /// remark в самой VLESS-ссылке, см. _matchProfile выше) -> (host, port,
+  /// security, sni), на который реально пойдёт трафик при подключении к
+  /// этой локации.
   ///
   /// Нужен для настоящей автобалансировки на ServersScreen. Раньше "живой
   /// пинг" там мерился до `connect_host`, который бэкенд вычисляет из
@@ -488,14 +489,32 @@ class TunnelService {
   /// показывали одинаковый пинг и автовыбор не мог их отличить друг от
   /// друга. Здесь возвращается адрес, который реально зашит в саму
   /// VLESS-ссылку этой локации — тот же код, что использует connect().
-  Future<Map<String, ({String host, int port})>> listProfileEndpoints(
-      String connectionString) async {
+  ///
+  /// [ИСПРАВЛЕНО — реальный баг со скриншотов: сервер показывает "5 мс ·
+  /// отлично" в приложении, а тот же сервер в стороннем клиенте (Hiddify) —
+  /// полностью недоступен (×)] Причина: раньше отсюда отдавались только
+  /// host/port, и ServersScreen проверял ТОЛЬКО факт TCP-рукопожатия
+  /// (`Socket.connect`). Открытый TCP-порт — это НЕ то же самое, что
+  /// рабочий VLESS-сервис на нём: панель 3x-ui может быть выключена,
+  /// инбаунд удалён/неверно настроен, сертификат не тот — а TCP SYN/ACK на
+  /// уровне ОС/файрвола всё равно ответит быстро, поэтому TCP-пинг ошибочно
+  /// показывал "отлично" для полностью нерабочих локаций (то же самое, что
+  /// Hiddify честно помечает крестиком, потому что реально пытается поднять
+  /// VLESS-сессию, а не просто постучаться в порт). Теперь дополнительно
+  /// отдаём `security`/`sni` из VLESS-профиля — ServersScreen может поверх
+  /// TCP сделать ещё и настоящее TLS-рукопожатие с правильным SNI для
+  /// профилей с `security=tls` (для `security=reality` полноценно проверить
+  /// с клиента нельзя в принципе — см. подробное объяснение в
+  /// servers_screen.dart, это не баг клиента, а архитектурное ограничение
+  /// протокола Reality).
+  Future<Map<String, ({String host, int port, String security, String? sni})>>
+      listProfileEndpoints(String connectionString) async {
     try {
       final profiles = await _loadProfiles(connectionString);
-      final result = <String, ({String host, int port})>{};
+      final result = <String, ({String host, int port, String security, String? sni})>{};
       for (final p in profiles) {
         if (p.remark.isEmpty) continue;
-        result[p.remark] = (host: p.host, port: p.port);
+        result[p.remark] = (host: p.host, port: p.port, security: p.security, sni: p.sni);
       }
       return result;
     } catch (_) {
