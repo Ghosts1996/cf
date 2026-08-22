@@ -74,15 +74,21 @@ class _ServersScreenState extends State<ServersScreen> {
   // остаётся запасным вариантом, если ключа/сети нет.
   Map<String, ({String host, int port, String security, String? sni})> _realEndpoints = {};
 
-  // [НОВОЕ] Раз в 30 секунд, пока включена авто-балансировка, повторяем
-  // замер пинга и пересчитываем лучший сервер — даже если пользователь
-  // ушёл с этого экрана на другую вкладку (экран остаётся смонтированным
-  // внутри IndexedStack в main.dart, см. RootShell, поэтому таймер не
-  // прерывается переключением вкладок). Раньше замер происходил ровно один
-  // раз при открытии экрана — "автобалансировка" не реагировала вообще ни
-  // на что, что происходило после первой отрисовки.
-  Timer? _autoBalanceTimer;
-  static const _autoBalanceInterval = Duration(seconds: 30);
+  // [ИЗМЕНЕНО — устраняет жалобу "пинг в списке серверов быстро становится
+  // неверным что с включённой авто-балансировкой, что без неё"] Раньше
+  // этот таймер вообще не создавался, пока авто-балансировка выключена —
+  // список пингов измерялся РОВНО ОДИН РАЗ при открытии экрана и больше
+  // никогда не обновлялся сам, даже если пользователь просто держал экран
+  // открытым. Теперь обновление пинга идёт всегда, пока этот экран
+  // смонтирован (он остаётся смонтированным внутри IndexedStack в
+  // main.dart при переключении вкладок — см. RootShell, — поэтому таймер
+  // не прерывается уходом на другую вкладку). Сам тумблер
+  // "Авто-балансировка" по-прежнему решает ТОЛЬКО одно: нужно ли на основе
+  // этих (теперь всегда актуальных) данных реально переключать поднятый
+  // туннель — см. `_maybeApplyAutoBalance`, она сама проверяет
+  // `_autoBalance` первой же строкой и ничего не делает, если он выключен.
+  Timer? _pingRefreshTimer;
+  static const _pingRefreshInterval = Duration(seconds: 25);
   // Минимальное преимущество нового сервера над тем, на котором реально
   // поднят туннель, прежде чем реально рвать рабочее соединение ради
   // переключения — без порога автобалансировка дёргала бы туннель туда-
@@ -239,15 +245,96 @@ class _ServersScreenState extends State<ServersScreen> {
     _maybeApplyAutoBalance();
   }
 
+  /// [ИСПРАВЛЕНО — сам баг со скриншотов: "все локации 1–2 мс · отлично",
+  /// хотя Hiddify честно показывает Финляндию и Англию оффлайн]
+  ///
+  /// Раньше эта функция слепо мерила пинг до ЛЮБОГО адреса, который вернул
+  /// `_pingEndpoint` — включая запасной вариант (`connect_host`/
+  /// `subscription_url` из `/hosts`), который, как прямо предупреждает
+  /// докстринг `_realEndpoints` выше, часто оказывается ОДНИМ общим
+  /// адресом сразу на несколько (а то и на все) локации. TCP-пинг до
+  /// такого общего шлюза технически "успешен" и очень быстр (шлюз обычно
+  /// всегда поднят и близко), но не говорит АБСОЛЮТНО НИЧЕГО о состоянии
+  /// конкретной локации — приложение по факту мерило не мёртвый
+  /// Reality-узел, а случайно оказавшийся с ним рядом общий домен, и честно
+  /// (с точки зрения самого TCP-замера) отвечало "отлично".
+  ///
+  /// Теперь на каждом цикле:
+  /// 1. Если у какой-то локации ИЗ ТЕКУЩЕГО списка ещё нет её собственного
+  ///    реального VLESS-адреса (`_realEndpoints`) — параллельно, не
+  ///    блокируя этот цикл замера, пробуем догрузить его снова (см.
+  ///    `_loadActiveConnectionString`). Раньше это вызывалось РОВНО ОДИН
+  ///    РАЗ при открытии экрана в `_load()` — если в тот момент ключ ещё не
+  ///    успел прогрузиться или сеть на секунду моргнула, экран навсегда
+  ///    застревал на запасном варианте до перезапуска приложения. Теперь
+  ///    попытка повторяется сама, пока не получится — как только реальный
+  ///    адрес найдётся, следующий же цикл (через `_pingRefreshInterval`)
+  ///    сам подхватит точные данные без участия пользователя. Именно это
+  ///    объясняет и вторую половину жалобы: "на мгновение показывает
+  ///    реальный пинг, а потом снова 1 мс" — реальный адрес мог найтись
+  ///    один раз, а затем при следующей неудачной попытке загрузки
+  ///    молча стереться; см. также правку в `_loadActiveConnectionString`
+  ///    ниже — она больше не затирает уже найденные адреса.
+  /// 2. Если после этого у локации всё ещё нет реального адреса, и её
+  ///    запасной адрес совпадает с запасным адресом ХОТЯ БЫ ЕЩЁ ОДНОЙ
+  ///    локации — это и есть признак "общего шлюза, а не персонального
+  ///    сервера": для таких локаций честно показываем "нет данных для
+  ///    пинга" (тот же -2, что уже используется, когда connect_host вообще
+  ///    отсутствует), а не выдуманное число.
   void _measureAllPings(List<dynamic> hosts) {
+    if (!_realEndpointsComplete(hosts)) {
+      unawaited(_loadActiveConnectionString());
+    }
+
+    final endpoints = <String,
+        ({String? host, int? port, String? security, String? sni})>{};
+    final fallbackHostCounts = <String, int>{};
     for (final s in hosts) {
       final host = s as Map<String, dynamic>;
       final hostName = host['host_name'] as String? ?? '';
       if (hostName.isEmpty) continue;
       final endpoint = _pingEndpoint(hostName, host);
+      endpoints[hostName] = endpoint;
+      final usesRealEndpoint = _realEndpoints[hostName]?.host.isNotEmpty ?? false;
+      if (!usesRealEndpoint && endpoint.host != null && endpoint.host!.isNotEmpty) {
+        final key = '${endpoint.host}:${endpoint.port ?? 443}';
+        fallbackHostCounts[key] = (fallbackHostCounts[key] ?? 0) + 1;
+      }
+    }
+
+    for (final entry in endpoints.entries) {
+      final hostName = entry.key;
+      final endpoint = entry.value;
+      final usesRealEndpoint = _realEndpoints[hostName]?.host.isNotEmpty ?? false;
+      if (!usesRealEndpoint && endpoint.host != null && endpoint.host!.isNotEmpty) {
+        final key = '${endpoint.host}:${endpoint.port ?? 443}';
+        final sharedBy = fallbackHostCounts[key] ?? 0;
+        if (sharedBy > 1) {
+          debugPrint('[servers] $hostName делит запасной адрес $key ещё '
+              'с ${sharedBy - 1} локацией(ями) — это общий шлюз, а не её '
+              'персональный сервер, честный пинг для него посчитать '
+              'нельзя, показываю "нет данных"');
+          if (mounted) setState(() => _livePing[hostName] = -2);
+          continue;
+        }
+      }
       _measureLivePing(hostName, endpoint.host, endpoint.port,
           security: endpoint.security, sni: endpoint.sni);
     }
+  }
+
+  /// Есть ли у КАЖДОЙ локации из актуального списка её собственный реальный
+  /// VLESS-адрес в `_realEndpoints`? Используется, чтобы решить, стоит ли
+  /// на этом цикле замера ещё раз попробовать `_loadActiveConnectionString()`
+  /// — см. докстринг `_measureAllPings` выше.
+  bool _realEndpointsComplete(List<dynamic> hosts) {
+    for (final s in hosts) {
+      final hostName = (s as Map<String, dynamic>)['host_name'] as String? ?? '';
+      if (hostName.isEmpty) continue;
+      final real = _realEndpoints[hostName];
+      if (real == null || real.host.isEmpty) return false;
+    }
+    return true;
   }
 
   /// [НОВОЕ] Подтягивает connection_string активного ключа и реальные
@@ -288,7 +375,16 @@ class _ServersScreenState extends State<ServersScreen> {
       debugPrint('[servers] ручной ключ: найдено ${endpoints.length} '
           'локаций -> ${endpoints.entries.map((e) => '${e.key}=${e.value.host}:${e.value.port}').join(', ')}');
       if (mounted && endpoints.isNotEmpty) {
-        setState(() => _realEndpoints = endpoints);
+        // [ИСПРАВЛЕНО — часть бага "на мгновение реальный пинг, потом
+        // снова 1 мс"] Раньше это был `_realEndpoints = endpoints` —
+        // полная замена карты. Если эта функция позже (см. её вызов на
+        // каждом цикле в `_measureAllPings`) отработает ещё раз, но с
+        // меньшим/пустым результатом (временная сетевая ошибка,
+        // подписка на секунду не отдалась) — уже найденные реальные
+        // адреса стирались, и экран откатывался обратно на запасной
+        // (общий) адрес, хотя реальный уже был известен. Теперь новые
+        // данные ДОБАВЛЯЮТСЯ к уже имеющимся, а не заменяют их целиком.
+        setState(() => _realEndpoints = {..._realEndpoints, ...endpoints});
         return;
       }
       // Ручной ключ задан, но подписка не распарсилась — не переходим на
@@ -319,7 +415,11 @@ class _ServersScreenState extends State<ServersScreen> {
         if (endpoints.isEmpty) continue;
         debugPrint('[servers] ключ ${key['key_id']}: найдено '
             '${endpoints.length} локаций -> ${endpoints.entries.map((e) => '${e.key}=${e.value.host}:${e.value.port}').join(', ')}');
-        if (mounted) setState(() => _realEndpoints = endpoints);
+        // См. комментарий у аналогичной правки в ветке ручного ключа
+        // выше — мержим, а не затираем целиком.
+        if (mounted) {
+          setState(() => _realEndpoints = {..._realEndpoints, ...endpoints});
+        }
         return;
       }
       debugPrint('[servers] ни у одного активного ключа не нашлось '
@@ -419,7 +519,7 @@ class _ServersScreenState extends State<ServersScreen> {
       // Не удалось переключиться (например, целевой сервер как раз лёг) —
       // это не критично, TunnelService сам к этому моменту уже попытался
       // восстановить соединение по своей обычной логике (см. connect()).
-      // Следующий цикл замера (через _autoBalanceInterval) попробует снова.
+      // Следующий цикл замера (через _pingRefreshInterval) попробует снова.
     }).whenComplete(() {
       _switching = false;
     });
@@ -430,11 +530,19 @@ class _ServersScreenState extends State<ServersScreen> {
     super.initState();
     _loadPrefs();
     _load();
+    // [ИЗМЕНЕНО] Раньше запускался условно, только если авто-балансировка
+    // была включена (см. удалённый `_syncAutoBalanceTimer`) — теперь
+    // работает всегда, пока экран открыт, см. докстринг `_pingRefreshTimer`
+    // выше.
+    _pingRefreshTimer = Timer.periodic(_pingRefreshInterval, (_) {
+      if (_hosts == null || _hosts!.isEmpty) return;
+      _measureAllPings(_hosts!);
+    });
   }
 
   @override
   void dispose() {
-    _autoBalanceTimer?.cancel();
+    _pingRefreshTimer?.cancel();
     super.dispose();
   }
 
@@ -456,24 +564,6 @@ class _ServersScreenState extends State<ServersScreen> {
       _autoBalance = results[1] as bool;
       _selectedId = results[2] as String?;
     });
-    // Тумблер мог остаться включённым с прошлого запуска приложения —
-    // возобновляем фоновый цикл замеров, а не только читаем его значение.
-    _syncAutoBalanceTimer();
-  }
-
-  /// [НОВОЕ] Включает/выключает фоновый периодический замер пинга в
-  /// зависимости от текущего состояния тумблера "Авто-балансировка".
-  /// Идемпотентно — можно звать сколько угодно раз подряд.
-  void _syncAutoBalanceTimer() {
-    if (_autoBalance) {
-      _autoBalanceTimer ??= Timer.periodic(_autoBalanceInterval, (_) {
-        if (_hosts == null || _hosts!.isEmpty) return;
-        _measureAllPings(_hosts!);
-      });
-    } else {
-      _autoBalanceTimer?.cancel();
-      _autoBalanceTimer = null;
-    }
   }
 
   Future<void> _load() async {
@@ -692,7 +782,7 @@ class _ServersScreenState extends State<ServersScreen> {
                           _autoBalance
                               ? (_lastSwitchTarget != null
                                   ? 'реально переключились на $_lastSwitchTarget'
-                                  : 'следим за пингом каждые 30 с и переключаем туннель сами')
+                                  : 'следим за пингом каждые 25 с и переключаем туннель сами')
                               : 'выбор лучшего сервера',
                           style: const TextStyle(
                               fontSize: 10, color: AppColors.textDim),
@@ -705,7 +795,11 @@ class _ServersScreenState extends State<ServersScreen> {
                     onChanged: (v) {
                       setState(() => _autoBalance = v);
                       _prefs.setBool(PrefKeys.autoBalance, v);
-                      _syncAutoBalanceTimer();
+                      // [ИЗМЕНЕНО] Таймер замера теперь работает всегда
+                      // (см. `_pingRefreshTimer`) — трогать его здесь
+                      // больше не нужно, тумблер только меняет, включит
+                      // ли `_maybeApplyAutoBalance` реальное переключение
+                      // туннеля по уже идущим замерам.
                       if (v && _hosts != null && _hosts!.isNotEmpty) {
                         _measureAllPings(_hosts!);
                       }
