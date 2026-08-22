@@ -30,6 +30,22 @@ import 'servers_screen.dart';
 /// авторизованного запроса `getHosts()` (это всё равно нужные данные,
 /// отдельного /ping эндпоинта на сервере нет и придумывать его не стал).
 ///
+/// [ИСПРАВЛЕНО — реальный баг со скриншота "нет данных о задержке"]
+/// `TunnelService.connectedDelayMs()` в этой версии `tunnel_service.dart`
+/// давно умеет реальный замер (TCP-connect до узла, на который поднят
+/// туннель — см. докстринг метода), и `_measureLatency()` ниже честно его
+/// вызывает и сохраняет результат в `_latencyMs`. Но геттер `_latencyLabel`
+/// при подключённом туннеле игнорировал `_latencyMs` целиком и всегда
+/// показывал захардкоженный текст "нет данных о задержке (ядро sing-box)" —
+/// то есть измерение реально происходило и обновляло состояние, а на экран
+/// результат никогда не попадал. Теперь `_latencyLabel` использует
+/// измеренное значение и при подключённом туннеле тоже, а "нет данных"
+/// показывается только тогда, когда TCP-подключение к узлу реально не
+/// удалось (сервер не отвечает). Плюс раньше замер срабатывал только один
+/// раз сразу после подключения/по кнопке "Тест скорости" — добавлен
+/// `_latencyTimer`, который тихо обновляет цифру каждые 15 секунд, пока
+/// туннель поднят (тот же паттерн, что и `_keyWatchTimer` ниже).
+///
 /// ВАЖНО: платформенная часть (App Group + Network Extension на iOS/macOS
 /// через Xcode, xray.exe на Windows) не может быть настроена только правкой
 /// .dart-файлов — см. app/NATIVE_SETUP.md.
@@ -47,6 +63,14 @@ class _ConnectScreenState extends State<ConnectScreen> {
   Map<String, dynamic>? _activeKey;
   String? _keyError;
   int? _latencyMs;
+  // [НОВОЕ] Отдельный флаг "замер сейчас идёт" — без него, пока свежий
+  // замер летит по сети, на экране на секунду-другую повисал бы предыдущий
+  // (уже устаревший) результат, подписанный так, будто он свежий.
+  bool _latencyChecking = false;
+  // [НОВОЕ] Пока туннель поднят — тихо обновляем задержку раз в 15 секунд,
+  // а не только один раз сразу после подключения (см. докстринг класса
+  // выше про баг "нет данных о задержке").
+  Timer? _latencyTimer;
   // [НОВОЕ] key_id ключа, на котором ПОДНЯТ туннель прямо сейчас (не
   // просто "лучший ключ на момент последней загрузки экрана" — эти два
   // значения могут разойтись, если срок истёк уже ПОСЛЕ подключения, пока
@@ -95,6 +119,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
     // есть) или отключаем туннель и показываем предложение купить ключ
     // (если активных ключей больше нет).
     _keyWatchTimer = Timer.periodic(const Duration(minutes: 1), (_) => _recheckKeyExpiry());
+    // [НОВОЕ] См. докстринг класса — раньше задержка на подключённом
+    // туннеле замерялась один раз и больше никогда не обновлялась сама.
+    // Тикаем чаще, чем ключ, но не слишком часто — это TCP-connect до
+    // реального VLESS-узла, незачем дёргать его каждую секунду.
+    _latencyTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (_tunnel.isConnected && !_latencyChecking) _measureLatency();
+    });
   }
 
   @override
@@ -106,6 +137,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _tunnel.killSwitchBlocking.removeListener(_onTunnelStatus);
     ManualKeyStore.instance.notifier.removeListener(_onManualKeyChanged);
     _keyWatchTimer?.cancel();
+    _latencyTimer?.cancel();
     super.dispose();
   }
 
@@ -317,19 +349,24 @@ class _ConnectScreenState extends State<ConnectScreen> {
     // для пользователя). Иначе — грубая оценка "жив ли backend" секундомером
     // вокруг обычного авторизованного запроса (отдельного /ping эндпоинта
     // на реальном сервере нет).
-    if (_tunnel.isConnected) {
-      final ms = await _tunnel.connectedDelayMs();
-      if (mounted) setState(() => _latencyMs = ms);
-      return;
-    }
-    final sw = Stopwatch()..start();
+    if (mounted) setState(() => _latencyChecking = true);
     try {
-      await _api.getHosts();
-      sw.stop();
-      if (mounted) setState(() => _latencyMs = sw.elapsedMilliseconds);
-    } catch (_) {
-      sw.stop();
-      if (mounted) setState(() => _latencyMs = null);
+      if (_tunnel.isConnected) {
+        final ms = await _tunnel.connectedDelayMs();
+        if (mounted) setState(() => _latencyMs = ms);
+        return;
+      }
+      final sw = Stopwatch()..start();
+      try {
+        await _api.getHosts();
+        sw.stop();
+        if (mounted) setState(() => _latencyMs = sw.elapsedMilliseconds);
+      } catch (_) {
+        sw.stop();
+        if (mounted) setState(() => _latencyMs = null);
+      }
+    } finally {
+      if (mounted) setState(() => _latencyChecking = false);
     }
   }
 
@@ -419,14 +456,23 @@ class _ConnectScreenState extends State<ConnectScreen> {
   }
 
   String get _latencyLabel {
-    // [ИСПРАВЛЕНО] connectedDelayMs() в sing-box-версии TunnelService
-    // ВСЕГДА возвращает null (пакет не даёт способа померить пинг именно
-    // ПОДКЛЮЧЁННОГО сервера — см. докстринг tunnel_service.dart). Раньше
-    // при null и статусе "подключено" здесь вечно висело "проверка
-    // соединения…", будто измерение вот-вот завершится — оно никогда не
-    // завершится, это и стоит показать прямо, а не изображать загрузку.
-    if (_tunnel.isConnected) return 'нет данных о задержке (ядро sing-box)';
-    if (_latencyMs == null) return 'проверка соединения…';
+    // [ИСПРАВЛЕНО — баг со скриншота] Раньше при подключённом туннеле тут
+    // БЕЗУСЛОВНО возвращался захардкоженный текст "нет данных о задержке",
+    // даже если `_measureLatency()` только что успешно получил реальное
+    // значение в `_latencyMs` через TCP-connect до VLESS-узла
+    // (`TunnelService.connectedDelayMs()`, см. tunnel_service.dart —
+    // метод рабочий, просто его результат никогда не долетал до UI).
+    // Теперь показываем то, что реально измерено, независимо от того,
+    // подключены мы или нет — разница только в тексте на случай неудачи.
+    if (_latencyChecking && _latencyMs == null) return 'проверка соединения…';
+    if (_latencyMs == null) {
+      // Замер завершился, но значения нет — либо TCP-подключение к узлу
+      // не удалось (сервер не отвечает), либо это самый первый рендер до
+      // первого запуска _measureLatency() из initState().
+      return _tunnel.isConnected
+          ? 'сервер не отвечает на проверку задержки'
+          : 'проверка соединения…';
+    }
     if (_latencyMs! < 80) return '$_latencyMs мс · отличный сигнал';
     if (_latencyMs! < 200) return '$_latencyMs мс · стабильно';
     return '$_latencyMs мс · медленно';
@@ -509,7 +555,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
               code: _codeFromName(label),
               name: label,
               pingLabel: _latencyLabel,
-              pingColor: (_latencyMs != null && _latencyMs! < 200) ? AppColors.success : AppColors.textDim,
+              pingColor: (!_latencyChecking && _latencyMs != null && _latencyMs! < 200)
+                  ? AppColors.success
+                  : AppColors.textDim,
               trailing: const Icon(Icons.chevron_right_rounded, color: AppColors.textDim, size: 18),
               onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ServersScreen())),
             );
