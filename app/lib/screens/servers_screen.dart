@@ -101,6 +101,10 @@ class _ServersScreenState extends State<ServersScreen> {
   DateTime? _lastSwitchAt;
   String? _lastSwitchTarget;
   bool _switching = false;
+  // [НОВОЕ] host_name сервера, на который прямо сейчас идёт реальное
+  // переключение уже поднятого туннеля (см. _onServerTapped) — только для
+  // индикатора загрузки на конкретной карточке, не влияет на логику.
+  String? _switchingToId;
 
   ({String? host, int? port, String? security, String? sni}) _pingEndpoint(
       String hostName, Map<String, dynamic> server) {
@@ -525,6 +529,54 @@ class _ServersScreenState extends State<ServersScreen> {
     });
   }
 
+  /// [ИСПРАВЛЕНО — жалоба "нажимаю Сменить сервер, выбираю другой, а он не
+  /// меняет сервер, помогает только выключить/включить VPN"] Раньше тап по
+  /// серверу в списке ТОЛЬКО обновлял "предпочтение" (`_selectedId` /
+  /// `SelectedServer` / `PrefKeys.selectedServerId`) — то, какой сервер
+  /// возьмётся при следующем РУЧНОМ нажатии "Подключить" на ConnectScreen.
+  /// На уже поднятый туннель это не влияло никак: сама VLESS-сессия
+  /// продолжала висеть на прежнем сервере, пока пользователь не отключался
+  /// и не подключался заново вручную — ровно то поведение, на которое
+  /// жаловались.
+  ///
+  /// Тот же самый сценарий уже был решён для авто-балансировки через
+  /// `TunnelService.switchPreferredHost()` (см. `_maybeApplyAutoBalance`
+  /// выше) — она отключает и тут же переподключает туннель на новом хосте
+  /// той же подписки. Теперь ручной тап по серверу использует ровно этот
+  /// же метод, если туннель прямо сейчас поднят, а не просто переставляет
+  /// "предпочтение".
+  Future<void> _onServerTapped(String id, String name) async {
+    // Предпочтение обновляем сразу в любом случае — даже если ниже реальное
+    // переключение не понадобится или не удастся, экран "Подключение"
+    // должен показывать актуальный выбор.
+    setState(() => _selectedId = id);
+    SelectedServer.select(id, name);
+    _prefs.setString(PrefKeys.selectedServerId, id);
+
+    if (!_tunnel.isConnected) return; // не из чего переключать — обычный выбор
+    if (id == _tunnel.connectedServerName.value) return; // уже подключены сюда
+    if (_switching || _tunnel.isBusy) return; // уже идёт подключение/отключение
+
+    _switching = true;
+    if (mounted) setState(() => _switchingToId = id);
+    try {
+      await _tunnel.switchPreferredHost(id);
+      if (mounted) {
+        setState(() => _lastSwitchTarget = id);
+        _lastSwitchAt = DateTime.now();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось переключиться на $name: $e')),
+        );
+      }
+    } finally {
+      _switching = false;
+      if (mounted) setState(() => _switchingToId = null);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -707,11 +759,7 @@ class _ServersScreenState extends State<ServersScreen> {
                   name: name,
                   pingLabel: pingLabel,
                   pingColor: pingColor,
-                  onTap: () {
-                    setState(() => _selectedId = id);
-                    SelectedServer.select(id, name);
-                    _prefs.setString(PrefKeys.selectedServerId, id);
-                  },
+                  onTap: () => _onServerTapped(id, name),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -738,7 +786,14 @@ class _ServersScreenState extends State<ServersScreen> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      if (isSelected)
+                      if (_switchingToId == id)
+                        const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: AppColors.violetGlow),
+                        )
+                      else if (isSelected)
                         const NeonBadge('выбран')
                       else
                         const Icon(Icons.chevron_right_rounded,
