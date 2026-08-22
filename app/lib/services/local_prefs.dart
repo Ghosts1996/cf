@@ -199,6 +199,12 @@ class PrefKeys {
   // ConnectScreen подключается по нему в приоритете перед ключами из
   // личного кабинета (API), см. connect_screen.dart::_resolveConnectionString.
   static const manualConnectionString = 'keys.manual_connection_string';
+
+  // [НОВОЕ] Срок хранения локальных логов приложения на устройстве, в днях:
+  // 1 | 7 | 30 (см. services/app_log_service.dart и экран "Безопасность" ->
+  // "Хранение логов"). Записи журнала старше этого срока стираются
+  // автоматически, значение по умолчанию — AppLogService.defaultRetentionDays.
+  static const logRetentionDays = 'security.log_retention_days';
 }
 
 /// [НОВОЕ] Ин-мемори + на диске хранилище ручного ключа, добавленного
