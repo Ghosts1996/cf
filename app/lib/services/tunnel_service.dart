@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart' show MethodChannel, PlatformException;
+import 'package:flutter/services.dart'
+    show MethodChannel, PlatformException, MissingPluginException;
 import 'package:flutter_singbox_client/flutter_singbox_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
@@ -561,6 +562,20 @@ class TunnelService {
       } on PlatformException {
         // Не прерываем VPN на старых сборках/устройствах: разрешение влияет
         // только на видимость уведомления, а не на безопасность туннеля.
+      } on MissingPluginException {
+        // [ИСПРАВЛЕНО — реальный баг, см. скриншот "Не удалось
+        // подключиться: MissingPluginException(...)"] PlatformException и
+        // MissingPluginException — РАЗНЫЕ классы (MissingPluginException НЕ
+        // наследуется от PlatformException), поэтому старый catch выше его
+        // не ловил. Он бросается, когда нативная сторона канала
+        // 'vpnonline/native_stats' не знает метод
+        // requestNotificationPermission — чаще всего это значит, что на
+        // телефоне стоит старая сборка APK, установленная ДО того, как этот
+        // метод появился в MainActivity.kt (пересобери и переустанови APK
+        // заново, старую версию сначала удали). Но даже если сборка новая
+        // и метод почему-то всё равно не нашёлся — это не должно рвать сам
+        // VPN: разрешение на уведомления влияет только на видимость
+        // статус-бара, а не на безопасность туннеля.
       }
     }
     // Обычное подключение может получить событие connected раньше, чем
