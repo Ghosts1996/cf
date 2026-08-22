@@ -226,7 +226,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
       // туннель ещё не поднят — реально запускаем подключение.
       if (!_autoConnectTried) {
         _autoConnectTried = true;
-        final autoConnect = await LocalPrefs.instance.getBool(PrefKeys.autoConnect, fallback: true);
+        // [ИСПРАВЛЕНО] По умолчанию выключено — пользователь должен сам
+        // включить автоподключение в Настройках, а не получать его "из
+        // коробки" молча.
+        final autoConnect = await LocalPrefs.instance.getBool(PrefKeys.autoConnect, fallback: false);
         if (autoConnect &&
             (_activeKey != null || _hasManualKey) &&
             !_tunnel.isConnected &&
