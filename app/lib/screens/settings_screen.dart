@@ -34,9 +34,11 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _prefs = LocalPrefs.instance;
 
-  bool _autoConnect = true;
-  bool _smartWifi = true;
-  bool _killSwitch = true;
+  // [ИСПРАВЛЕНО] Все тумблеры этого экрана по умолчанию выключены — до
+  // первого явного действия пользователя ничего не включается само.
+  bool _autoConnect = false;
+  bool _smartWifi = false;
+  bool _killSwitch = false;
   bool _dpiBypass = false;
   bool _proxyOnly = false;
   // [НОВОЕ] Выбор DNS-over-HTTPS резолвера. Реально прокидывается в конфиг
@@ -73,9 +75,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _load() async {
     final results = await Future.wait([
-      _prefs.getBool(PrefKeys.autoConnect, fallback: true),
-      _prefs.getBool(PrefKeys.smartWifi, fallback: true),
-      _prefs.getBool(PrefKeys.killSwitch, fallback: true),
+      _prefs.getBool(PrefKeys.autoConnect, fallback: false),
+      _prefs.getBool(PrefKeys.smartWifi, fallback: false),
+      _prefs.getBool(PrefKeys.killSwitch, fallback: false),
       // [ИСПРАВЛЕНО] По умолчанию выключено — пользователь включает сам
       // при необходимости (совпадает с fallback в tunnel_service.dart).
       _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
