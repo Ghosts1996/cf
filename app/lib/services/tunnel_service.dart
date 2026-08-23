@@ -65,6 +65,17 @@ class TunnelService {
   // а не был заморожен на 00:00:00.
   Timer? _durationTicker;
   bool _runtimeStateSynced = false;
+  // [ИСПРАВЛЕНО — реальный баг "таймер сессии сбрасывается при каждом
+  // перезаходе в приложение, хотя VPN всё это время не отключался"]
+  // См. подробности в докстринге `syncRuntimeState()` ниже. Коротко: пока
+  // `syncRuntimeState()` ещё не восстановила `_connectStartedAt` из
+  // `LocalPrefs`, `_applyServiceState()` не должен САМ трогать
+  // `_connectStartedAt` — ни выставлять его в `DateTime.now()`, ни (тем
+  // более) обнулять и стирать сохранённое значение в LocalPrefs. Этот флаг
+  // временно "выключает" обе ветки внутри `_applyServiceState()`, пока идёт
+  // восстановление, — единственный источник истины для `_connectStartedAt`
+  // на это время — сама `syncRuntimeState()`.
+  bool _restoringConnectStartedAt = false;
 
   final ValueNotifier<TunnelStatus?> status = ValueNotifier(null);
   final ValueNotifier<String?> lastError = ValueNotifier(null);
@@ -111,20 +122,41 @@ class TunnelService {
     final prevDownload = status.value?.download ?? 0;
     final prevUpload = status.value?.upload ?? 0;
 
-    if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
-      _connectStartedAt = DateTime.now();
-      if (_runtimeStateSynced) {
-        unawaited(LocalPrefs.instance.setInt(
-          PrefKeys.tunnelConnectedAtMillis,
-          _connectStartedAt!.millisecondsSinceEpoch,
-        ));
+    // [ИСПРАВЛЕНО — реальный баг "открываю приложение заново — таймер
+    // подключения снова считает с 00:00:00, хотя VPN всё это время работал
+    // в фоне"] Пока `syncRuntimeState()` восстанавливает `_connectStartedAt`
+    // из `LocalPrefs` (см. её докстринг), нативный плагин может прислать в
+    // `serviceStateStream` СВОЁ собственное, более раннее событие о текущем
+    // состоянии (многие плагины репортуют его сразу при подписке на стрим,
+    // ДО того, как явный запрос `getServiceState()` внутри
+    // `syncRuntimeState()` вообще успевает выполниться). Раньше это событие
+    // ловилось здесь как обычное: если оно приходило со статусом
+    // "не подключено" (native ещё не успел отрапортовать реальный статус),
+    // код ниже сразу считал сессию завершённой и — раз `_runtimeStateSynced`
+    // к этому моменту уже был выставлен в `true` — стирал сохранённое время
+    // старта в LocalPrefs на 0. Когда следом прилетало настоящее состояние
+    // "connected", ветка выше уже не находила сохранённого времени и молча
+    // подставляла `DateTime.now()` — таймер стартовал заново, хотя туннель
+    // не отключался ни на секунду. Пока идёт восстановление
+    // (`_restoringConnectStartedAt == true`), обе ветки ничего не трогают:
+    // единственный, кому разрешено менять `_connectStartedAt` в этом окне —
+    // сама `syncRuntimeState()`.
+    if (!_restoringConnectStartedAt) {
+      if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
+        _connectStartedAt = DateTime.now();
+        if (_runtimeStateSynced) {
+          unawaited(LocalPrefs.instance.setInt(
+            PrefKeys.tunnelConnectedAtMillis,
+            _connectStartedAt!.millisecondsSinceEpoch,
+          ));
+        }
       }
-    }
-    if (mapped != TunnelConnState.connected) {
-      _connectStartedAt = null;
-      if (_runtimeStateSynced) {
-        unawaited(
-            LocalPrefs.instance.setInt(PrefKeys.tunnelConnectedAtMillis, 0));
+      if (mapped != TunnelConnState.connected) {
+        _connectStartedAt = null;
+        if (_runtimeStateSynced) {
+          unawaited(LocalPrefs.instance
+              .setInt(PrefKeys.tunnelConnectedAtMillis, 0));
+        }
       }
     }
 
@@ -217,9 +249,21 @@ class TunnelService {
   /// Перечитывает фактическое состояние нативного foreground-сервиса.
   /// Пока Flutter Activity была в фоне или пересоздавалась Android, старое
   /// событие Dart-стрима могло потеряться, хотя VPN продолжает работать.
+  ///
+  /// [ИСПРАВЛЕНО — реальный баг "таймер подключения сбивается и снова
+  /// считает с нуля при каждом перезаходе в приложение"] `_ensureInitialized()`
+  /// внутри уже подписывает `_applyServiceState` на `serviceStateStream` —
+  /// а нативная сторона плагина вполне может прислать по этому стриму своё
+  /// собственное (и не всегда ещё точное) состояние ДО того, как ниже
+  /// завершится явный `await _client.getServiceState()`. Без защиты такое
+  /// раннее событие успевало обнулить восстановление: см. подробный
+  /// комментарий в `_applyServiceState()`. Флаг `_restoringConnectStartedAt`
+  /// не даёт ни одному входящему событию трогать `_connectStartedAt`, пока
+  /// этот метод сам не выяснит и не проставит правильное значение.
   Future<void> syncRuntimeState() async {
-    await _ensureInitialized();
+    _restoringConnectStartedAt = true;
     try {
+      await _ensureInitialized();
       final actualState = await _client.getServiceState();
       // Сначала восстанавливаем момент подключения и лишь затем публикуем
       // состояние. Иначе экран кратко покажет 00:00:00 при возвращении в
@@ -230,14 +274,21 @@ class TunnelService {
         if (savedAt > 0) {
           _connectStartedAt = DateTime.fromMillisecondsSinceEpoch(savedAt);
         }
+      } else {
+        // Туннель на самом деле не поднят — предыдущая сессия точно
+        // завершилась, старую отметку времени можно спокойно сбросить.
+        _connectStartedAt = null;
       }
       _runtimeStateSynced = true;
+      _restoringConnectStartedAt = false;
       _applyServiceState(actualState);
       if (_mapServiceState(actualState) == TunnelConnState.connected) {
         _applyTrafficStats(await _client.getTrafficStats());
       }
     } catch (e) {
       lastError.value = 'Не удалось обновить состояние VPN: $e';
+    } finally {
+      _restoringConnectStartedAt = false;
     }
   }
 
