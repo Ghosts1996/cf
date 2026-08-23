@@ -58,6 +58,10 @@ class _PlansScreenState extends State<PlansScreen> {
       // (см. api.py: api_plans() и то, как /key/create всегда использует
       // host_name="GLOBAL").
       final plansByHost = await _api.getPlans();
+      // [ИСПРАВЛЕНО] Проверка `mounted` после `await` — без неё уход с
+      // экрана до ответа `/plans` приводил к падению `setState()` на уже
+      // отключённом виджете.
+      if (!mounted) return;
       final globalPlans = (plansByHost['GLOBAL'] as List<dynamic>?) ?? [];
       globalPlans.sort((a, b) =>
           ((a as Map<String, dynamic>)['months'] as num).compareTo((b as Map<String, dynamic>)['months'] as num));
@@ -67,8 +71,13 @@ class _PlansScreenState extends State<PlansScreen> {
         _loading = false;
       });
     } on ApiException catch (e) {
+      // [ИСПРАВЛЕНО] Не было проверки `mounted` после `await` — уход с
+      // экрана (Navigator.pop) до ответа `/plans` приводил к падению
+      // "setState() called after dispose()", особенно на медленной сети.
+      if (!mounted) return;
       setState(() { _error = e.message; _loading = false; });
     } catch (e) {
+      if (!mounted) return;
       setState(() { _error = 'Не удалось загрузить тарифы: $e'; _loading = false; });
     }
   }
