@@ -159,6 +159,14 @@ class TunnelService {
         }
       }
     }
+    // Соединение для замера задержки (см. докстринг `_delayProbeClient`)
+    // прогрето под конкретный сеанс туннеля — вне зависимости от флага
+    // восстановления выше, если сеанс на самом деле закончился, прогретый
+    // канал больше ни на что не годен и его нужно закрыть. `_closeDelayProbeClient()`
+    // безопасно вызывать и когда клиента ещё не существует (ничего не делает).
+    if (mapped != TunnelConnState.connected) {
+      _closeDelayProbeClient();
+    }
 
     // [ИСПРАВЛЕНО — таймер сессии стоял на 00:00:00]
     // duration раньше пересчитывался ТОЛЬКО здесь, внутри листенера
@@ -1734,6 +1742,12 @@ class TunnelService {
     _autoReconnectAttempt = 0;
     killSwitchBlocking.value = false;
     _restartDurationTicker(false);
+    // См. докстринг `_delayProbeClient` выше — соединение для замера
+    // задержки прогрето именно на ТЕКУЩИЙ сеанс туннеля; при отключении его
+    // нужно закрыть, иначе следующее подключение (возможно, к другому
+    // серверу) первое время тихо переиспользовало бы канал к уже неактуальному
+    // proxy-сеансу.
+    _closeDelayProbeClient();
     // [НОВОЕ] Если сейчас активна служебная блокирующая сессия строгого Kill
     // Switch — снимаем именно её. _disengageHardKillSwitch сама проверяет
     // _hardKillSwitchEngaged и ничего не делает, если её нет, поэтому
@@ -1815,12 +1829,46 @@ class TunnelService {
   /// задержку самого туннеля. Работает в обоих режимах (VPN и proxy-only),
   /// потому что `_buildSingBoxConfig` теперь поднимает этот локальный порт
   /// в обоих случаях (см. правку там же).
+  // [ИСПРАВЛЕНО — реальный баг "пинг на главном экране в разы больше, чем в
+  // Hiddify для того же сервера"] `connectedDelayMs()` ниже раньше создавал
+  // НОВЫЙ `HttpClient` и полностью закрывал его после КАЖДОГО замера (тикает
+  // каждые 15 секунд, см. `_latencyTimer` в connect_screen.dart). Из-за этого
+  // каждый без исключения замер оплачивал полный "холодный" путь: новое
+  // TCP-соединение до локального инбаунда sing-box + новое TCP+TLS
+  // (Reality) рукопожатие ядра с самим VLESS-сервером + ещё одно, уже
+  // клиентское TLS-рукопожатие поверх туннеля с проверочным хостом — то есть
+  // фактически ДВА последовательных TLS-рукопожатия на каждый тик, и ни
+  // одно соединение никогда не переживало до следующего замера. Hiddify (и
+  // sing-box urltest внутри него) держит соединение прогретым между
+  // проверками — платит полную цену рукопожатия только один раз, а не на
+  // каждом тике. Теперь `HttpClient` для замера — один и тот же на всё время
+  // жизни соединения (создаётся лениво, живёт в `_delayProbeClient`), и
+  // Dart/HttpClient сам держит keep-alive к локальному инбаунду и к
+  // проверочному хосту между вызовами. Первый замер после подключения
+  // по-прежнему честно платит полное рукопожатие (как и в Hiddify) —
+  // последующие, пока соединение не протухло, значительно быстрее и
+  // отражают именно сетевую задержку, а не задержку установления канала.
+  // Закрывается и обнуляется в `disconnect()`/`dispose()` — иначе после
+  // переключения на другой сервер он продолжал бы держать TCP-соединение к
+  // уже неактуальному proxy-сеансу.
+  HttpClient? _delayProbeClient;
+
+  HttpClient _ensureDelayProbeClient() {
+    return _delayProbeClient ??= HttpClient()
+      ..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;'
+      ..idleTimeout = const Duration(seconds: 30);
+  }
+
+  void _closeDelayProbeClient() {
+    _delayProbeClient?.close(force: true);
+    _delayProbeClient = null;
+  }
+
   Future<int?> connectedDelayMs() async {
     if (!isConnected) return null;
 
     final probeUri = Uri.parse('https://cp.cloudflare.com/generate_204');
-    final client = IOClient(
-        HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
+    final client = IOClient(_ensureDelayProbeClient());
     final stopwatch = Stopwatch()..start();
     try {
       final response =
@@ -1829,14 +1877,17 @@ class TunnelService {
       if (response.statusCode <= 0) return null;
       return stopwatch.elapsedMilliseconds.clamp(1, 9999);
     } catch (_) {
+      // Прогретое соединение могло протухнуть/оборваться (сервер закрыл
+      // keep-alive, сменился маршрут и т.п.) — на следующий тик заведём
+      // новый клиент с нуля, а не будем биться в мёртвое соединение.
+      _closeDelayProbeClient();
       return null;
-    } finally {
-      client.close();
     }
   }
 
   Future<void> dispose() async {
     _restartDurationTicker(false);
+    _closeDelayProbeClient();
     await _stateSub?.cancel();
     await _statsSub?.cancel();
     await _faultSub?.cancel();
