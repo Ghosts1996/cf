@@ -1683,7 +1683,20 @@ class TunnelService {
     // связности (тот же принцип, что использует сам Android для проверки
     // captive portal): любой полученный ответ, а не таймаут/исключение,
     // означает, что соединение реально прошло туда и обратно.
-    final probeUri = Uri.parse('https://cp.cloudflare.com/generate_204');
+    // [ИСПРАВЛЕНО — реальная причина "пинг в разы больше, чем в Hiddify для
+    // того же сервера"] cp.cloudflare.com/generate_204 — стандартный
+    // captive-portal-эндпоинт, рассчитанный именно на обычный HTTP (как и
+    // его аналоги: connectivitycheck.gstatic.com у Android, msftconnecttest
+    // у Windows и т.д. — все по HTTP, не HTTPS). Раньше запрос шёл на
+    // https://…, то есть сверху ещё поднималось полное TLS-рукопожатие
+    // ЭТОГО пробного запроса — поверх уже зашифрованного VLESS/Reality-
+    // туннеля, который и так шифрует трафик сам. Лишний TLS-хендшейк — это
+    // не бесплатно, обычно ещё +1 круговой RTT сверх сетевой задержки,
+    // которую и хотим измерить. Hiddify (и другие клиенты) меряют этот же
+    // эндпоинт по обычному HTTP именно поэтому. На безопасность это не
+    // влияет — сам туннель (VLESS+Reality) уже шифрует всё, что идёт через
+    // него, независимо от схемы этого служебного 204-запроса внутри.
+    final probeUri = Uri.parse('http://cp.cloudflare.com/generate_204');
 
     if (proxyOnly) {
       // В proxy-режиме запрос явно направлен через локальный SOCKS/HTTP-порт
@@ -1867,7 +1880,10 @@ class TunnelService {
   Future<int?> connectedDelayMs() async {
     if (!isConnected) return null;
 
-    final probeUri = Uri.parse('https://cp.cloudflare.com/generate_204');
+    // [ИСПРАВЛЕНО] См. подробный комментарий у первого использования этого
+    // же эндпоинта в _verifyInternetReachable() — generate_204 рассчитан на
+    // обычный HTTP, лишний TLS-хендшейк поверх туннеля завышал показания.
+    final probeUri = Uri.parse('http://cp.cloudflare.com/generate_204');
     final client = IOClient(_ensureDelayProbeClient());
     final stopwatch = Stopwatch()..start();
     try {
