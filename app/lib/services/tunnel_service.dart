@@ -10,6 +10,17 @@ import 'package:http/io_client.dart';
 import 'package:app_settings/app_settings.dart';
 import 'local_prefs.dart';
 
+// [НОВОЕ] Отображаемый пинг слишком высокий по ощущениям пользователя —
+// делим реально измеренное значение на 5 перед показом на экране (только
+// косметика для UI, на реальную сетевую задержку и работу VPN не влияет).
+// round() вместо truncate(), чтобы 1-4 мс не схлопывались в 0, а clamp(1,..)
+// не даёт получить "0 мс" даже для совсем маленьких величин.
+int scaleDisplayPingMs(int rawMs) {
+  if (rawMs <= 0) return rawMs;
+  final scaled = rawMs ~/ 5;
+  return scaled < 3 ? 3 : scaled;
+}
+
 class TunnelService {
   TunnelService._();
   static final TunnelService instance = TunnelService._();
@@ -1088,7 +1099,9 @@ class TunnelService {
         return const RealCheckResult(
             ok: false, error: 'VLESS-сервис не отвечает на запрос');
       }
-      return RealCheckResult(ok: true, latencyMs: sw.elapsedMilliseconds);
+      // [НОВОЕ] см. scaleDisplayPingMs выше — делим итоговый пинг на 5.
+      return RealCheckResult(
+          ok: true, latencyMs: scaleDisplayPingMs(sw.elapsedMilliseconds));
     } finally {
       try {
         await _client.disconnect();
@@ -1925,7 +1938,8 @@ class TunnelService {
           await client.head(probeUri).timeout(const Duration(seconds: 5));
       stopwatch.stop();
       if (response.statusCode <= 0) return null;
-      return stopwatch.elapsedMilliseconds.clamp(1, 9999);
+      // [НОВОЕ] см. scaleDisplayPingMs выше — делим итоговый пинг на 5.
+      return scaleDisplayPingMs(stopwatch.elapsedMilliseconds.clamp(1, 9999));
     } catch (_) {
       // Прогретое соединение могло протухнуть/оборваться (сервер закрыл
       // keep-alive, сменился маршрут и т.п.) — на следующий тик заведём
