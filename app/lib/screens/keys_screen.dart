@@ -157,16 +157,23 @@ class _KeysScreenState extends State<KeysScreen> {
     });
     try {
       final keys = await _api.getKeys();
+      // [ИСПРАВЛЕНО] Без проверки `mounted` после `await` уход с экрана
+      // (например, назад в меню) до ответа сервера приводил к падению
+      // `setState() called after dispose()` — особенно вероятно именно на
+      // медленной мобильной сети, где запрос идёт дольше обычного.
+      if (!mounted) return;
       setState(() {
         _keys = keys;
         _loading = false;
       });
     } on ApiException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.message;
         _loading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = 'Не удалось загрузить ключи: $e';
         _loading = false;
