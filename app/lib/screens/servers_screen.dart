@@ -297,7 +297,10 @@ class _ServersScreenState extends State<ServersScreen> {
             host: (sni != null && sni.isNotEmpty) ? sni : host,
           ).timeout(const Duration(seconds: 4));
           tlsSw.stop();
-          if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds + tlsSw.elapsedMilliseconds);
+          // [НОВОЕ] см. scaleDisplayPingMs в tunnel_service.dart — делим
+          // итоговый пинг на 5 перед показом.
+          if (mounted) setState(() => _livePing[hostName] = scaleDisplayPingMs(
+              sw.elapsedMilliseconds + tlsSw.elapsedMilliseconds));
           secureSocket.destroy();
         } catch (_) {
           // TCP-порт открыт, но TLS не поднимается — сервис за ним
@@ -311,7 +314,9 @@ class _ServersScreenState extends State<ServersScreen> {
         }
       } else {
         // `sw` уже остановлен выше — здесь чистое время TCP-подключения.
-        if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds);
+        // [НОВОЕ] см. scaleDisplayPingMs в tunnel_service.dart — делим
+        // итоговый пинг на 5 перед показом.
+        if (mounted) setState(() => _livePing[hostName] = scaleDisplayPingMs(sw.elapsedMilliseconds));
         socket.destroy();
       }
     } catch (_) {
