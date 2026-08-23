@@ -51,6 +51,10 @@ class _MenuScreenState extends State<MenuScreen> {
   Future<void> _load() async {
     try {
       final results = await Future.wait([_api.getProfile(), _api.getKeys()]);
+      // [ИСПРАВЛЕНО] Проверка `mounted` после `await` — без неё уход с
+      // экрана до ответа сервера приводил к падению `setState()` на уже
+      // отключённом виджете, особенно вероятно на медленной сети.
+      if (!mounted) return;
       setState(() {
         _profile = results[0] as Map<String, dynamic>;
         _keys = results[1] as List<dynamic>;
