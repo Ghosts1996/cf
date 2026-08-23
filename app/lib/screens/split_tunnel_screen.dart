@@ -59,6 +59,10 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
     // хранилища. Загружаем оба источника параллельно и объединяем один раз.
     final savedBypassed = await _prefs.getBoolMap(PrefKeys.splitTunnelBypass);
     final savedMode = await _prefs.getString(PrefKeys.splitTunnelMode);
+    // [ИСПРАВЛЕНО] Проверка `mounted` после `await` — без неё уход с
+    // экрана до завершения чтения LocalPrefs приводил к падению
+    // "setState() called after dispose()".
+    if (!mounted) return;
     if (savedMode == 'include' || savedMode == 'exclude') _mode = savedMode!;
     if (!Platform.isAndroid) {
       setState(() {
@@ -81,6 +85,10 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
         excludeNonLaunchableApps: true,
         withIcon: true,
       );
+      // [ИСПРАВЛЕНО] Та же проверка после второго `await` — чтение списка
+      // установленных приложений на слабом устройстве может занять
+      // заметное время, и уход с экрана за это время — реальный сценарий.
+      if (!mounted) return;
       apps.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       setState(() {
         _apps = apps;
@@ -88,6 +96,7 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
         _loading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _loading = false;
         // Частая причина — нет QUERY_ALL_PACKAGES в AndroidManifest.xml
