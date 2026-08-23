@@ -220,13 +220,28 @@ class ManualKeyStore {
   static final ManualKeyStore instance = ManualKeyStore._();
 
   final ValueNotifier<String?> notifier = ValueNotifier<String?>(null);
-  bool _loaded = false;
+
+  // [ИСПРАВЛЕНО] Раньше здесь был флаг `bool _loaded`, выставлявшийся в
+  // `true` СИНХРОННО в начале `ensureLoaded()`, ДО того как асинхронное
+  // чтение из SharedPreferences реально завершалось. Если `ensureLoaded()`
+  // вызывали из двух разных экранов почти одновременно (например,
+  // ConnectScreen и ServersScreen при быстром переключении вкладок сразу
+  // после холодного старта), второй вызов видел `_loaded == true` и
+  // возвращался МГНОВЕННО, хотя `notifier.value` ещё не был прочитан из
+  // хранилища — вызвавший код получал `null` вместо реально сохранённого
+  // ручного ключа. Теперь вместо bool-флага кэшируется сам Future первой
+  // загрузки: все конкурентные вызовы получают ОДИН и тот же Future и
+  // по-настоящему дожидаются завершения чтения, а не только факта, что
+  // чтение когда-то было запущено.
+  Future<void>? _loadFuture;
 
   String? get value => notifier.value;
 
-  Future<void> ensureLoaded() async {
-    if (_loaded) return;
-    _loaded = true;
+  Future<void> ensureLoaded() {
+    return _loadFuture ??= _load();
+  }
+
+  Future<void> _load() async {
     final saved =
         await LocalPrefs.instance.getString(PrefKeys.manualConnectionString);
     notifier.value =
