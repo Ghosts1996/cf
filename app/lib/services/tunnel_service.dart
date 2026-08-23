@@ -287,7 +287,6 @@ class TunnelService {
         // завершилась, старую отметку времени можно спокойно сбросить.
         _connectStartedAt = null;
       }
-      _runtimeStateSynced = true;
       _restoringConnectStartedAt = false;
       _applyServiceState(actualState);
       if (_mapServiceState(actualState) == TunnelConnState.connected) {
@@ -296,6 +295,26 @@ class TunnelService {
     } catch (e) {
       lastError.value = 'Не удалось обновить состояние VPN: $e';
     } finally {
+      // [ИСПРАВЛЕНО — реальный баг "таймер сессии снова считает с нуля
+      // после перезапуска приложения"] Раньше `_runtimeStateSynced = true`
+      // стоял ВНУТРИ try, после трёх последовательных await к нативной
+      // стороне (_ensureInitialized/getServiceState/чтение LocalPrefs).
+      // Если любой из них бросал исключение (например, платформенный канал
+      // ещё не готов в первые доли секунды после холодного старта —
+      // обычная ситуация, а не край случая) — выполнение уходило в catch,
+      // и `_runtimeStateSynced` НАВСЕГДА оставался false до конца сессии
+      // приложения. А это единственный флаг, разрешающий
+      // `_applyServiceState()` вообще писать `tunnelConnectedAtMillis` в
+      // LocalPrefs (см. проверки `if (_runtimeStateSynced)` выше по файлу)
+      // — то есть все последующие РЕАЛЬНЫЕ подключения в течение этой
+      // сессии продолжали корректно считать таймер в памяти (пользователь
+      // ничего не замечал сразу), но момент старта туннеля просто не
+      // сохранялся на диск. При следующем перезапуске восстанавливать
+      // было нечего — отсюда обнуление. Теперь флаг взводится в finally —
+      // гарантированно один раз при первой попытке синхронизации,
+      // независимо от того, чем она закончилась, — и персист снова
+      // работает для всех дальнейших connect()/disconnect() в сессии.
+      _runtimeStateSynced = true;
       _restoringConnectStartedAt = false;
     }
   }
