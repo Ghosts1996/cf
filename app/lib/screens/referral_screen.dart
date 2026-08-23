@@ -35,8 +35,13 @@ class _ReferralScreenState extends State<ReferralScreen> {
   Future<void> _load() async {
     try {
       final profile = await _api.getProfile();
+      // [ИСПРАВЛЕНО] Не было проверки `mounted` после `await` — уход с
+      // экрана до ответа `/user/profile` приводил к падению
+      // "setState() called after dispose()" на медленной сети.
+      if (!mounted) return;
       setState(() => _profile = profile);
     } catch (e) {
+      if (!mounted) return;
       setState(() => _error = 'Не удалось загрузить реферальные данные: $e');
     }
   }
