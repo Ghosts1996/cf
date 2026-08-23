@@ -1855,8 +1855,8 @@ class TunnelService {
 
   HttpClient _ensureDelayProbeClient() {
     return _delayProbeClient ??= HttpClient()
-      ..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;'
-      ..idleTimeout = const Duration(seconds: 30);
+      ..idleTimeout = const Duration(seconds: 30)
+      ..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;';
   }
 
   void _closeDelayProbeClient() {
