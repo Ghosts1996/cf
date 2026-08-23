@@ -208,6 +208,19 @@ class _ServersScreenState extends State<ServersScreen> {
     try {
       socket = await Socket.connect(host, port ?? 443,
           timeout: const Duration(seconds: 4));
+      // [ИСПРАВЛЕНО — реальный баг: пинг для security=tls показывался
+      // примерно вдвое завышенным относительно фактического] `sw` здесь
+      // раньше НЕ останавливался перед TLS-рукопожатием — Stopwatch
+      // продолжал тикать всё то время, пока ниже шёл `SecureSocket.secure`,
+      // поэтому `sw.elapsedMilliseconds` на строке с `setState` уже сам по
+      // себе включал в себя длительность TLS-хендшейка, а потом к нему ещё
+      // раз прибавлялся `tlsSw.elapsedMilliseconds` — то есть время TLS
+      // фактически считалось дважды. Останавливаем `sw` сразу после
+      // успешного TCP-подключения, до входа в TLS-ветку, — тогда
+      // `sw.elapsedMilliseconds` — это чистое время TCP, а
+      // `tlsSw.elapsedMilliseconds` — чистое время TLS, и их сумма честно
+      // равна полному времени "TCP + TLS", без задвоения.
+      sw.stop();
       // TCP прошёл — для обычного TLS (не Reality, не "none"/plaintext)
       // дополнительно проверяем настоящим TLS-рукопожатием с правильным
       // SNI, см. докстринг метода выше про то, почему это осмысленно
@@ -221,7 +234,7 @@ class _ServersScreenState extends State<ServersScreen> {
             host: (sni != null && sni.isNotEmpty) ? sni : host,
           ).timeout(const Duration(seconds: 4));
           tlsSw.stop();
-          if (mounted) setState(() => _livePing[hostName] = tlsSw.elapsedMilliseconds + sw.elapsedMilliseconds);
+          if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds + tlsSw.elapsedMilliseconds);
           secureSocket.destroy();
         } catch (_) {
           // TCP-порт открыт, но TLS не поднимается — сервис за ним
@@ -234,7 +247,7 @@ class _ServersScreenState extends State<ServersScreen> {
           if (mounted) setState(() => _livePing[hostName] = -1);
         }
       } else {
-        sw.stop();
+        // `sw` уже остановлен выше — здесь чистое время TCP-подключения.
         if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds);
         socket.destroy();
       }
@@ -625,6 +638,12 @@ class _ServersScreenState extends State<ServersScreen> {
     });
     try {
       final hosts = await _api.getHosts();
+      // [ИСПРАВЛЕНО] Проверка `mounted` после `await` — без неё уход с
+      // экрана (переключение вкладки — хотя теперь State и переживает
+      // переключение вкладок благодаря IndexedStack, экран всё ещё можно
+      // закрыть, например, при разлогине) до ответа `/hosts` приводил бы к
+      // падению `setState()` на уже отключённом виджете.
+      if (!mounted) return;
       setState(() {
         _hosts = hosts;
         if (hosts.isNotEmpty) {
@@ -661,6 +680,7 @@ class _ServersScreenState extends State<ServersScreen> {
     } catch (e) {
       // Ожидаемо, пока backend/.env не настроены под реальную БД/панели —
       // это не заглушка, а честная ошибка сети/интеграции.
+      if (!mounted) return;
       setState(() {
         _error = 'Не удалось получить список серверов: $e';
         _loading = false;
