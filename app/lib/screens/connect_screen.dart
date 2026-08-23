@@ -231,10 +231,45 @@ class _ConnectScreenState extends State<ConnectScreen> {
     return expiryStr != null ? DateTime.tryParse(expiryStr) : null;
   }
 
+  /// [НОВОЕ — исправляет "раньше хоть как-то грузило, а сейчас вообще нет"]
+  /// До появления тайм-аута в `api_client.dart` запрос на плохой мобильной
+  /// сети мог висеть сколько угодно, но рано или поздно ВСЁ РАВНО получал
+  /// ответ и загружал ключ — просто долго. Тайм-аут (15 секунд, см.
+  /// `ApiClient._send`) решил проблему "спиннер висит вечно", но взамен
+  /// создал новую: на слабом сигнале (например, 1 деление 4G) один
+  /// легитимный, просто медленный ответ сервера иногда не укладывается в
+  /// 15 секунд — и теперь вместо того, чтобы наконец дождаться, приложение
+  /// сразу сдаётся с ошибкой "Сервер не отвечает" и остаётся на "НЕТ
+  /// КЛЮЧА" до тех пор, пока пользователь не перезапустит приложение
+  /// целиком (у экрана нет ни pull-to-refresh, ни кнопки "Повторить", а
+  /// после перехода на IndexedStack в main.dart переключение вкладок
+  /// туда-обратно больше не пересоздаёт экран и не запускает повторную
+  /// попытку само по себе, как это случайно происходило раньше).
+  /// Несколько попыток подряд с паузой между ними — стандартный способ
+  /// пережить именно такую сеть: попытка стоит пользователю секунд, а не
+  /// бесконечности, но даёт связи ещё пару шансов ответить, прежде чем
+  /// показать ошибку. Повторяем только СЕТЕВЫЕ сбои (тайм-аут/нет
+  /// соединения — `statusCode == 0`, см. `ApiClient._send`) — настоящую
+  /// ошибку сервера (неверный токен и т.п.) повтор не исправит, только
+  /// зря продержит человека перед пустым экраном лишние секунды.
+  Future<List<dynamic>> _fetchKeysWithRetry() async {
+    const maxAttempts = 3;
+    for (var attempt = 1;; attempt++) {
+      try {
+        return await _api.getKeys();
+      } on ApiException catch (e) {
+        if (e.statusCode != 0 || attempt >= maxAttempts) rethrow;
+      } catch (_) {
+        if (attempt >= maxAttempts) rethrow;
+      }
+      await Future.delayed(const Duration(seconds: 2));
+    }
+  }
+
   Future<void> _loadKeyState() async {
     setState(() => _loadingKey = true);
     try {
-      final keys = await _api.getKeys();
+      final keys = await _fetchKeysWithRetry();
       // [ИСПРАВЛЕНО] Раньше здесь не было проверки `mounted` после
       // `await` — если пользователь успевал уйти с этого экрана (или
       // приложение к этому моменту уже сворачивалось) до того, как
@@ -597,7 +632,32 @@ class _ConnectScreenState extends State<ConnectScreen> {
           if (_keyError != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 12),
-              child: Text(_keyError!, style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_keyError!, style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+                  const SizedBox(height: 6),
+                  // [НОВОЕ] До этой правки при сетевой ошибке пользователь
+                  // застревал на "НЕТ КЛЮЧА" без единого способа повторить
+                  // попытку самому — ни pull-to-refresh на этом экране, ни
+                  // (после перехода на IndexedStack) повторного initState()
+                  // при возврате на вкладку. Явная кнопка рядом с текстом
+                  // ошибки — самый короткий путь снова попробовать, не
+                  // перезапуская всё приложение целиком.
+                  GestureDetector(
+                    onTap: _loadingKey ? null : _loadKeyState,
+                    child: const Text(
+                      'Повторить попытку',
+                      style: TextStyle(
+                        color: AppColors.violet2,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           Builder(builder: (context) {
             // [ИСПРАВЛЕНО v5] Было захардкожено 'DE'/'Германия · Frankfurt'
