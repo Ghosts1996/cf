@@ -108,7 +108,35 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _manualKey = ManualKeyStore.instance.value;
     ManualKeyStore.instance.notifier.addListener(_onManualKeyChanged);
     ManualKeyStore.instance.ensureLoaded();
-    _loadKeyState();
+    // [ИСПРАВЛЕНО — реальный баг: "включаю VPN, полностью закрываю
+    // приложение (VPN при этом продолжает работать в фоне — это обычное,
+    // штатное поведение Android VpnService), открываю приложение заново —
+    // кнопка снова показывает 'Подключиться', хотя VPN уже включён"]
+    // Причина: `TunnelService.status` — это обычный `ValueNotifier`,
+    // который живёт только в памяти текущего запуска Dart-изолята.
+    // `isConnected` (на который смотрит эта кнопка, см. `_toggleConnection`
+    // и `build()` ниже) — это просто `status.value?.state ==
+    // TunnelConnState.connected`. При каждом холодном старте приложения
+    // `TunnelService` создаётся заново с `status.value == null`, то есть
+    // `isConnected == false` — СОВЕРШЕННО НЕЗАВИСИМО от того, продолжает
+    // ли нативный foreground VpnService реально работать на устройстве
+    // (а он продолжает: закрытие Flutter-Activity не останавливает VPN,
+    // именно поэтому в шторке уведомлений остаётся значок VPN-ключа).
+    // В файле `tunnel_service.dart` уже был метод `syncRuntimeState()`,
+    // который как раз для этого и написан — он спрашивает у нативной
+    // стороны (`_client.getServiceState()`) её РЕАЛЬНОЕ текущее состояние
+    // и обновляет `status` под него. Там даже стоял комментарий-заметка
+    // "ConnectScreen вызовет syncRuntimeState()" — но по факту нигде в
+    // приложении этот вызов так и не был добавлен, поэтому метод
+    // существовал, но никогда не срабатывал сам. Вызываем его здесь,
+    // ДО `_loadKeyState()` (а не одновременно/после) — внутри
+    // `_loadKeyState()` есть проверка `!_tunnel.isConnected` перед тем, как
+    // решить, нужно ли автоподключение по тумблеру "Автоподключение при
+    // запуске" (см. ниже); если бы `isConnected` в этот момент ещё не был
+    // восстановлен из реального состояния, приложение решило бы, что VPN
+    // выключен, и при включённом автоподключении попыталось бы поднять
+    // ВТОРУЮ сессию поверх уже работающей первой.
+    _bootstrapConnectionState();
     // [НОВОЕ — по прямому требованию] Раньше список ключей перечитывался
     // ТОЛЬКО при открытии экрана и при нажатии "Подключить"/"Отключить" —
     // если приложение оставалось открытым дольше, чем оставшийся срок
@@ -126,6 +154,16 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _latencyTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (_tunnel.isConnected && !_latencyChecking) _measureLatency();
     });
+  }
+
+  /// [НОВОЕ] См. подробный комментарий в `initState()` выше — сначала
+  /// узнаём у нативной стороны реальное состояние VPN (важно именно
+  /// дождаться этого перед `_loadKeyState()`, а не запускать параллельно),
+  /// и только потом загружаем ключи/решаем про автоподключение.
+  Future<void> _bootstrapConnectionState() async {
+    await _tunnel.syncRuntimeState();
+    if (!mounted) return;
+    _loadKeyState();
   }
 
   @override
