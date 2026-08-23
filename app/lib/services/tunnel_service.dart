@@ -29,6 +29,13 @@ class TunnelService {
   // повторно и чтобы disconnect()/connect() знали, что нужно сначала снять
   // именно её, а не обычную сессию.
   bool _hardKillSwitchEngaged = false;
+  // [НОВОЕ] true, пока идёт одноразовая тестовая сессия realCheckProfile()
+  // — см. докстринг метода ниже. Нужен только для того, чтобы
+  // disconnect()/connect() не пытались стартовать поверх ещё не
+  // завершившейся тестовой сессии; вся изоляция публичного status от самой
+  // тестовой сессии сделана через временную отписку от стримов клиента
+  // прямо внутри realCheckProfile(), а не через этот флаг.
+  bool _probeInProgress = false;
   bool _userInitiatedDisconnect = false;
   String? _lastConnectionString;
   String? _lastPreferredHostName;
@@ -850,6 +857,149 @@ class TunnelService {
     );
   }
 
+  /// [НОВОЕ] Настоящая проверка ОДНОЙ локации подписки: реально поднимает
+  /// временную сессию sing-box в proxy-режиме (не запрашивает VPN-
+  /// разрешение, не трогает системный TUN) с конфигом именно этой локации,
+  /// делает через неё реальный HTTP-запрос и сразу гасит сессию — то же
+  /// самое, что делает Hiddify, и единственный способ достоверно отличить
+  /// рабочий VLESS/Reality-сервер от узла, где сам инбаунд выключен (см.
+  /// подробное объяснение архитектурного ограничения обычного TCP/TLS-
+  /// пинга в докстринге `_measureLivePing` в servers_screen.dart — TCP/TLS
+  /// до Reality в принципе не может этого показать, а это может, потому
+  /// что реально проводит VLESS/Reality-рукопожатие тем же ядром, что и
+  /// боевое подключение).
+  ///
+  /// [ВАЖНО] Использует тот же единственный нативный клиент (`_client`),
+  /// что и настоящее подключение — поэтому НИКОГДА не запускается, пока
+  /// уже поднят или поднимается боевой туннель (см. проверку
+  /// `isConnected`/`isBusy` ниже; вызывающий код в servers_screen.dart
+  /// обязан дополнительно не давать пользователю запускать проверку в это
+  /// время, но эта проверка здесь — последний рубеж защиты от гонки).
+  /// Пока идёт тестовая сессия, временно отписываемся от
+  /// `serviceStateStream`/`trafficStatsStream`/`faultStream` основного
+  /// клиента и подписываемся заново уже после того, как тестовая сессия
+  /// полностью погашена — иначе служебные события ЭТОЙ тестовой сессии
+  /// ("подключаюсь"/"подключено"/"отключаюсь") долетели бы до публичных
+  /// `status`/`lastError`, за которыми следит ConnectScreen, и на секунду
+  /// показали бы пользователю, что VPN подключился/отключился сам по себе,
+  /// хотя на самом деле это просто шла проверка сервера в фоне.
+  Future<RealCheckResult> realCheckProfile(
+      String connectionString, String hostName) async {
+    if (isConnected || isBusy || _probeInProgress) {
+      return const RealCheckResult(
+          ok: false,
+          error: 'Сейчас активен другой туннель или уже идёт проверка.');
+    }
+    await _ensureInitialized();
+
+    _ParsedVless? profile;
+    try {
+      final profiles = await _loadProfiles(connectionString);
+      profile = _matchProfile(profiles, hostName);
+    } catch (e) {
+      return RealCheckResult(ok: false, error: 'Подписка не распознана: $e');
+    }
+    if (profile == null) {
+      return const RealCheckResult(
+          ok: false, error: 'Локация не найдена в подписке.');
+    }
+
+    // [ВАЖНО] proxyOnly ОБЯЗАТЕЛЬНО true: только он добавляет в конфиг
+    // локальный inbound на 127.0.0.1:$_proxyPort (см. _buildSingBoxConfig
+    // ниже) — без него `_verifyInternetReachable(proxyOnly: true)` посылал
+    // бы HEAD-запрос в порт, который никто не слушает, и проверка ВСЕГДА
+    // проваливалась бы, даже для полностью рабочего сервера.
+    final config = _buildSingBoxConfig(
+      profile,
+      dnsProtection: false,
+      blockAds: false,
+      dpiBypass: false,
+      selectedPackages: const [],
+      proxyOnly: true,
+    );
+
+    _probeInProgress = true;
+    await _stateSub?.cancel();
+    await _statsSub?.cancel();
+    await _faultSub?.cancel();
+    _stateSub = null;
+    _statsSub = null;
+    _faultSub = null;
+
+    final sw = Stopwatch()..start();
+    try {
+      try {
+        await _client.checkConfig(config);
+      } catch (e) {
+        return RealCheckResult(
+            ok: false, error: 'Конфигурация отклонена ядром: $e');
+      }
+
+      bool upped = false;
+      final upCompleter = Completer<void>();
+      final probeSub = _client.serviceStateStream.listen((state) {
+        if (!upCompleter.isCompleted &&
+            _mapServiceState(state) == TunnelConnState.connected) {
+          upCompleter.complete();
+        }
+      });
+
+      try {
+        await _client.connect(SessionOptions(
+          config: config,
+          networkMode: NetworkMode.proxy,
+          notification: const NotificationConfig(
+            title: 'Проверка сервера VPNOnline',
+            showTrafficStats: false,
+            showStopButton: false,
+          ),
+        ));
+      } catch (e) {
+        await probeSub.cancel();
+        return RealCheckResult(
+            ok: false, error: 'Ядро sing-box не запустилось: $e');
+      }
+
+      try {
+        await upCompleter.future.timeout(const Duration(seconds: 8));
+        upped = true;
+      } on TimeoutException {
+        upped = false;
+      } finally {
+        await probeSub.cancel();
+      }
+
+      if (!upped) {
+        return const RealCheckResult(
+            ok: false, error: 'Таймаут запуска ядра sing-box');
+      }
+
+      final reachable = await _verifyInternetReachable(proxyOnly: true);
+      sw.stop();
+      if (!reachable) {
+        return const RealCheckResult(
+            ok: false, error: 'VLESS-сервис не отвечает на запрос');
+      }
+      return RealCheckResult(ok: true, latencyMs: sw.elapsedMilliseconds);
+    } finally {
+      try {
+        await _client.disconnect();
+      } catch (_) {}
+      // Та же пауза, что и в _settleAfterDisconnect() ниже — даём
+      // нативному сервису реально освободиться, прежде чем следующая
+      // проверка или обычное подключение попробуют стартовать заново.
+      await Future.delayed(const Duration(milliseconds: 350));
+      // Восстанавливаем обычные подписки на события основного клиента —
+      // ровно как делает _ensureInitialized() при первом запуске.
+      _stateSub = _client.serviceStateStream.listen(_applyServiceState);
+      _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
+      _faultSub = _client.faultStream.listen((error) {
+        lastError.value = error.toString();
+      });
+      _probeInProgress = false;
+    }
+  }
+
   /// [НОВОЕ] Останавливает текущую сессию и ждёт, пока сервис реально
   /// перейдёт в disconnected (не дольше 1.5 сек), прежде чем возвращать
   /// управление — вместо fire-and-forget `_client.disconnect()`, который
@@ -1587,6 +1737,18 @@ class SubscriptionCheckResult {
   final List<String> serverNames;
   final String? error;
   int get serverCount => serverNames.length;
+}
+
+/// [НОВОЕ] Результат `TunnelService.realCheckProfile()` — см. докстринг
+/// метода. `latencyMs` заполнен только когда `ok == true`; это полное
+/// время реального VLESS/Reality-рукопожатия + проверочного HTTP-запроса,
+/// а не просто TCP — поэтому не стоит напрямую сравнивать эти цифры с
+/// обычным `_livePing` на ServersScreen, они по-разному считаются.
+class RealCheckResult {
+  const RealCheckResult({required this.ok, this.latencyMs, this.error});
+  final bool ok;
+  final int? latencyMs;
+  final String? error;
 }
 
 enum TunnelConnState { disconnected, connecting, connected, disconnecting }
