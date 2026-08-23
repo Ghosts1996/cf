@@ -106,6 +106,25 @@ class _ServersScreenState extends State<ServersScreen> {
   // индикатора загрузки на конкретной карточке, не влияет на логику.
   String? _switchingToId;
 
+  // [НОВОЕ] Результаты НАСТОЯЩЕЙ проверки (см. TunnelService.realCheckProfile)
+  // — host_name -> результат последней реальной проверки. В отличие от
+  // `_livePing` (обычный TCP/TLS-замер, который для security=reality не
+  // может доказать, что VLESS-сервис реально работает — см. пометку
+  // "VLESS не проверен" в build() ниже), это НАСТОЯЩЕЕ VLESS/Reality-
+  // рукопожатие тем же ядром sing-box, что и боевое подключение — тот же
+  // принцип, что использует Hiddify. Запускается ТОЛЬКО по явному действию
+  // пользователя (кнопка "Реальная проверка"), а не в фоне каждые 25 с —
+  // потому что поднимает временную сессию через тот же единственный
+  // нативный клиент, что и боевой туннель, и поэтому обязана быть
+  // ПОСЛЕДОВАТЕЛЬНОЙ и НЕ пересекаться с реальным подключением (см.
+  // `_realCheckAll`).
+  final Map<String, RealCheckResult> _realCheckResults = {};
+  // true, пока идёт последовательный обход всех локаций в _realCheckAll().
+  bool _realChecking = false;
+  // host_name локации, которая проверяется прямо сейчас — для индикатора
+  // на конкретной карточке.
+  String? _realCheckingId;
+
   ({String? host, int? port, String? security, String? sni}) _pingEndpoint(
       String hostName, Map<String, dynamic> server) {
     final real = _realEndpoints[hostName];
@@ -298,6 +317,22 @@ class _ServersScreenState extends State<ServersScreen> {
   ///    сервера": для таких локаций честно показываем "нет данных для
   ///    пинга" (тот же -2, что уже используется, когда connect_host вообще
   ///    отсутствует), а не выдуманное число.
+  /// [ИСПРАВЛЕНО — реальная причина жалобы "Англия и Финляндия не работают,
+  /// а пинг в приложении всё равно 15-16 мс · отлично"] Раньше дедупликация
+  /// по общему адресу (`fallbackHostCounts`) применялась ТОЛЬКО к запасному
+  /// варианту (`_pingEndpoint` без данных из `_realEndpoints`) — если для
+  /// хоста УЖЕ был найден "реальный" VLESS-адрес, совпадение host:port с
+  /// другой локацией больше не проверялось вообще, при любом раскладе. На
+  /// практике часть панелей 3x-ui отдаёт несколько локаций подписки через
+  /// ОДИН и тот же фронтовой IP:порт (например, общий edge/резолвер перед
+  /// Reality-инбаундами) — тогда `_realEndpoints` у Англии/Финляндии и,
+  /// скажем, у Германии оказывается одним и тем же host:port. TCP/TLS до
+  /// такого общего фронта отвечает мгновенно и одинаково для всех локаций,
+  /// даже если сам VLESS-инбаунд конкретно Англии/Финляндии на бэкенде
+  /// выключен или не поднят — именно поэтому все карточки показывали почти
+  /// одинаковые "15-16 мс · отлично", хотя реально работали не все. Теперь
+  /// подсчёт "сколько локаций делят один и тот же адрес" считается ПО ВСЕМ
+  /// эндпоинтам сразу — и реальным, и запасным, — а не только по запасным.
   void _measureAllPings(List<dynamic> hosts) {
     if (!_realEndpointsComplete(hosts)) {
       unawaited(_loadActiveConnectionString());
@@ -305,32 +340,33 @@ class _ServersScreenState extends State<ServersScreen> {
 
     final endpoints = <String,
         ({String? host, int? port, String? security, String? sni})>{};
-    final fallbackHostCounts = <String, int>{};
+    final hostKeyCounts = <String, int>{};
     for (final s in hosts) {
       final host = s as Map<String, dynamic>;
       final hostName = host['host_name'] as String? ?? '';
       if (hostName.isEmpty) continue;
       final endpoint = _pingEndpoint(hostName, host);
       endpoints[hostName] = endpoint;
-      final usesRealEndpoint = _realEndpoints[hostName]?.host.isNotEmpty ?? false;
-      if (!usesRealEndpoint && endpoint.host != null && endpoint.host!.isNotEmpty) {
+      if (endpoint.host != null && endpoint.host!.isNotEmpty) {
         final key = '${endpoint.host}:${endpoint.port ?? 443}';
-        fallbackHostCounts[key] = (fallbackHostCounts[key] ?? 0) + 1;
+        hostKeyCounts[key] = (hostKeyCounts[key] ?? 0) + 1;
       }
     }
 
     for (final entry in endpoints.entries) {
       final hostName = entry.key;
       final endpoint = entry.value;
-      final usesRealEndpoint = _realEndpoints[hostName]?.host.isNotEmpty ?? false;
-      if (!usesRealEndpoint && endpoint.host != null && endpoint.host!.isNotEmpty) {
+      if (endpoint.host != null && endpoint.host!.isNotEmpty) {
         final key = '${endpoint.host}:${endpoint.port ?? 443}';
-        final sharedBy = fallbackHostCounts[key] ?? 0;
+        final sharedBy = hostKeyCounts[key] ?? 0;
         if (sharedBy > 1) {
-          debugPrint('[servers] $hostName делит запасной адрес $key ещё '
-              'с ${sharedBy - 1} локацией(ями) — это общий шлюз, а не её '
-              'персональный сервер, честный пинг для него посчитать '
-              'нельзя, показываю "нет данных"');
+          final usesRealEndpoint =
+              _realEndpoints[hostName]?.host.isNotEmpty ?? false;
+          debugPrint('[servers] $hostName делит адрес $key ещё с '
+              '${sharedBy - 1} локацией(ями) '
+              '(${usesRealEndpoint ? "это её реальный VLESS-адрес" : "запасной вариант"}) '
+              '— это общий фронт, а не персональный сервер этой локации, '
+              'честный пинг для него посчитать нельзя, показываю "нет данных"');
           if (mounted) setState(() => _livePing[hostName] = -2);
           continue;
         }
@@ -450,6 +486,108 @@ class _ServersScreenState extends State<ServersScreen> {
     }
   }
 
+  /// [НОВОЕ] Возвращает connection_string, по которому реально подключается
+  /// ConnectScreen прямо сейчас — та же логика приоритета, что и в
+  /// `_loadActiveConnectionString` выше (ручной ключ приоритетнее ключа
+  /// аккаунта), но без побочного эффекта записи в `_realEndpoints` — этот
+  /// метод используется отдельно `_realCheckAll()`, которому нужна сама
+  /// строка подписки, а не разобранные из неё адреса.
+  Future<String?> _resolveActiveConnectionString() async {
+    await ManualKeyStore.instance.ensureLoaded();
+    final manual = ManualKeyStore.instance.value?.trim();
+    if (manual != null && manual.isNotEmpty) return manual;
+    try {
+      final keys = await _api.getKeys();
+      final active = keys.cast<Map<String, dynamic>>().where((k) {
+        final expiryStr = k['expiry_date'] as String?;
+        final expiry = expiryStr != null ? DateTime.tryParse(expiryStr) : null;
+        return expiry != null && expiry.isAfter(DateTime.now());
+      }).toList()
+        ..sort((a, b) {
+          final ea = DateTime.tryParse(a['expiry_date'] as String? ?? '');
+          final eb = DateTime.tryParse(b['expiry_date'] as String? ?? '');
+          if (ea == null && eb == null) return 0;
+          if (ea == null) return 1;
+          if (eb == null) return -1;
+          return eb.compareTo(ea);
+        });
+      for (final key in active) {
+        final cs = key['connection_string'] as String?;
+        if (cs != null && cs.isNotEmpty) return cs;
+      }
+    } catch (_) {
+      // Нет сети/ключей — вызывающий код честно сообщит об этом пользователю.
+    }
+    return null;
+  }
+
+  /// [НОВОЕ] Настоящая проверка ВСЕХ локаций из текущего списка — по
+  /// очереди вызывает `TunnelService.realCheckProfile()` (реальное
+  /// VLESS/Reality-рукопожатие через временную сессию sing-box, см.
+  /// докстринг метода в tunnel_service.dart), а не просто TCP/TLS. Именно
+  /// это отличает "работает" от "отвечает на TCP", поэтому именно эта
+  /// проверка, а не обычный `_livePing`, честно покажет, что Англия/
+  /// Финляндия (или любая другая мёртвая Reality-локация) реально не
+  /// поднимает VLESS-сессию.
+  ///
+  /// [ВАЖНО] Строго ПОСЛЕДОВАТЕЛЬНО, один сервер за раз — `realCheckProfile`
+  /// использует тот же единственный нативный клиент, что и боевое
+  /// подключение, параллельный запуск нескольких проверок разрушил бы друг
+  /// друга. Полностью блокируется, если туннель сейчас поднят или занят
+  /// (`_tunnel.isConnected || _tunnel.isBusy`) — реальная проверка на время
+  /// поднимает и гасит ВРЕМЕННУЮ сессию через тот же движок, поэтому не
+  /// может выполняться одновременно с боевым VPN, не разрывая его. Также
+  /// использует общий флаг `_switching`, чтобы авто-балансировка и ручной
+  /// тап по серверу (см. `_maybeApplyAutoBalance`/`_onServerTapped`) не
+  /// попытались тронуть тот же `_client` во время проверки.
+  Future<void> _realCheckAll() async {
+    if (_realChecking || _switching || _hosts == null || _hosts!.isEmpty) {
+      return;
+    }
+    if (_tunnel.isConnected || _tunnel.isBusy) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Сначала отключитесь от VPN — реальная проверка на время поднимает и гасит тестовое соединение тем же движком.'),
+        ));
+      }
+      return;
+    }
+
+    final connectionString = await _resolveActiveConnectionString();
+    if (connectionString == null || connectionString.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Нет активного ключа с подпиской — нечего проверять.'),
+        ));
+      }
+      return;
+    }
+
+    setState(() {
+      _realChecking = true;
+      _switching = true; // тот же общий замок, что и у переключения туннеля
+    });
+
+    for (final s in _hosts!) {
+      if (!mounted) break;
+      final host = s as Map<String, dynamic>;
+      final id = host['host_name'] as String? ?? '';
+      if (id.isEmpty) continue;
+      setState(() => _realCheckingId = id);
+      final result = await _tunnel.realCheckProfile(connectionString, id);
+      if (!mounted) break;
+      setState(() => _realCheckResults[id] = result);
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _realChecking = false;
+      _switching = false;
+      _realCheckingId = null;
+    });
+  }
+
   /// [ИСПРАВЛЕНО — сама жалоба "автопереключение не работает"] Раньше эта
   /// функция при включённой авто-балансировке только меняла "предпочтение"
   /// (`_selectedId`/`SelectedServer`/LocalPrefs) — то, какой сервер
@@ -481,6 +619,16 @@ class _ServersScreenState extends State<ServersScreen> {
       final ping = _livePing[id];
       if (ping == null || ping < 0)
         continue; // ещё не измерен / недоступен / нет данных
+      // [НОВОЕ] Reality-профили не участвуют в автовыборе "лучшего"
+      // сервера по пингу — см. пометку "VLESS не проверен" в build() выше:
+      // низкий TCP-пинг до Reality-узла не гарантирует, что сам VLESS-сервис
+      // за ним поднят, поэтому опираться на него при автоматическом
+      // переключении УЖЕ РАБОЧЕГО туннеля нельзя — можно случайно
+      // переключиться на красиво "быстрый", но фактически мёртвый сервер.
+      // Ручной выбор пользователем по-прежнему работает для любых локаций —
+      // там подстраховывает переподключение с перебором серверов в
+      // TunnelService.connect().
+      if (_realEndpoints[id]?.security == 'reality') continue;
       if (bestPing == null || ping < bestPing) {
         bestPing = ping;
         bestId = id;
@@ -727,6 +875,61 @@ class _ServersScreenState extends State<ServersScreen> {
               style: TextStyle(fontSize: 10, color: AppColors.textDim),
             ),
             const SizedBox(height: 10),
+            // [НОВОЕ] Кнопка настоящей проверки — см. докстринг `_realCheckAll`
+            // выше. Отдельно от автоматического TCP-пинга, потому что
+            // требует временно разорвать/не иметь боевое соединение и идёт
+            // последовательно по всем локациям (несколько секунд на
+            // сервер), поэтому не может быть фоновым таймером — это
+            // намеренно ручное действие, а не пассивная оценка.
+            NeonCard(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Реальная проверка серверов',
+                            style: TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 2),
+                        Text(
+                          _tunnel.isConnected || _tunnel.isBusy
+                              ? 'сначала отключитесь от VPN'
+                              : (_realChecking
+                                  ? 'проверяю ${_realCheckingId ?? "..."}'
+                                  : 'реально поднимает VLESS к каждому серверу — точнее пинга'),
+                          style: const TextStyle(
+                              fontSize: 10, color: AppColors.textDim),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_realChecking)
+                    const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: AppColors.violetGlow),
+                    )
+                  else
+                    GestureDetector(
+                      onTap: _realCheckAll,
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                        child: Text('Проверить',
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.violetGlow)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
             if (_loading)
               const Padding(
                   padding: EdgeInsets.all(24),
@@ -753,8 +956,24 @@ class _ServersScreenState extends State<ServersScreen> {
                 final isSelected = id == _selectedId;
                 final isFav = _favorites.contains(id);
                 final ping = _livePing[id];
-                final String pingLabel;
-                final Color pingColor;
+                // [НОВОЕ — честность пинга для security=reality] Как прямо
+                // объясняет докстринг `_measureLivePing` выше, успешный
+                // TCP/TLS до Reality-узла НЕ доказывает, что VLESS-инбаунд
+                // за ним реально работает (панель 3x-ui может быть
+                // выключена — Reality-сервер в этом случае просто честно
+                // маскируется под приманку и всё равно отвечает на
+                // рукопожатие). Раньше такие узлы попадали в те же пороги
+                // "< 80 мс -> отлично", что и полностью проверяемые
+                // TLS/plain-серверы — из-за этого мёртвая локация (как
+                // Англия/Финляндия на скриншотах) могла показывать "16 мс ·
+                // отлично" наравне с реально работающими. Теперь для
+                // Reality-профилей число показывается как приблизительная
+                // СЕТЕВАЯ задержка, без обещания "отлично", и никогда не
+                // подсвечивается зелёным как гарантированно рабочий сервер.
+                final isRealityOnly =
+                    _realEndpoints[id]?.security == 'reality';
+                String pingLabel;
+                Color pingColor;
                 if (ping == null) {
                   pingLabel = 'измеряю...';
                   pingColor = AppColors.textDim;
@@ -764,6 +983,9 @@ class _ServersScreenState extends State<ServersScreen> {
                 } else if (ping < 0) {
                   pingLabel = 'недоступен';
                   pingColor = AppColors.danger;
+                } else if (isRealityOnly) {
+                  pingLabel = '~$ping мс · сеть (VLESS не проверен)';
+                  pingColor = AppColors.warning;
                 } else if (ping < 80) {
                   pingLabel = '$ping мс · отлично';
                   pingColor = AppColors.success;
@@ -773,6 +995,30 @@ class _ServersScreenState extends State<ServersScreen> {
                 } else {
                   pingLabel = '$ping мс · медленно';
                   pingColor = AppColors.danger;
+                }
+                // [НОВОЕ] Результат НАСТОЯЩЕЙ проверки (см. _realCheckAll/
+                // TunnelService.realCheckProfile) достовернее любой оценки
+                // по TCP/TLS — если он есть, полностью перекрывает надпись
+                // выше: это не "вероятно работает", а подтверждённый факт
+                // (реально поднятая VLESS-сессия) или подтверждённый отказ
+                // (сервис на порту не откликнулся на настоящее
+                // VLESS/Reality-рукопожатие).
+                if (_realCheckingId == id) {
+                  pingLabel = 'проверяю по-настоящему...';
+                  pingColor = AppColors.textDim;
+                } else {
+                  final realCheck = _realCheckResults[id];
+                  if (realCheck != null) {
+                    if (realCheck.ok) {
+                      pingLabel =
+                          'работает · ${realCheck.latencyMs} мс (проверено)';
+                      pingColor = AppColors.success;
+                    } else {
+                      pingLabel =
+                          'не работает (${realCheck.error ?? "нет ответа"})';
+                      pingColor = AppColors.danger;
+                    }
+                  }
                 }
                 return ServerPill(
                   code: code,
