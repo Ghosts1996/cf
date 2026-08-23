@@ -125,6 +125,50 @@ class _ServersScreenState extends State<ServersScreen> {
   // на конкретной карточке.
   String? _realCheckingId;
 
+  // [НОВОЕ — по прямому требованию: "чтобы при включённом VPN можно было
+  // пинговать сервера и они показывали такие же значения, как у Hiddify"]
+  // `_livePing` (см. выше) — это TCP/TLS-пинг МИМО туннеля, и для
+  // security=reality он честно помечен как "сеть (VLESS не проверен)" —
+  // подменить его настоящим замером ЧЕРЕЗ VLESS для ЛЮБОЙ локации в списке,
+  // оставаясь подключённым, архитектурно нельзя: `flutter_singbox_client`
+  // держит только ОДНУ активную сессию ядра одновременно (та же причина,
+  // по которой "Реальная проверка" ниже требует сначала отключиться — см.
+  // её докстринг). Но для сервера, на котором туннель ФАКТИЧЕСКИ поднят
+  // прямо сейчас, честный замер через реальный VLESS-канал уже существует —
+  // тот же `TunnelService.connectedDelayMs()`, что показывает пинг на
+  // главном экране. Показываем именно его для этой ОДНОЙ, текущей локации,
+  // вместо TCP-оценки — ровно то число, которое отражает реальную задержку
+  // тем же способом, что и Hiddify.
+  int? _connectedTunnelPing;
+  bool _measuringConnectedTunnelPing = false;
+
+  Future<void> _measureConnectedTunnelPing() async {
+    if (!_tunnel.isConnected) {
+      if (mounted && _connectedTunnelPing != null) {
+        setState(() => _connectedTunnelPing = null);
+      }
+      return;
+    }
+    if (_measuringConnectedTunnelPing) return;
+    _measuringConnectedTunnelPing = true;
+    try {
+      final ms = await _tunnel.connectedDelayMs();
+      if (mounted) setState(() => _connectedTunnelPing = ms);
+    } finally {
+      _measuringConnectedTunnelPing = false;
+    }
+  }
+
+  /// Реагирует на подключение/отключение туннеля, пока этот экран открыт —
+  /// без этого реальный пинг текущего сервера появился/пропал бы только на
+  /// следующем тике `_pingRefreshTimer` (раз в 25 секунд), а не сразу после
+  /// нажатия "Подключить"/"Отключить" на главном экране.
+  void _onTunnelStatusChangedForPing() {
+    if (!mounted) return;
+    setState(() {}); // обновить, какая карточка сейчас считается "текущей"
+    unawaited(_measureConnectedTunnelPing());
+  }
+
   ({String? host, int? port, String? security, String? sni}) _pingEndpoint(
       String hostName, Map<String, dynamic> server) {
     final real = _realEndpoints[hostName];
@@ -750,12 +794,21 @@ class _ServersScreenState extends State<ServersScreen> {
     _pingRefreshTimer = Timer.periodic(_pingRefreshInterval, (_) {
       if (_hosts == null || _hosts!.isEmpty) return;
       _measureAllPings(_hosts!);
+      unawaited(_measureConnectedTunnelPing());
     });
+    // [НОВОЕ] См. докстринг `_connectedTunnelPing` выше — обновляет реальный
+    // пинг текущего сервера сразу при подключении/отключении, а не только
+    // раз в 25 секунд по таймеру.
+    _tunnel.status.addListener(_onTunnelStatusChangedForPing);
+    _tunnel.connectedServerName.addListener(_onTunnelStatusChangedForPing);
+    unawaited(_measureConnectedTunnelPing());
   }
 
   @override
   void dispose() {
     _pingRefreshTimer?.cancel();
+    _tunnel.status.removeListener(_onTunnelStatusChangedForPing);
+    _tunnel.connectedServerName.removeListener(_onTunnelStatusChangedForPing);
     super.dispose();
   }
 
@@ -972,9 +1025,30 @@ class _ServersScreenState extends State<ServersScreen> {
                 // подсвечивается зелёным как гарантированно рабочий сервер.
                 final isRealityOnly =
                     _realEndpoints[id]?.security == 'reality';
+                // [НОВОЕ] Для сервера, на котором туннель реально поднят
+                // прямо сейчас, используем настоящий замер через VLESS (см.
+                // докстринг `_connectedTunnelPing` выше) вместо TCP-оценки —
+                // именно это число сопоставимо с тем, что показывает Hiddify.
+                final isCurrentlyConnected =
+                    _tunnel.isConnected && id == _tunnel.connectedServerName.value;
                 String pingLabel;
                 Color pingColor;
-                if (ping == null) {
+                if (isCurrentlyConnected) {
+                  final tunnelPing = _connectedTunnelPing;
+                  if (tunnelPing == null) {
+                    pingLabel = 'измеряю через VLESS...';
+                    pingColor = AppColors.textDim;
+                  } else if (tunnelPing < 80) {
+                    pingLabel = '$tunnelPing мс · отлично (через VLESS)';
+                    pingColor = AppColors.success;
+                  } else if (tunnelPing < 180) {
+                    pingLabel = '$tunnelPing мс · через VLESS';
+                    pingColor = AppColors.warning;
+                  } else {
+                    pingLabel = '$tunnelPing мс · медленно (через VLESS)';
+                    pingColor = AppColors.danger;
+                  }
+                } else if (ping == null) {
                   pingLabel = 'измеряю...';
                   pingColor = AppColors.textDim;
                 } else if (ping == -2) {
