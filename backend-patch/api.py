@@ -10,6 +10,7 @@ import hmac
 import urllib.request
 import urllib.error
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from functools import wraps
 import bcrypt
@@ -33,6 +34,12 @@ from shop_bot.modules import xui_api
 logger = logging.getLogger(__name__)
 
 api_bp = Blueprint('api_v1', __name__, url_prefix='/api/v1')
+
+# [НОВОЕ] См. api_user_keys() ниже — сколько секунд максимум ждать ответ
+# ОДНОЙ панели 3x-ui при параллельном опросе ключей пользователя, прежде
+# чем оставить connection_string для этого конкретного ключа пустым и
+# отдать ответ дальше, не блокируя остальные ключи пользователя.
+_XUI_QUERY_TIMEOUT = 8
 
 @api_bp.before_request
 def handle_options():
@@ -669,20 +676,49 @@ def api_claim_trial():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _fetch_key_connection_string(k):
+    """Опрос одной 3x-ui панели за connection_string одного ключа.
+    Вынесено в отдельную функцию, чтобы можно было гонять её в пуле
+    потоков (см. api_user_keys ниже) — сама логика не менялась ни на йоту."""
+    try:
+        details = xui_api.get_key_details_from_host_sync(k)
+        return details.get('connection_string') or '' if details else ''
+    except Exception:
+        return ''
+
+
 @api_bp.route('/user/keys', methods=['GET'])
 @require_api_key
 @require_user_auth
 def api_user_keys():
     keys = get_user_keys(request.user_id)
-    for k in keys:
-        try:
-            details = xui_api.get_key_details_from_host_sync(k)
-            if details:
-                k['connection_string'] = details.get('connection_string') or ''
-            else:
-                k['connection_string'] = ''
-        except Exception:
-            k['connection_string'] = ''
+    # [ИСПРАВЛЕНО — существенный вклад в жалобу "приложение очень долго
+    # грузится"] Раньше для КАЖДОГО ключа пользователя панель 3x-ui
+    # опрашивалась синхронно и ПОСЛЕДОВАТЕЛЬНО, одна за другой, без
+    # какого-либо таймаута на весь цикл — это ровно тот эндпоинт
+    # (/user/keys), который дёргают ConnectScreen, KeysScreen, BalanceScreen,
+    # ServersScreen и MenuScreen в мобильном приложении при каждом заходе на
+    # соответствующую вкладку. Если у пользователя несколько ключей на
+    # разных хостах (обычная ситуация — GLOBAL bundle выдаёт ключ сразу на
+    # все локации) и хотя бы одна панель 3x-ui в этот момент недоступна или
+    # просто медленно отвечает, весь ответ /user/keys вставал на паузу на
+    # время ответа САМОЙ медленной панели, умноженное на число ключей —
+    # и клиент видел это как долгий спиннер загрузки независимо от качества
+    # его собственного мобильного интернета. Опрашиваем все хосты
+    # ПАРАЛЛЕЛЬНО через пул потоков (сеть — I/O-bound задача, GIL здесь не
+    # мешает) и ограничиваем ожидание каждого результата, чтобы одна
+    # зависшая панель не блокировала ответ пользователю дольше
+    # _XUI_QUERY_TIMEOUT секунд — как и раньше, при любой ошибке или
+    # таймауте конкретного ключа connection_string для него просто пустой,
+    # это не приводит к ошибке всего запроса.
+    if keys:
+        with ThreadPoolExecutor(max_workers=min(len(keys), 8)) as pool:
+            futures = {pool.submit(_fetch_key_connection_string, k): k for k in keys}
+            for future, k in futures.items():
+                try:
+                    k['connection_string'] = future.result(timeout=_XUI_QUERY_TIMEOUT)
+                except Exception:
+                    k['connection_string'] = ''
     return jsonify({
         "ok": True,
         "keys": keys
@@ -1168,4 +1204,3 @@ def verify_telegram_webapp_data(init_data: str, bot_token: str) -> dict | None:
     except Exception as e:
         logger.error(f"Error verifying Telegram WebApp initData: {e}")
     return None
-
