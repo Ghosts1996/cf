@@ -197,6 +197,14 @@ class _ConnectScreenState extends State<ConnectScreen> {
     setState(() => _loadingKey = true);
     try {
       final keys = await _api.getKeys();
+      // [ИСПРАВЛЕНО] Раньше здесь не было проверки `mounted` после
+      // `await` — если пользователь успевал уйти с этого экрана (или
+      // приложение к этому моменту уже сворачивалось) до того, как
+      // `getKeys()` ответил, следующий `setState()` падал с "setState()
+      // called after dispose()". Редкий, но реальный краш именно на
+      // плохой сети (запрос идёт дольше обычного — шанс уйти со экрана за
+      // это время выше).
+      if (!mounted) return;
       final active = keys.cast<Map<String, dynamic>>().where(_isActive).toList();
       // [ИСПРАВЛЕНО] Раньше бралcя `active.first` — первый активный ключ в
       // том порядке, в котором его отдал бэкенд (обычно по дате покупки,
@@ -238,11 +246,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
         }
       }
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _keyError = 'Не удалось проверить статус ключа: $e';
         _loadingKey = false;
       });
     }
+    if (!mounted) return;
     _measureLatency();
   }
 
@@ -381,6 +391,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
       setState(() => _connecting = true);
       await _tunnel.disconnect();
       _connectedKeyId = null;
+      // [ИСПРАВЛЕНО] `disconnect()` асинхронный — экран мог быть закрыт,
+      // пока он выполнялся; без этой проверки следующий `setState()` упал
+      // бы с "setState() called after dispose()".
+      if (!mounted) return;
       setState(() => _connecting = false);
       _measureLatency();
       return;
