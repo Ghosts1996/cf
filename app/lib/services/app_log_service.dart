@@ -96,21 +96,40 @@ class AppLogService {
     await applyRetention();
   }
 
+  // [ИСПРАВЛЕНО] `log()` делает "прочитать весь список -> дописать запись
+  // -> сохранить весь список" — классический read-modify-write. main.dart
+  // слушает сразу два независимых ValueNotifier туннеля (status и
+  // lastError) и оба могут вызвать `log()` практически в одну и ту же
+  // миллисекунду (например, "отключение" и последовавшая за ним ошибка).
+  // Без сериализации второй вызов читает список ДО того, как первый успел
+  // его перезаписать, и в результате один из двух вызовов `_writeAll`
+  // затирает результат другого — одна из двух записей молча пропадает из
+  // журнала. Цена невысокая (это просто диагностический лог, не влияет на
+  // сам VPN), но раз уж экран "Хранение логов" существует, записи не
+  // должны теряться на ровном месте. Простая сериализация через цепочку
+  // Future — каждый следующий `log()` ждёт завершения предыдущего перед
+  // тем, как прочитать список заново.
+  Future<void> _writeChain = Future.value();
+
   /// Добавляет запись в журнал. Безопасна для вызова откуда угодно —
   /// ошибки чтения/записи хранилища не пробрасываются наружу, чтобы сбой
   /// логирования никогда не мешал основной функциональности приложения.
-  Future<void> log(String message, {AppLogLevel level = AppLogLevel.info}) async {
-    try {
-      final entries = await _readAll();
-      entries.add(AppLogEntry(timestamp: DateTime.now(), message: message, level: level));
-      final trimmed = entries.length > _maxEntries
-          ? entries.sublist(entries.length - _maxEntries)
-          : entries;
-      await _writeAll(trimmed);
-      await applyRetention();
-    } catch (_) {
-      // Лог — вспомогательная функция, не критичная для работы VPN.
-    }
+  Future<void> log(String message, {AppLogLevel level = AppLogLevel.info}) {
+    final next = _writeChain.then((_) async {
+      try {
+        final entries = await _readAll();
+        entries.add(AppLogEntry(timestamp: DateTime.now(), message: message, level: level));
+        final trimmed = entries.length > _maxEntries
+            ? entries.sublist(entries.length - _maxEntries)
+            : entries;
+        await _writeAll(trimmed);
+        await applyRetention();
+      } catch (_) {
+        // Лог — вспомогательная функция, не критичная для работы VPN.
+      }
+    });
+    _writeChain = next;
+    return next;
   }
 
   /// Все записи, новые сверху, уже с применённым сроком хранения.
