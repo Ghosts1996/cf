@@ -28,7 +28,11 @@ void main() {
     apiKey: const String.fromEnvironment('SHOPBOT_API_KEY'),
     baseUrl: const String.fromEnvironment(
       'API_BASE_URL',
-      defaultValue: 'https://api.vpnonline.shop/api/v1',
+      // [ИЗМЕНЕНО] домен API сменился с api.vpnonline.shop на
+      // api.vpnonline.su — это только запасное значение на случай сборки
+      // без --dart-define=API_BASE_URL=...; реальная сборка через
+      // GitHub Actions берёт адрес из секрета API_BASE_URL (см. ниже).
+      defaultValue: 'https://api.vpnonline.su/api/v1',
     ),
   );
   // [ИСПРАВЛЕНО] Раньше цвет статус-бара/шторки нигде не задавался —
