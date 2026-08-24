@@ -19,7 +19,7 @@ Telegram-ботом/сайтом продаж подписок (проект `sh
 
 Приложение обращается **напрямую** к реальному Flask API бота
 (`shopbot/src/shop_bot/webhook_server/api.py`, префикс `/api/v1/...`,
-базовый адрес — `https://api.vpnonline.shop/api/v1`). Отдельного
+базовый адрес — `https://api.vpnonline.su/api/v1`). Отдельного
 промежуточного сервера у приложения нет.
 
 В репозитории также лежит каталог `archive-old-fastapi-bridge/` — более
