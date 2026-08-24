@@ -13,9 +13,9 @@ import 'services/app_log_service.dart';
 import 'services/tunnel_service.dart';
 
 void main() {
-  // [ИСПРАВЛЕНО — критично перед публикацией репозитория] 1
- Теперь defaultValue пуст —
-  // ключ ОБЯЗАН передаваться через --dart-define=SHOPBOT_API_KEY=... при
+  // [ИСПРАВЛЕНО — критично перед публикацией репозитория] Теперь
+  // defaultValue пуст — ключ ОБЯЗАН передаваться через
+  // --dart-define=SHOPBOT_API_KEY=... при
   // сборке (см. .github/workflows/build-android.yml, секрет уже там).
   // Если ключ не передан — приложение получит apiKey: '', и запросы к API
   // будут падать с явной ошибкой авторизации сразу, а не тихо "работать"
