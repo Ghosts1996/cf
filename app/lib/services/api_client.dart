@@ -10,8 +10,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// реального api.py из твоего бэкапа, а не предположение.
 ///
 /// [ПОДТВЕРЖДЕНО ТОБОЙ] Flask-API (/api/v1/...) висит на том же хосте,
-/// что и админ-панель — api.vpnonline.shop. Базовый URL ниже больше не
-/// предположение.
+/// что и админ-панель — api.vpnonline.su (домен сменился с
+/// api.vpnonline.shop). Базовый URL ниже больше не предположение.
 class ApiClient {
   ApiClient._({required this.baseUrl, required this.apiKey});
 
@@ -19,7 +19,7 @@ class ApiClient {
 
   /// Вызвать ОДИН раз при старте приложения (main.dart), до runApp —
   /// см. пример инициализации в конце файла.
-  static void init({required String apiKey, String baseUrl = 'https://api.vpnonline.shop/api/v1'}) {
+  static void init({required String apiKey, String baseUrl = 'https://api.vpnonline.su/api/v1'}) {
     _instance = ApiClient._(baseUrl: baseUrl, apiKey: apiKey);
   }
 
