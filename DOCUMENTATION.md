@@ -39,7 +39,7 @@ sing-box-туннель. Оплата баланса — YooKassa и CryptoBot. 
 
 Проект — не with-scratch разработка, а результат нескольких итераций
 аудита и правок поверх уже существующего рабочего сервиса
-(`api.vpnonline.shop`, бот в Telegram, панели 3x-ui). Отсюда обилие
+(`api.vpnonline.su`, бот в Telegram, панели 3x-ui). Отсюда обилие
 комментариев в коде вида «было / стало / доказательство» — это
 осознанный стиль проекта, документирующий, что именно было проверено по
 реальному бэкенду, а что — предположение.
@@ -50,7 +50,7 @@ sing-box-туннель. Оплата баланса — YooKassa и CryptoBot. 
 ┌─────────────────────┐      HTTPS + X-API-Key + Bearer JWT      ┌──────────────────────────┐
 │  Flutter-приложение  │ ───────────────────────────────────────▶│  shopbot (Flask API)      │
 │  (этот репозиторий,  │◀─────────────────────────────────────── │  /api/v1/...              │
-│  app/)               │        JSON (см. раздел 6)               │  api.vpnonline.shop        │
+│  app/)               │        JSON (см. раздел 6)               │  api.vpnonline.su           │
 └──────────┬───────────┘                                          └──────────┬────────────────┘
            │                                                                  │
            │ VLESS+Reality (полученный из /user/keys                         │ управляет
@@ -176,7 +176,7 @@ sing-box-туннель. Оплата баланса — YooKassa и CryptoBot. 
 
 ## Backend-контракт API
 
-Базовый URL: `https://api.vpnonline.shop/api/v1` (передаётся через
+Базовый URL: `https://api.vpnonline.su/api/v1` (передаётся через
 `--dart-define=API_BASE_URL=...`, дефолт в коде совпадает).
 Все запросы — заголовок `X-API-Key: <SHOPBOT_API_KEY>`; после логина —
 дополнительно `Authorization: Bearer <JWT>`.
@@ -255,7 +255,7 @@ Kill Switch: при обрыве соединения не по инициати
 | Переменная | Где используется | Как передаётся | Критичность |
 |---|---|---|---|
 | `SHOPBOT_API_KEY` | Flutter-клиент **и** backend (`.env` бота) | `--dart-define` при сборке (GitHub Secret → CI); **не** хардкожен в исходниках (см. Troubleshooting/расхождения) | Низкая как «секрет» — физически виден в собранном APK после декомпиляции; отсекает случайных ботов, не целевую атаку. Настоящая защита пользователя — JWT-токен сессии |
-| `API_BASE_URL` | Flutter-клиент | `--dart-define`, дефолт в коде — `https://api.vpnonline.shop/api/v1` | Не секрет |
+| `API_BASE_URL` | Flutter-клиент | `--dart-define`, дефолт в коде — `https://api.vpnonline.su/api/v1` | Не секрет |
 | `ANDROID_KEYSTORE_BASE64` (base64), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | Только CI (подпись релизного APK) | GitHub Secrets → `.github/workflows/build-android.yml` | Высокая — компрометация позволяет подписывать поддельные обновления от имени приложения |
 | `YOOKASSA_SHOP_ID`, `YOOKASSA_SECRET_KEY`, `CRYPTOBOT_TOKEN` | Только backend (shopbot), читаются из таблицы `bot_settings` через `database.py` | `backend-patch/set_payment_settings.py` (разово, локально) или админ-панель бота в Telegram | **Высокая** — платёжные секреты. Flutter-клиенту и CI этого репозитория не нужны вообще |
 | `GMAIL_USER`, `GMAIL_APP_PASSWORD` | Только backend | `.env` бота (см. `ENV_ADDITIONS.env`) | Высокая — доступ к почтовому ящику рассылки кодов |
@@ -339,7 +339,7 @@ dart run flutter_launcher_icons     # один раз, генерирует фи
 # (эмулятор для VPN-функциональности не подходит, см. NATIVE_SETUP.md):
 flutter run -d android \
   --dart-define=SHOPBOT_API_KEY=<ключ из .env бота> \
-  --dart-define=API_BASE_URL=https://api.vpnonline.shop/api/v1
+  --dart-define=API_BASE_URL=https://api.vpnonline.su/api/v1
 ```
 
 Без `SHOPBOT_API_KEY` приложение соберётся и запустится, но любой
