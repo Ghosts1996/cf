@@ -91,13 +91,29 @@ jobs:
       # обёртка nick-fields/retry делает до 3 попыток с паузой 30 секунд
       # между ними, за которые лимит на стороне Maven Central/Gradle
       # Plugin Portal успевает сброситься.
+      # [ИСПРАВЛЕНО — реальная причина "приложение будто всё ещё ходит на
+      # старый API" после смены домена api.vpnonline.shop -> api.vpnonline.su]
+      # Раньше сюда передавался --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
+      # — значение секрета ПОЛНОСТЬЮ перекрывает дефолт из кода
+      # (String.fromEnvironment в main.dart), это так и задумано в Dart. Домен
+      # в коде поправили на api.vpnonline.su, а секрет API_BASE_URL в
+      # настройках репозитория остался старым (секреты не меняются сами при
+      # правке кода) — поэтому реально собранный APK всё это время тянул
+      # старый, уже мёртвый api.vpnonline.shop, хотя в исходниках стоял
+      # правильный su-домен. Отсюда и "Сервер не отвечает" на "Серверах":
+      # приложение стучалось не туда физически, а не просто получало
+      # ошибку авторизации, как в предыдущем баге.
+      # Раз этот адрес и так не секрет (см. DOCUMENTATION.md, таблица
+      # переменных), убираем его из --dart-define вовсе: теперь единственный
+      # источник правды — дефолт в main.dart, никакого секрета, который
+      # можно забыть обновить, для домена больше нет.
       - name: Build debug APK
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 30
           max_attempts: 3
           retry_wait_seconds: 30
-          command: cd app && flutter build apk --debug --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+          command: cd app && flutter build apk --debug --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -122,7 +138,7 @@ jobs:
           timeout_minutes: 30
           max_attempts: 3
           retry_wait_seconds: 30
-          command: cd app && if [ -f android/keystore/keystore.jks ]; then flutter build apk --release --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; else echo "Keystore not found, building unsigned release APK" && flutter build apk --release --no-shrink --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }} --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; fi
+          command: cd app && if [ -f android/keystore/keystore.jks ]; then flutter build apk --release --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; else echo "Keystore not found, building unsigned release APK" && flutter build apk --release --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; fi
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
