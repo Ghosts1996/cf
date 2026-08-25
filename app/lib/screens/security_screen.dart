@@ -32,16 +32,18 @@ class SecurityScreen extends StatefulWidget {
 class _SecurityScreenState extends State<SecurityScreen> {
   final _prefs = LocalPrefs.instance;
 
-  // [ИСПРАВЛЕНО] Все тумблеры этого экрана по умолчанию выключены — до
-  // первого явного действия пользователя ничего не включается само.
+  // [ИЗМЕНЕНО] Дефолты подогнаны под макет: Kill Switch/Строгий режим/Обход
+  // LAN/Агрессивное переподключение — выключены; Защита от DNS-протечек,
+  // Fake IP, Блокировка рекламы и Mux — включены по умолчанию (Mux с
+  // протоколом SMux).
   bool _killSwitch = false;
   bool _strictKillSwitch = false;
-  bool _dnsProtection = false;
-  bool _blockAds = false;
+  bool _dnsProtection = true;
+  bool _blockAds = true;
   bool _bypassLan = false;
-  bool _muxEnabled = false;
-  String _muxProtocol = 'h2mux';
-  bool _fakeIpDns = false;
+  bool _muxEnabled = true;
+  String _muxProtocol = 'smux';
+  bool _fakeIpDns = true;
   // [НОВОЕ] "Агрессивное переподключение" — настраиваемое число попыток
   // восстановления соединения. false = 3 попытки (мягко,
   // экономит батарею при долгом отсутствии сети), true = 8 попыток
@@ -74,17 +76,18 @@ class _SecurityScreenState extends State<SecurityScreen> {
 
   Future<void> _load() async {
     final results = await Future.wait([
-      // [ИСПРАВЛЕНО] По умолчанию выключено — совпадает с fallback в
-      // tunnel_service.dart, чтобы UI не расходился с реальным конфигом,
-      // и пользователь сам решает, что включать.
+      // [ИЗМЕНЕНО] fallback приведён в соответствие с макетом — те же
+      // значения, что и в стартовых полях State выше, чтобы UI не
+      // расходился с реальным конфигом при первом запуске (до того как
+      // пользователь что-то сохранил в SharedPreferences).
       _prefs.getBool(PrefKeys.killSwitch, fallback: false),
       _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
-      _prefs.getBool(PrefKeys.dnsProtection, fallback: false),
-      _prefs.getBool(PrefKeys.blockAds, fallback: false),
+      _prefs.getBool(PrefKeys.dnsProtection, fallback: true),
+      _prefs.getBool(PrefKeys.blockAds, fallback: true),
       _prefs.getInt(PrefKeys.reconnectAttempts, fallback: 3),
       _prefs.getBool(PrefKeys.bypassLan, fallback: false),
-      _prefs.getBool(PrefKeys.muxEnabled, fallback: false),
-      _prefs.getBool(PrefKeys.fakeIpDns, fallback: false),
+      _prefs.getBool(PrefKeys.muxEnabled, fallback: true),
+      _prefs.getBool(PrefKeys.fakeIpDns, fallback: true),
     ]);
     final savedMuxProtocol = await _prefs.getString(PrefKeys.muxProtocol);
     // [НОВОЕ] Отдельным запросом, как и savedMuxProtocol выше — не трогает
@@ -103,7 +106,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
       _fakeIpDns = results[7] as bool;
       _muxProtocol = (savedMuxProtocol != null && _muxProtocolLabels.containsKey(savedMuxProtocol))
           ? savedMuxProtocol
-          : 'h2mux';
+          : 'smux';
       _logRetentionDays = _logRetentionLabels.containsKey(savedLogRetentionDays)
           ? savedLogRetentionDays
           : AppLogService.defaultRetentionDays;
