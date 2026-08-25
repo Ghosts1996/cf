@@ -71,6 +71,12 @@ dependencies:
   # поддерживает открытие именно экрана VPN-настроек (AppSettingsType.vpn),
   # это подтверждено в changelog пакета.
   app_settings: ^5.1.1
+  # [НОВОЕ] Реальная реализация тумблера "Умное подключение на публичном
+  # Wi-Fi" (settings_screen.dart) — раньше тумблер только сохранял
+  # значение в LocalPrefs и ни на что не влиял. Нужен, чтобы приложение
+  # само узнавало о смене сети (Wi-Fi/мобильная/нет сети) — см.
+  # services/network_watcher_service.dart.
+  connectivity_plus: ^6.1.0
 
 dev_dependencies:
   flutter_test:
