@@ -42,12 +42,13 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _prefs = LocalPrefs.instance;
 
-  // [ИСПРАВЛЕНО] Все тумблеры этого экрана по умолчанию выключены — до
-  // первого явного действия пользователя ничего не включается само.
+  // [ИЗМЕНЕНО] Дефолты подогнаны под макет: автоподключение/Kill Switch/
+  // режим прокси — выключены; Умное подключение на публичном Wi-Fi и Обход
+  // DPI — включены по умолчанию.
   bool _autoConnect = false;
-  bool _smartWifi = false;
+  bool _smartWifi = true;
   bool _killSwitch = false;
-  bool _dpiBypass = false;
+  bool _dpiBypass = true;
   bool _proxyOnly = false;
   // [НОВОЕ] Выбор DNS-over-HTTPS резолвера. Реально прокидывается в конфиг
   // sing-box через TunnelService.connect()/_buildSingBoxConfig, а не
@@ -84,11 +85,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final results = await Future.wait([
       _prefs.getBool(PrefKeys.autoConnect, fallback: false),
-      _prefs.getBool(PrefKeys.smartWifi, fallback: false),
+      _prefs.getBool(PrefKeys.smartWifi, fallback: true),
       _prefs.getBool(PrefKeys.killSwitch, fallback: false),
-      // [ИСПРАВЛЕНО] По умолчанию выключено — пользователь включает сам
-      // при необходимости (совпадает с fallback в tunnel_service.dart).
-      _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
+      // [ИЗМЕНЕНО] fallback приведён в соответствие с макетом — включено
+      // по умолчанию (совпадает со стартовым полем _dpiBypass выше).
+      _prefs.getBool(PrefKeys.dpiBypass, fallback: true),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
       _prefs.getBool(PrefKeys.ipv6Enabled, fallback: false),
     ]);
