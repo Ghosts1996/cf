@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
@@ -66,6 +67,32 @@ class ApiClient {
 
   static const _storage = FlutterSecureStorage();
   static const _tokenKey = 'vpnonline_session_token_v1';
+
+  // [НОВОЕ — исправляет "Unauthorized: Invalid token signature" после смены
+  // домена api.vpnonline.shop -> api.vpnonline.su] Причина бага была не в
+  // самом запросе и не в домене — оба уже указывали на api.vpnonline.su
+  // (см. baseUrl выше). Проблема в том, что restoreSession() ниже ТОЛЬКО
+  // проверяет, что в защищённом хранилище лежит непустая строка-токен, и
+  // никогда не спрашивает сервер, действителен ли он. Токены, выданные ДО
+  // переезда backend'а на новый домен/сервер, подписаны старым Flask
+  // SECRET_KEY (см. get_serializer() в backend-patch/api.py) — если на новом
+  // сервере ключ другой (пересоздан заново, а не скопирован из старого
+  // .env), сервер отвечает 401 "Invalid token signature" на КАЖДЫЙ запрос
+  // с этим токеном, а старый токен как лежал в хранилище, так и остаётся
+  // там навсегда: при следующем запуске restoreSession() снова "одобряет"
+  // тот же мёртвый токен, приложение снова открывает RootShell, и на
+  // экранах "Баланс"/"Ключи" бесконечно висит эта же ошибка — кнопка
+  // "Повторить" не может помочь, потому что повторяет тот же самый
+  // невалидный токен. Это ровно то, что видно на скриншотах.
+  //
+  // Фикс: любой ответ сервера 401 теперь трактуется как "сессия
+  // недействительна" — токен сразу стирается из хранилища, а слушатели
+  // (см. main.dart) переводят приложение на экран входа вместо того, чтобы
+  // бесконечно показывать сырую ошибку поверх мёртвой сессии. Значение —
+  // счётчик, а не bool, чтобы срабатывать каждый раз даже при одинаковом
+  // предыдущем состоянии (ValueNotifier не уведомляет при установке того же
+  // значения).
+  static final ValueNotifier<int> sessionExpired = ValueNotifier<int>(0);
 
   bool get isAuthenticated => _token != null;
 
@@ -273,6 +300,14 @@ class ApiClient {
   }
 
   void _checkOk(http.Response res) {
+    if (res.statusCode == 401) {
+      // Сессия мертва (просрочена или подписана другим ключом сервера,
+      // см. докстринг у sessionExpired) — чистим токен сразу, не дожидаясь,
+      // пока пользователь сам поймёт, что "Повторить" не поможет.
+      _token = null;
+      unawaited(_storage.delete(key: _tokenKey));
+      sessionExpired.value++;
+    }
     if (res.statusCode >= 400) {
       String message = 'Ошибка сервера (${res.statusCode})';
       try {
