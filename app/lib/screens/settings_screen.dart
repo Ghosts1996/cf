@@ -423,57 +423,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   trailing: const Icon(Icons.chevron_right_rounded, color: AppColors.textDim),
                 ),
               ],
-              const SizedBox(height: 8),
-              Container(
-                margin: const EdgeInsets.only(top: 8),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.warning.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
-                ),
-                child: const Text(
-                  'Kill Switch реально переподключает туннель при обрыве, "Автоподключение при запуске" '
-                  'реально поднимает туннель при старте приложения, а "Умное подключение на Wi-Fi" реально '
-                  'подключается при переходе на любую Wi-Fi-сеть (ОС не даёт отличить публичный Wi-Fi от '
-                  'домашнего без спецправ). На платформах без нативного VPN-туннеля (см. NATIVE_SETUP.md) '
-                  'все три пункта пока только сохраняют выбор.',
-                  style: TextStyle(fontSize: 11, color: AppColors.textDim, height: 1.4),
-                ),
-              ),
-              Container(
-                margin: const EdgeInsets.only(top: 8),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.violet2.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppColors.violet2.withValues(alpha: 0.3)),
-                ),
-                child: const Text(
-                  'Разбивает первый TLS-пакет соединения на несколько мелких частей — помогает, если '
-                  'провайдер режет именно Reality-соединения по сигнатуре. Не поможет, если блокировка '
-                  'идёт по IP-адресу сервера, и немного увеличивает время установки соединения — включай, '
-                  'если обычное подключение не проходит или регулярно рвётся.',
-                  style: TextStyle(fontSize: 11, color: AppColors.textDim, height: 1.4),
-                ),
-              ),
-              Container(
-                margin: const EdgeInsets.only(top: 8),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.violet2.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppColors.violet2.withValues(alpha: 0.3)),
-                ),
-                child: const Text(
-                  'Режим прокси НЕ подменяет прокси во всей системе — Android не даёт обычному приложению '
-                  'сделать это незаметно. Это локальный SOCKS5/HTTP-порт на телефоне, который нужно вручную '
-                  'указать в настройках конкретного приложения или браузера. VPN-разрешение при этом не '
-                  'запрашивается. Kill Switch и обход по приложениям (split-tunnel) в этом режиме не действуют — '
-                  'они завязаны на системный VPN-интерфейс, которого тут нет.',
-                  style: TextStyle(fontSize: 11, color: AppColors.textDim, height: 1.4),
-                ),
-              ),
               const SizedBox(height: 22),
               Center(
                 child: OutlinedButton.icon(
