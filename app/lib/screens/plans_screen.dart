@@ -168,12 +168,21 @@ class _PlansScreenState extends State<PlansScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AppHeader(screenLabel: _isExtend ? 'Продление ключа' : 'Оформление подписки'),
+    // [ИСПРАВЛЕНО] PlansScreen открывается ТОЛЬКО как отдельный
+    // MaterialPageRoute (с ConnectScreen, KeysScreen, BalanceScreen,
+    // MenuScreen) и никогда не встроен во вкладку с готовым Scaffold —
+    // без своего Scaffold текст вне NeonCard попадал под аварийный
+    // DefaultTextStyle Flutter с жёлтым двойным подчёркиванием
+    // (нет Material-предка). См. тот же паттерн в servers_screen.dart.
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AppHeader(screenLabel: _isExtend ? 'Продление ключа' : 'Оформление подписки'),
           const Text(
             'Единый VPN-ключ даёт доступ ко всем локациям сразу — выбирать сервер не нужно. '
             'Оплата — с баланса аккаунта.',
@@ -230,7 +239,9 @@ class _PlansScreenState extends State<PlansScreen> {
                     ),
             ),
           ],
-        ],
+            ],
+          ),
+        ),
       ),
     );
   }
