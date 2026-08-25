@@ -113,10 +113,40 @@ enum _Stage { loading, onboarding, auth, app }
 class _AppEntryPointState extends State<AppEntryPoint> {
   _Stage _stage = _Stage.loading;
 
+  // [НОВОЕ] Показывается на экране входа только когда сессию сбросил именно
+  // sessionExpired-сигнал (см. api_client.dart) — а не при обычном ручном
+  // выходе из "Меню", где отдельное объяснение не нужно.
+  String? _authInfo;
+
   @override
   void initState() {
     super.initState();
+    // [НОВОЕ — исправляет зависание на "Unauthorized: Invalid token
+    // signature" после смены домена api.vpnonline.shop -> api.vpnonline.su]
+    // Слушаем глобальный сигнал "сессия недействительна" на самом верхнем
+    // уровне дерева виджетов, а не в отдельных экранах (BalanceScreen,
+    // KeysScreen и т.д.) — сигнал может прийти с ЛЮБОЙ вкладки RootShell
+    // (все 5 держатся смонтированными одновременно, см. IndexedStack ниже),
+    // и в любом случае должен привести к одному и тому же результату: выйти
+    // из мёртвой сессии и показать экран входа, а не оставлять пользователя
+    // разглядывать ошибку 401 на той вкладке, где она случайно всплыла
+    // первой.
+    ApiClient.sessionExpired.addListener(_onSessionExpired);
     _bootstrap();
+  }
+
+  @override
+  void dispose() {
+    ApiClient.sessionExpired.removeListener(_onSessionExpired);
+    super.dispose();
+  }
+
+  void _onSessionExpired() {
+    if (!mounted || _stage != _Stage.app) return;
+    setState(() {
+      _authInfo = 'Сессия устарела — войдите заново';
+      _stage = _Stage.auth;
+    });
   }
 
   Future<void> _bootstrap() async {
@@ -141,7 +171,13 @@ class _AppEntryPointState extends State<AppEntryPoint> {
       case _Stage.onboarding:
         return OnboardingScreen(onDone: () => _checkSession());
       case _Stage.auth:
-        return AuthScreen(onAuthenticated: () => setState(() => _stage = _Stage.app));
+        return AuthScreen(
+          initialInfo: _authInfo,
+          onAuthenticated: () => setState(() {
+            _authInfo = null;
+            _stage = _Stage.app;
+          }),
+        );
       case _Stage.app:
         return RootShell(onLoggedOut: () => setState(() => _stage = _Stage.auth));
     }
