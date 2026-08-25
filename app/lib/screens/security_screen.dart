@@ -496,23 +496,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   ),
                 ),
               ],
-              const SizedBox(height: 14),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.warning.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
-                ),
-                child: const Text(
-                  'На Android эти переключатели реально влияют на трафик: DNS-защита, Fake IP, обход LAN, '
-                  'Mux и блокировка рекламы встроены в конфиг туннеля при следующем подключении, Kill Switch — '
-                  'это автовосстановление соединения, а строгий режим — физическая блокировка трафика, если '
-                  'восстановиться не удалось. На платформах без нативного VPN-туннеля (см. NATIVE_SETUP.md) '
-                  'выбор сохраняется, но пока ни на что не влияет.',
-                  style: TextStyle(fontSize: 11, color: AppColors.textDim, height: 1.4),
-                ),
-              ),
             ],
           ),
         ),
