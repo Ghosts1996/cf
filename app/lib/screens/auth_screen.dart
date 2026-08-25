@@ -14,8 +14,15 @@ import '../services/api_client.dart';
 /// придумано): вход по email+паролю, регистрация с подтверждением кода на
 /// почту, сброс пароля тоже по коду на почту.
 class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key, required this.onAuthenticated});
+  const AuthScreen({super.key, required this.onAuthenticated, this.initialInfo});
   final VoidCallback onAuthenticated;
+
+  /// [НОВОЕ] Необязательное сообщение, показанное сразу при открытии экрана —
+  /// используется main.dart, когда сюда попадают не по своей воле (нажал
+  /// "выйти"), а из-за автоматического сброса просроченной/невалидной
+  /// сессии (см. ApiClient.sessionExpired), чтобы это не выглядело как
+  /// внезапный выход в никуда без объяснений.
+  final String? initialInfo;
 
   @override
   State<AuthScreen> createState() => _AuthScreenState();
@@ -36,6 +43,12 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _loading = false;
   String? _error;
   String? _info;
+
+  @override
+  void initState() {
+    super.initState();
+    _info = widget.initialInfo;
+  }
 
   // [ИСПРАВЛЕНО — утечка памяти] В классе не было ни одного override
   // dispose(), хотя создаётся 5 TextEditingController. Каждый
