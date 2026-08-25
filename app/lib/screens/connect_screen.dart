@@ -183,7 +183,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     final justJoinedWifi = onWifi && !previous;
     if (!justJoinedWifi) return;
     final smartWifi =
-        await LocalPrefs.instance.getBool(PrefKeys.smartWifi, fallback: false);
+        await LocalPrefs.instance.getBool(PrefKeys.smartWifi, fallback: true);
     if (!smartWifi || !mounted) return;
     if ((_activeKey != null || _hasManualKey) &&
         !_tunnel.isConnected &&
