@@ -31,6 +31,17 @@ import '../services/tunnel_service.dart';
 ///    переходе на Wi-Fi запускает подключение (см. _onConnectivityChanged).
 ///    Честное ограничение: ОС не даёт приложению отличить "публичный" Wi-Fi
 ///    от домашнего/рабочего без спецправ, поэтому срабатывает на любой Wi-Fi.
+///
+/// [ИСПРАВЛЕНО] Выключение Kill Switch отсюда не сбрасывало "Строгий режим"
+/// (тумблер на экране "Безопасность", тот же persist-ключ security_screen
+/// требует для себя, что строгий режим не бывает включён без обычного Kill
+/// Switch) — теперь оба экрана сбрасывают строгий режим одинаково, см.
+/// _setKillSwitch ниже.
+///
+/// [НОВОЕ] У каждого пункта настроек теперь есть короткая подсказка под
+/// названием — что конкретно делает переключатель и когда применяется
+/// (сразу или при следующем подключении), а не только три общих
+/// предупреждения одним блоком внизу экрана.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, required this.onLoggedOut});
   final VoidCallback onLoggedOut;
@@ -48,6 +59,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _autoConnect = false;
   bool _smartWifi = true;
   bool _killSwitch = false;
+  // [НОВОЕ] Не показывается на этом экране отдельным пунктом (сам тумблер
+  // строгого режима живёт на экране "Безопасность"), но нужен здесь, чтобы
+  // при выключении Kill Switch с этого экрана можно было честно сбросить
+  // и его — см. _setKillSwitch ниже.
+  bool _strictKillSwitch = false;
   bool _dpiBypass = true;
   bool _proxyOnly = false;
   // [НОВОЕ] Выбор DNS-over-HTTPS резолвера. Реально прокидывается в конфиг
@@ -92,6 +108,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _prefs.getBool(PrefKeys.dpiBypass, fallback: true),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
       _prefs.getBool(PrefKeys.ipv6Enabled, fallback: false),
+      // [НОВОЕ] См. поле _strictKillSwitch выше — нужно знать текущее
+      // значение до первого переключения Kill Switch на этом экране.
+      _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
     ]);
     final savedDnsProvider = await _prefs.getString(PrefKeys.dnsServerProvider);
     final savedCustomDns = await _prefs.getString(PrefKeys.customDnsServer);
@@ -103,6 +122,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _dpiBypass = results[3];
       _proxyOnly = results[4];
       _ipv6Enabled = results[5];
+      _strictKillSwitch = results[6];
       _dnsProvider = (savedDnsProvider != null && _dnsProviderLabels.containsKey(savedDnsProvider))
           ? savedDnsProvider
           : 'cloudflare';
@@ -201,9 +221,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  // [ИСПРАВЛЕНО] Выключение Kill Switch отсюда не трогало
+  // security.strict_kill_switch — если пользователь включал "Строгий
+  // режим" на экране "Безопасность", а потом выключал обычный Kill Switch
+  // здесь, в настройках, в хранилище оставалась пара killSwitch=false +
+  // strictKillSwitch=true. TunnelService это не ломало (строгий режим
+  // всё равно не запускается без обычного — см. tunnel_service.dart:435),
+  // но при следующем открытии экрана "Безопасность" тумблер "Строгий
+  // режим" показывался включённым вопреки собственному правилу этого же
+  // экрана ("строгий режим не может быть включён без обычного Kill
+  // Switch"). Теперь оба переключателя одного и того же экрана
+  // "Безопасность" синхронизированы вне зависимости от того, с какого
+  // экрана их меняли — см. security_screen.dart::_killSwitch onChanged.
   Future<void> _setKillSwitch(bool v) async {
-    setState(() => _killSwitch = v);
+    setState(() {
+      _killSwitch = v;
+      if (!v) _strictKillSwitch = false;
+    });
     await _prefs.setBool(PrefKeys.killSwitch, v);
+    if (!v) await _prefs.setBool(PrefKeys.strictKillSwitch, false);
   }
 
   Future<void> _clearCache() async {
@@ -283,22 +319,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
               else ...[
                 _SettingsRow(
                   label: 'Автоподключение при запуске',
+                  hint: 'Поднимает VPN сразу при открытии приложения, если уже есть сохранённый ключ',
                   trailing: NeonToggle(value: _autoConnect, onChanged: _setAutoConnect),
                 ),
                 _SettingsRow(
                   label: 'Умное подключение на публичном Wi-Fi',
+                  hint: 'Включает VPN при переходе на любую Wi-Fi-сеть — ОС не даёт отличить '
+                      'публичную от домашней без спецправ',
                   trailing: NeonToggle(value: _smartWifi, onChanged: _setSmartWifi),
                 ),
                 _SettingsRow(
                   label: 'Kill Switch',
+                  hint: 'Автоматически переподключает туннель при обрыве связи. Тот же '
+                      'переключатель, что и в разделе «Безопасность»',
                   trailing: NeonToggle(value: _killSwitch, onChanged: _setKillSwitch),
                 ),
                 _SettingsRow(
                   label: 'Обход DPI (фрагментация TLS)',
+                  hint: 'Дробит первый TLS-пакет на части — помогает, если провайдер режет '
+                      'Reality-соединения по сигнатуре. Применится при следующем подключении',
                   trailing: NeonToggle(value: _dpiBypass, onChanged: _setDpiBypass),
                 ),
                 _SettingsRow(
                   label: 'Режим прокси (без VPN-разрешения)',
+                  hint: 'Локальный SOCKS5/HTTP-порт на телефоне вместо системного VPN — Kill '
+                      'Switch и split-tunnel в этом режиме не работают',
                   trailing: NeonToggle(value: _proxyOnly, onChanged: _setProxyOnly),
                 ),
                 if (_proxyOnly)
@@ -316,10 +361,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 _SettingsRow(
                   label: 'Язык',
+                  // [ИСПРАВЛЕНО] Строка выглядела как настройка (с активным
+                  // видом), но выбора языка в приложении не существует —
+                  // локализации (intl/l10n) в коде нет вообще, весь
+                  // интерфейс жёстко на русском. Раньше это никак не
+                  // объяснялось. Честно показываем, что менять тут пока
+                  // нечего, вместо намёка на несуществующий выбор.
+                  hint: 'Пока доступен только русский — переключение языков не реализовано',
                   trailing: const Text('Русский', style: TextStyle(color: AppColors.textDim, fontSize: 12)),
                 ),
                 _SettingsRow(
                   label: 'DNS-сервер',
+                  hint: 'DNS-over-HTTPS резолвер для доменов внутри туннеля. Применится при '
+                      'следующем подключении',
                   trailing: DropdownButton<String>(
                     value: _dnsProvider,
                     underline: const SizedBox.shrink(),
@@ -357,10 +411,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 // [НОВОЕ] IPv6 — см. _setIpv6Enabled выше.
                 _SettingsRow(
                   label: 'Разрешить IPv6 в туннеле',
+                  hint: 'Пропускает IPv6-трафик через VPN в дополнение к IPv4. Применится при '
+                      'следующем подключении',
                   trailing: NeonToggle(value: _ipv6Enabled, onChanged: _setIpv6Enabled),
                 ),
                 _SettingsRow(
                   label: 'Очистить кэш',
+                  hint: 'Удаляет избранные серверы и локальный выбор split-туннелирования. '
+                      'Вход в аккаунт сохранится',
                   onTap: _clearCache,
                   trailing: const Icon(Icons.chevron_right_rounded, color: AppColors.textDim),
                 ),
@@ -438,10 +496,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
 }
 
 class _SettingsRow extends StatelessWidget {
-  const _SettingsRow({required this.label, required this.trailing, this.onTap});
+  // [НОВОЕ] Необязательная подсказка под названием пункта — раньше у
+  // строк на этом экране (в отличие от security_screen.dart) не было
+  // никакого объяснения, что конкретно делает переключатель, только три
+  // общих предупреждения внизу экрана. Теперь у каждого пункта — короткое
+  // честное описание того, что он реально делает.
+  const _SettingsRow({required this.label, required this.trailing, this.onTap, this.hint});
   final String label;
   final Widget trailing;
   final VoidCallback? onTap;
+  final String? hint;
 
   @override
   Widget build(BuildContext context) {
@@ -453,9 +517,26 @@ class _SettingsRow extends StatelessWidget {
           border: Border(bottom: BorderSide(color: Color(0xFF1A1230))),
         ),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Expanded(child: Text(label, style: const TextStyle(fontSize: 12))),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(label, style: const TextStyle(fontSize: 12)),
+                  if (hint != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      hint!,
+                      style: const TextStyle(fontSize: 10, color: AppColors.textDim, height: 1.3),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
             trailing,
           ],
         ),
