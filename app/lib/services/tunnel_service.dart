@@ -709,19 +709,16 @@ class TunnelService {
     _lastNativeTxBytes = null;
     _lastNativeStatsAt = null;
 
-    // [ИСПРАВЛЕНО] fallback приведён к false везде ниже — раньше значения
-    // тут расходились с UI-экранами (Безопасность/Настройки читали
-    // fallback: false для тех же самых ключей), из-за чего первое же
-    // подключение включало часть защит "втихую", хотя в интерфейсе
-    // соответствующие тумблеры показывались выключенными. Теперь
-    // поведение туннеля совпадает с тем, что реально видит пользователь
-    // на экране — ничего не активируется, пока он не включит это сам.
+    // [ИЗМЕНЕНО] fallback приведён в соответствие с UI-экранами
+    // (Безопасность/Настройки) — те же значения, что и в стартовых полях
+    // State security_screen.dart/settings_screen.dart, чтобы поведение
+    // туннеля совпадало с тем, что реально видит пользователь на экране.
     final dnsProtection = await LocalPrefs.instance
-        .getBool(PrefKeys.dnsProtection, fallback: false);
+        .getBool(PrefKeys.dnsProtection, fallback: true);
     final blockAds =
-        await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: false);
+        await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: true);
     final dpiBypass =
-        await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: false);
+        await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: true);
     final proxyOnly = await LocalPrefs.instance
         .getBool(PrefKeys.proxyOnlyMode, fallback: false);
     final dnsProvider =
@@ -752,11 +749,11 @@ class TunnelService {
     final bypassLan =
         await LocalPrefs.instance.getBool(PrefKeys.bypassLan, fallback: false);
     final muxEnabled = await LocalPrefs.instance
-        .getBool(PrefKeys.muxEnabled, fallback: false);
+        .getBool(PrefKeys.muxEnabled, fallback: true);
     final muxProtocol =
         await LocalPrefs.instance.getString(PrefKeys.muxProtocol) ?? 'smux';
     final fakeIpDns =
-        await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: false);
+        await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: true);
     final ipv6Enabled = await LocalPrefs.instance
         .getBool(PrefKeys.ipv6Enabled, fallback: false);
 
