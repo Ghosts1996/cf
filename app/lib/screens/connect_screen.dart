@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
@@ -89,6 +90,19 @@ class _ConnectScreenState extends State<ConnectScreen> {
   // _activeKey (а не только один раз при первом открытии экрана), включая
   // повторные вызовы _loadKeyState().
   bool _autoConnectTried = false;
+  // [НОВОЕ] Реальная реализация "Умное подключение на публичном Wi-Fi" —
+  // раньше тумблер в SettingsScreen только сохранял значение в LocalPrefs
+  // и ни на что не влиял (честно было написано прямо на экране Настроек).
+  // Теперь слушаем смену сети через connectivity_plus и при ПЕРЕХОДЕ на
+  // Wi-Fi (а не просто "сейчас Wi-Fi", иначе сработало бы повторно на
+  // каждый чих пакета обновлений связи) — если тумблер включён, есть
+  // ключ и туннель ещё не поднят — реально запускаем подключение. Честное
+  // ограничение: Android/iOS не дают приложению без спецправ отличить
+  // "публичный" Wi-Fi от домашнего/рабочего — поэтому подключаемся на
+  // ЛЮБОЙ Wi-Fi, как и Hiddify/большинство VPN-клиентов делают под тем же
+  // названием функции.
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+  bool? _wasOnWifi;
 
   @override
   void initState() {
@@ -154,6 +168,28 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _latencyTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (_tunnel.isConnected && !_latencyChecking) _measureLatency();
     });
+    _connectivitySub =
+        Connectivity().onConnectivityChanged.listen(_onConnectivityChanged);
+  }
+
+  /// [НОВОЕ] См. докстринг `_wasOnWifi` выше.
+  Future<void> _onConnectivityChanged(List<ConnectivityResult> results) async {
+    final onWifi = results.contains(ConnectivityResult.wifi);
+    final previous = _wasOnWifi;
+    _wasOnWifi = onWifi;
+    // Первое событие после подписки — это просто "текущее состояние сети",
+    // а не смена сети, поэтому его не считаем переходом.
+    if (previous == null) return;
+    final justJoinedWifi = onWifi && !previous;
+    if (!justJoinedWifi) return;
+    final smartWifi =
+        await LocalPrefs.instance.getBool(PrefKeys.smartWifi, fallback: false);
+    if (!smartWifi || !mounted) return;
+    if ((_activeKey != null || _hasManualKey) &&
+        !_tunnel.isConnected &&
+        !_tunnel.isBusy) {
+      unawaited(_toggleConnection());
+    }
   }
 
   /// [НОВОЕ] См. подробный комментарий в `initState()` выше — сначала
@@ -176,6 +212,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     ManualKeyStore.instance.notifier.removeListener(_onManualKeyChanged);
     _keyWatchTimer?.cancel();
     _latencyTimer?.cancel();
+    _connectivitySub?.cancel();
     super.dispose();
   }
 
