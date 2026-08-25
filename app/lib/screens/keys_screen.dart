@@ -219,14 +219,25 @@ class _KeysScreenState extends State<KeysScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: SingleChildScrollView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+    // [ИСПРАВЛЕНО] KeysScreen встроен во вкладку RootShell (там уже есть
+    // общий Scaffold), но также открывается отдельным MaterialPageRoute —
+    // из MenuScreen, BalanceScreen и из самого себя (_buyNew/_extend ->
+    // PlansScreen и обратно). Во втором случае без собственного Scaffold
+    // текст вне NeonCard попадал под аварийный DefaultTextStyle Flutter с
+    // жёлтым двойным подчёркиванием (нет Material-предка). Вложенный
+    // Scaffold внутри Scaffold безопасен — тот же паттерн уже используется
+    // в servers_screen.dart, который тоже одновременно вкладка и маршрут.
+    return Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: _load,
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
             const AppHeader(trailing: Icons.menu_rounded, screenLabel: 'Мои ключи'),
             const SizedBox(height: 16),
             _ManualKeyCard(
@@ -277,7 +288,9 @@ class _KeysScreenState extends State<KeysScreen> {
               ],
             if (_keys != null && _keys!.isNotEmpty)
               PillButton(label: 'Купить новый ключ', dashed: true, onTap: _buyNew),
-          ],
+              ],
+            ),
+          ),
         ),
       ),
     );
