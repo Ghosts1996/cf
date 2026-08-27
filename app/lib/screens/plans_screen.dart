@@ -200,8 +200,8 @@ class _PlansScreenState extends State<PlansScreen> {
               ),
             ),
           if (_plans != null && _plans!.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 20),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 20),
               child: Text(tr('Тарифы пока не настроены в панели бота (нет тарифов для host "GLOBAL").'),
                   style: const TextStyle(color: AppColors.textDim)),
             ),
