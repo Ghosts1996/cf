@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../theme.dart';
+import '../services/locale_service.dart';
 
 /// [НОВОЕ] Раньше приложение открывалось сразу на боевом экране без единого
 /// слова о том, что это, зачем платить и чем протокол лучше конкурентов —
@@ -51,7 +52,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    // [НОВОЕ] Модуль переводчика — язык обычно ещё не выбран на этом самом
+    // первом экране, но подписка на LocaleService всё равно добавлена для
+    // единообразия со всеми остальными экранами модуля.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       backgroundColor: AppColors.bg,
       body: SafeArea(
         child: Column(
@@ -60,7 +66,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               alignment: Alignment.topRight,
               child: TextButton(
                 onPressed: _finish,
-                child: const Text('Пропустить', style: TextStyle(color: AppColors.textDim)),
+                child: Text(tr('Пропустить'), style: const TextStyle(color: AppColors.textDim)),
               ),
             ),
             Expanded(
@@ -77,11 +83,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       children: [
                         Icon(s.icon, size: 72, color: AppColors.violet2),
                         const SizedBox(height: 24),
-                        Text(s.title,
+                        Text(tr(s.title),
                             textAlign: TextAlign.center,
                             style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
                         const SizedBox(height: 12),
-                        Text(s.body,
+                        Text(tr(s.body),
                             textAlign: TextAlign.center,
                             style: const TextStyle(color: AppColors.textDim, fontSize: 14)),
                       ],
@@ -118,12 +124,13 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       _finish();
                     }
                   },
-                  child: Text(_page < _slides.length - 1 ? 'Далее' : 'Начать'),
+                  child: Text(_page < _slides.length - 1 ? tr('Далее') : tr('Начать')),
                 ),
               ),
             ),
           ],
         ),
+      ),
       ),
     );
   }
