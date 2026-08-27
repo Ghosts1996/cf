@@ -9,6 +9,14 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # [НОВОЕ] Модуль переводчика — нужен для GlobalMaterialLocalizations /
+  # GlobalWidgetsLocalizations / GlobalCupertinoLocalizations в main.dart
+  # (переключает язык системных виджетов Material — кнопки "ОК"/"Отмена"
+  # в диалогах, формат дат и т.п. — синхронно с языком, выбранным в
+  # "Настройки" -> "Язык"). Часть Flutter SDK, отдельно из pub.dev не
+  # тянется — версии не бывает, привязана к самому SDK.
+  flutter_localizations:
+    sdk: flutter
   http: ^1.2.0
   google_fonts: ^6.2.1
   # [НОВОЕ] нужны для: онбординга/флага "первый запуск", открытия
