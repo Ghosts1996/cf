@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/app_log_service.dart';
+import '../services/locale_service.dart';
 
 /// [НОВОЕ] Просмотр локальных логов приложения — отдельный экран, на который
 /// ведёт кнопка "Просмотреть логи" в разделе "Хранение логов" на экране
@@ -45,17 +46,17 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.bgCard,
-        title: const Text('Удалить все логи?'),
-        content: const Text(
-          'Локальный журнал событий приложения (подключения, ошибки) будет удалён полностью. '
-          'Действие необратимо.',
-          style: TextStyle(color: AppColors.textDim, fontSize: 13),
+        title: Text(tr('Удалить все логи?')),
+        content: Text(
+          tr('Локальный журнал событий приложения (подключения, ошибки) будет удалён полностью. '
+          'Действие необратимо.'),
+          style: const TextStyle(color: AppColors.textDim, fontSize: 13),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(tr('Отмена'))),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Удалить', style: TextStyle(color: AppColors.danger)),
+            child: Text(tr('Удалить'), style: const TextStyle(color: AppColors.danger)),
           ),
         ],
       ),
@@ -65,7 +66,7 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
     if (!mounted) return;
     setState(() => _entries = const []);
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Логи удалены')),
+      SnackBar(content: Text(tr('Логи удалены'))),
     );
   }
 
@@ -98,7 +99,10 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    // [НОВОЕ] Модуль переводчика.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
@@ -109,7 +113,7 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('Логи приложения', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  Text(tr('Логи приложения'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   if (_entries.isNotEmpty)
                     GestureDetector(
                       onTap: _deleteAllLogs,
@@ -122,7 +126,7 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Технический журнал событий на устройстве: подключения, ошибки. Это не логи трафика — политика провайдера No-logs не затрагивается.',
+                tr('Технический журнал событий на устройстве: подключения, ошибки. Это не логи трафика — политика провайдера No-logs не затрагивается.'),
                 style: const TextStyle(fontSize: 10.5, color: AppColors.textDim, height: 1.4),
               ),
               const SizedBox(height: 12),
@@ -136,16 +140,16 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
                         child: _entries.isEmpty
                             ? ListView(
                                 physics: const AlwaysScrollableScrollPhysics(),
-                                children: const [
-                                  SizedBox(height: 80),
-                                  Center(
+                                children: [
+                                  const SizedBox(height: 80),
+                                  const Center(
                                     child: Icon(Icons.receipt_long_rounded, size: 40, color: AppColors.textDim),
                                   ),
-                                  SizedBox(height: 12),
+                                  const SizedBox(height: 12),
                                   Center(
                                     child: Text(
-                                      'Логов пока нет',
-                                      style: TextStyle(fontSize: 13, color: AppColors.textDim),
+                                      tr('Логов пока нет'),
+                                      style: const TextStyle(fontSize: 13, color: AppColors.textDim),
                                     ),
                                   ),
                                 ],
@@ -191,6 +195,7 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
             ],
           ),
         ),
+      ),
       ),
     );
   }
