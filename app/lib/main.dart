@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'theme.dart';
+import 'l10n/app_language.dart';
 import 'screens/connect_screen.dart';
 import 'screens/keys_screen.dart';
 import 'screens/balance_screen.dart';
@@ -11,8 +13,15 @@ import 'screens/auth_screen.dart';
 import 'services/api_client.dart';
 import 'services/app_log_service.dart';
 import 'services/tunnel_service.dart';
+import 'services/locale_service.dart';
 
-void main() {
+Future<void> main() async {
+  // [НОВОЕ] main() теперь асинхронный (ждёт LocaleService.ensureLoaded()
+  // ниже перед runApp) — обязательный явный WidgetsFlutterBinding нужен
+  // именно из-за этого await ДО runApp(): без него платформенный канал
+  // SharedPreferences, к которому обращается LocaleService, может упасть с
+  // "Binding has not yet been initialized".
+  WidgetsFlutterBinding.ensureInitialized();
   // [ИСПРАВЛЕНО — критично перед публикацией репозитория] Теперь
   // defaultValue пуст — ключ ОБЯЗАН передаваться через
   // --dart-define=SHOPBOT_API_KEY=... при
@@ -57,6 +66,12 @@ void main() {
   // подписки внутри State какого-либо экрана, повторной регистрации при
   // навигации по приложению тут не будет.
   _wireAppLogging();
+  // [НОВОЕ] Модуль переводчика — читает сохранённый язык из LocalPrefs ДО
+  // первого runApp(), чтобы приложение сразу открылось на нужном языке, а
+  // не мигнуло русским на первом кадре. Сам виджет ниже (VpnOnlineApp)
+  // слушает LocaleService.instance и перестраивается при смене языка из
+  // кнопки "Язык" на экране "Настройки" — грузить язык заново не нужно.
+  await LocaleService.instance.ensureLoaded();
   runApp(const VpnOnlineApp());
 }
 
@@ -87,11 +102,41 @@ class VpnOnlineApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'VPNonLine',
-      debugShowCheckedModeBanner: false,
-      theme: buildAppTheme(),
-      home: const AppEntryPoint(),
+    // [НОВОЕ] Модуль переводчика — `AnimatedBuilder` слушает
+    // `LocaleService.instance` (обычный `ChangeNotifier`, без сторонних
+    // пакетов вроде provider) и перестраивает MaterialApp при каждой смене
+    // языка кнопкой "Язык" на экране "Настройки". `locale:` ниже переключает
+    // системную локаль Flutter (даты, кнопки "ОК"/"Отмена" в системных
+    // диалогах и т.п.).
+    //
+    // Собственный текст экранов (Text('Настройки') и т.д.) берётся через
+    // `tr('...')` — см. lib/services/locale_service.dart и lib/l10n/.
+    // НАМЕРЕННО не пересоздаём `home:` целиком с новым `key` при смене
+    // языка (как можно было бы сделать проще) — это откатило бы
+    // пользователя на первую вкладку и потеряло бы весь стек навигации
+    // (например открытый поверх "Меню" экран "Настройки", где как раз и
+    // находится кнопка "Язык" — самое частое место, откуда язык меняют).
+    // Вместо этого каждый экран, где есть переведённый текст, сам слушает
+    // `LocaleService.instance` через `AnimatedBuilder` в своём build() —
+    // см. например settings_screen.dart — и перерисовывает СЕБЯ на месте,
+    // не теряя ни навигацию, ни состояние остальных экранов.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) {
+        return MaterialApp(
+          title: 'VPNonLine',
+          debugShowCheckedModeBanner: false,
+          theme: buildAppTheme(),
+          locale: LocaleService.instance.language.locale,
+          supportedLocales: AppLanguage.values.map((l) => l.locale),
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          home: const AppEntryPoint(),
+        );
+      },
     );
   }
 }
@@ -144,7 +189,7 @@ class _AppEntryPointState extends State<AppEntryPoint> {
   void _onSessionExpired() {
     if (!mounted || _stage != _Stage.app) return;
     setState(() {
-      _authInfo = 'Сессия устарела — войдите заново';
+      _authInfo = tr('Сессия устарела — войдите заново');
       _stage = _Stage.auth;
     });
   }
@@ -242,7 +287,15 @@ class _RootShellState extends State<RootShell> {
       const ServersScreen(),
       MenuScreen(onLoggedOut: widget.onLoggedOut),
     ];
-    return Scaffold(
+    // [НОВОЕ] Модуль переводчика — оборачиваем именно тут, а не весь
+    // MaterialApp (см. докстринг в VpnOnlineApp.build), чтобы смена языка
+    // на экране "Настройки" (открытом поверх вкладки "Меню") сразу
+    // перерисовала подписи нижней навигации "на месте", без сброса
+    // текущей выбранной вкладки и без потери состояния уже загруженных
+    // экранов в IndexedStack ниже.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       // [ИСПРАВЛЕНО — вторая по значимости причина "приложение очень долго
       // грузится" на мобильном интернете] Раньше в дерево виджетов
       // вставлялся только `screens[_index]` — один-единственный экран из
@@ -276,13 +329,14 @@ class _RootShellState extends State<RootShell> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: _onDestinationSelected,
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.home_rounded), label: 'Главная'),
-          NavigationDestination(icon: Icon(Icons.vpn_key_rounded), label: 'Ключи'),
-          NavigationDestination(icon: Icon(Icons.payments_rounded), label: 'Баланс'),
-          NavigationDestination(icon: Icon(Icons.public_rounded), label: 'Серверы'),
-          NavigationDestination(icon: Icon(Icons.menu_rounded), label: 'Меню'),
+        destinations: [
+          NavigationDestination(icon: const Icon(Icons.home_rounded), label: tr('Главная')),
+          NavigationDestination(icon: const Icon(Icons.vpn_key_rounded), label: tr('Ключи')),
+          NavigationDestination(icon: const Icon(Icons.payments_rounded), label: tr('Баланс')),
+          NavigationDestination(icon: const Icon(Icons.public_rounded), label: tr('Серверы')),
+          NavigationDestination(icon: const Icon(Icons.menu_rounded), label: tr('Меню')),
         ],
+      ),
       ),
     );
   }
