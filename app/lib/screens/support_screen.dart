@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
+import '../services/locale_service.dart';
 
 /// Реальные контакты бренда VPNonLine.
 const websiteUrl = 'https://vpnonline.su';
@@ -23,7 +24,9 @@ class SupportScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
@@ -31,58 +34,59 @@ class SupportScreen extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               AppHeader(trailing: Icons.arrow_back_rounded, onTrailingTap: () => Navigator.pop(context)),
-              const Text('Поддержка и контакты', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(tr('Поддержка и контакты'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const SizedBox(height: 14),
               _ContactCard(
                 gradient: const [AppColors.violet, AppColors.violet2],
                 icon: Icons.public_rounded,
-                title: 'Сайт',
+                title: tr('Сайт'),
                 subtitle: 'vpnonline.su',
                 onTap: () => _open(websiteUrl),
               ),
               _ContactCard(
                 color: const Color(0xFF229ED9),
                 icon: Icons.send_rounded,
-                title: 'Бот Telegram',
+                title: tr('Бот Telegram'),
                 subtitle: 't.me/VPNonLineRoBot',
                 onTap: () => _open(telegramBotUrl),
               ),
               _ContactCard(
                 gradient: const [Color(0xFF2B6BFF), Color(0xFF00C2FF)],
                 icon: Icons.chat_bubble_rounded,
-                title: 'Бот MAX',
+                title: tr('Бот MAX'),
                 subtitle: 'max.ru/se13572942_bot',
                 onTap: () => _open(maxBotUrl),
               ),
               _ContactCard(
                 gradient: const [AppColors.violet, AppColors.violet2],
                 icon: Icons.support_agent_rounded,
-                title: 'Бот тех. поддержки',
+                title: tr('Бот тех. поддержки'),
                 subtitle: 't.me/VPNonLineSupportRoBot',
                 onTap: () => _open(supportBotUrl),
               ),
               _ContactCard(
                 color: const Color(0xFF229ED9),
                 icon: Icons.campaign_rounded,
-                title: 'Канал новостей',
+                title: tr('Канал новостей'),
                 subtitle: 't.me/vpnonline_info',
                 onTap: () => _open(newsChannelUrl),
               ),
-              const SectionTitle('О приложении'),
+              SectionTitle(tr('О приложении')),
               NeonCard(
                 child: Column(
-                  children: const [
-                    _InfoRow(k: 'Версия', v: '1.0.0'),
-                    SizedBox(height: 8),
-                    _InfoRow(k: 'Протокол', v: 'VLESS / Reality'),
-                    SizedBox(height: 8),
-                    _InfoRow(k: 'Политика логов', v: 'No-logs'),
+                  children: [
+                    _InfoRow(k: tr('Версия'), v: '1.0.0'),
+                    const SizedBox(height: 8),
+                    _InfoRow(k: tr('Протокол'), v: 'VLESS / Reality'),
+                    const SizedBox(height: 8),
+                    _InfoRow(k: tr('Политика логов'), v: tr('No-logs')),
                   ],
                 ),
               ),
             ],
           ),
         ),
+      ),
       ),
     );
   }
