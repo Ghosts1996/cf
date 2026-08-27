@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
+import '../services/locale_service.dart';
 
 /// Пополнение баланса — [НОВОЕ].
 ///
@@ -41,7 +42,7 @@ class _TopUpScreenState extends State<TopUpScreen> {
   Future<void> _submit() async {
     final amount = _amount;
     if (amount == null || amount < 10) {
-      setState(() => _error = 'Введи сумму от 10 ₽');
+      setState(() => _error = tr('Введи сумму от 10 ₽'));
       return;
     }
     setState(() {
@@ -55,17 +56,17 @@ class _TopUpScreenState extends State<TopUpScreen> {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Открыта страница оплаты — после оплаты баланс обновится автоматически')),
+            SnackBar(content: Text(tr('Открыта страница оплаты — после оплаты баланс обновится автоматически'))),
           );
           Navigator.of(context).pop();
         }
       } else if (mounted) {
-        setState(() => _error = 'Не удалось открыть страницу оплаты');
+        setState(() => _error = tr('Не удалось открыть страницу оплаты'));
       }
     } on ApiException catch (e) {
       setState(() => _error = e.message);
     } catch (e) {
-      setState(() => _error = 'Не удалось создать платёж: $e');
+      setState(() => _error = '${tr('Не удалось создать платёж:')} $e');
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
@@ -73,7 +74,9 @@ class _TopUpScreenState extends State<TopUpScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
@@ -81,7 +84,7 @@ class _TopUpScreenState extends State<TopUpScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               AppHeader(trailing: Icons.arrow_back_rounded, onTrailingTap: () => Navigator.pop(context)),
-              const Text('Пополнить баланс', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(tr('Пополнить баланс'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const SizedBox(height: 14),
               NeonCard(
                 child: TextField(
@@ -115,9 +118,9 @@ class _TopUpScreenState extends State<TopUpScreen> {
                     .toList(),
               ),
               const SizedBox(height: 18),
-              const SectionTitle('Способ оплаты'),
+              SectionTitle(tr('Способ оплаты')),
               _PaymentOption(
-                label: 'ЮKassa · СБП / карта',
+                label: tr('ЮKassa · СБП / карта'),
                 emoji: '₽',
                 selected: _method == 'yookassa',
                 onTap: () => setState(() => _method = 'yookassa'),
@@ -140,11 +143,12 @@ class _TopUpScreenState extends State<TopUpScreen> {
                         padding: EdgeInsets.all(8),
                         child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
                       )
-                    : PillButton(label: 'Пополнить', icon: '💳', filled: true, onTap: _submit),
+                    : PillButton(label: tr('Пополнить'), icon: '💳', filled: true, onTap: _submit),
               ),
             ],
           ),
         ),
+      ),
       ),
     );
   }
