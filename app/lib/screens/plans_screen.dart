@@ -170,9 +170,19 @@ class _PlansScreenState extends State<PlansScreen> {
   @override
   Widget build(BuildContext context) {
     // [НОВОЕ] Модуль переводчика.
+    // [ИСПРАВЛЕНО — Material-иерархия] Тот же баг, что и в KeysScreen:
+    // экран открывается отдельным MaterialPageRoute (из меню, баланса,
+    // "Купить новый ключ" на "Мои ключи" и т.д.) без своего Scaffold —
+    // текст оставался без Material-предка (аварийное жёлтое двойное
+    // подчёркивание). Добавлен собственный Scaffold; используется и как
+    // часть RootShell (там уже есть внешний Scaffold) — вложенный Scaffold
+    // безопасен, AppBar тут не задействован.
     return AnimatedBuilder(
       animation: LocaleService.instance,
-      builder: (context, _) => SingleChildScrollView(
+      builder: (context, _) => Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        child: SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -235,6 +245,8 @@ class _PlansScreenState extends State<PlansScreen> {
             ),
           ],
         ],
+      ),
+        ),
       ),
       ),
     );
