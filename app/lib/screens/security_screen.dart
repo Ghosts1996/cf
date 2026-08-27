@@ -4,6 +4,7 @@ import '../widgets/neon.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
 import '../services/app_log_service.dart';
+import '../services/locale_service.dart';
 import 'logs_viewer_screen.dart';
 
 /// Безопасность (Kill Switch, DNS) — пункт меню из макета.
@@ -132,17 +133,17 @@ class _SecurityScreenState extends State<SecurityScreen> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.bgCard,
-        title: const Text('Удалить все логи?'),
-        content: const Text(
-          'Локальный журнал событий приложения (подключения, ошибки) будет удалён полностью. '
-          'Действие необратимо.',
-          style: TextStyle(color: AppColors.textDim, fontSize: 13),
+        title: Text(tr('Удалить все логи?')),
+        content: Text(
+          tr('Локальный журнал событий приложения (подключения, ошибки) будет удалён полностью. '
+          'Действие необратимо.'),
+          style: const TextStyle(color: AppColors.textDim, fontSize: 13),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(tr('Отмена'))),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Удалить', style: TextStyle(color: AppColors.danger)),
+            child: Text(tr('Удалить'), style: const TextStyle(color: AppColors.danger)),
           ),
         ],
       ),
@@ -151,7 +152,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
     await AppLogService.instance.clearAll();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Логи удалены')),
+        SnackBar(content: Text(tr('Логи удалены'))),
       );
     }
   }
@@ -184,7 +185,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
       ]);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Kill Switch включён автоматически — строгий режим работает поверх него')),
+          SnackBar(content: Text(tr('Kill Switch включён автоматически — строгий режим работает поверх него'))),
         );
       }
       return;
@@ -221,13 +222,16 @@ class _SecurityScreenState extends State<SecurityScreen> {
   void _notifyReconnectNeeded() {
     if (!mounted || !TunnelService.instance.isConnected) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы включить сейчас')),
+      SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы включить сейчас'))),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    // [НОВОЕ] Модуль переводчика.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
@@ -235,7 +239,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               AppHeader(trailing: Icons.arrow_back_rounded, onTrailingTap: () => Navigator.pop(context)),
-              const Text('Безопасность', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(tr('Безопасность'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const SizedBox(height: 12),
               if (!_loaded)
                 const Padding(
@@ -262,10 +266,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         children: [
                           const Icon(Icons.block_rounded, size: 18, color: AppColors.danger),
                           const SizedBox(width: 10),
-                          const Expanded(
+                          Expanded(
                             child: Text(
-                              'Kill Switch активен: сервер недоступен, интернет физически заблокирован до восстановления туннеля',
-                              style: TextStyle(fontSize: 11, color: AppColors.text, height: 1.4),
+                              tr('Kill Switch активен: сервер недоступен, интернет физически заблокирован до восстановления туннеля'),
+                              style: const TextStyle(fontSize: 11, color: AppColors.text, height: 1.4),
                             ),
                           ),
                         ],
@@ -278,8 +282,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
                     children: [
                       _Row(
                         icon: Icons.shield_rounded,
-                        title: 'Kill Switch',
-                        subtitle: 'Автоматически переподключает туннель при обрыве',
+                        title: tr('Kill Switch'),
+                        subtitle: tr('Автоматически переподключает туннель при обрыве'),
                         trailing: NeonToggle(
                           value: _killSwitch,
                           onChanged: (v) async {
@@ -299,10 +303,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
                       // tunnel_service.dart::_engageHardKillSwitch.
                       _Row(
                         icon: Icons.gpp_bad_rounded,
-                        title: 'Строгий режим (блокировать трафик)',
+                        title: tr('Строгий режим (блокировать трафик)'),
                         subtitle: _strictKillSwitch
-                            ? 'Если переподключиться не удалось — интернет физически блокируется'
-                            : 'Выключено: при неудаче просто останется обычный интернет',
+                            ? tr('Если переподключиться не удалось — интернет физически блокируется')
+                            : tr('Выключено: при неудаче просто останется обычный интернет'),
                         trailing: NeonToggle(
                           value: _strictKillSwitch,
                           onChanged: _setStrictKillSwitch,
@@ -322,10 +326,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
                             children: [
                               const Icon(Icons.settings_suggest_rounded, size: 16, color: AppColors.violetGlow),
                               const SizedBox(width: 8),
-                              const Expanded(
+                              Expanded(
                                 child: Text(
-                                  'Дополнительно: включить блокировку без VPN на уровне системы Android',
-                                  style: TextStyle(fontSize: 10.5, color: AppColors.textDim),
+                                  tr('Дополнительно: включить блокировку без VPN на уровне системы Android'),
+                                  style: const TextStyle(fontSize: 10.5, color: AppColors.textDim),
                                 ),
                               ),
                               const Icon(Icons.chevron_right_rounded, size: 16, color: AppColors.textDim),
@@ -336,8 +340,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
                       const Divider(height: 20),
                       _Row(
                         icon: Icons.dns_rounded,
-                        title: 'Защита от DNS-протечек',
-                        subtitle: 'Весь DNS-трафик идёт через туннель',
+                        title: tr('Защита от DNS-протечек'),
+                        subtitle: tr('Весь DNS-трафик идёт через туннель'),
                         trailing: NeonToggle(
                           value: _dnsProtection,
                           onChanged: (v) async {
@@ -351,15 +355,15 @@ class _SecurityScreenState extends State<SecurityScreen> {
                       // [НОВОЕ] Fake IP — режим DNS-резолва, как в Hiddify.
                       _Row(
                         icon: Icons.alt_route_rounded,
-                        title: 'Fake IP (DNS)',
-                        subtitle: 'Резолв доменов через служебные адреса — быстрее и без утечки таймингов',
+                        title: tr('Fake IP (DNS)'),
+                        subtitle: tr('Резолв доменов через служебные адреса — быстрее и без утечки таймингов'),
                         trailing: NeonToggle(value: _fakeIpDns, onChanged: _setFakeIpDns),
                       ),
                       const Divider(height: 20),
                       _Row(
                         icon: Icons.block_rounded,
-                        title: 'Блокировка рекламы и трекеров',
-                        subtitle: 'На уровне DNS-фильтрации',
+                        title: tr('Блокировка рекламы и трекеров'),
+                        subtitle: tr('На уровне DNS-фильтрации'),
                         trailing: NeonToggle(
                           value: _blockAds,
                           onChanged: (v) async {
@@ -375,18 +379,18 @@ class _SecurityScreenState extends State<SecurityScreen> {
                       // остальные тумблеры на этом экране).
                       _Row(
                         icon: Icons.lan_rounded,
-                        title: 'Обход локальной сети',
+                        title: tr('Обход локальной сети'),
                         subtitle: _bypassLan
-                            ? 'Устройства в LAN (роутер, принтер, NAS) доступны напрямую'
-                            : 'LAN тоже идёт через VPN — доступ к сети сервера',
+                            ? tr('Устройства в LAN (роутер, принтер, NAS) доступны напрямую')
+                            : tr('LAN тоже идёт через VPN — доступ к сети сервера'),
                         trailing: NeonToggle(value: _bypassLan, onChanged: _setBypassLan),
                       ),
                       const Divider(height: 20),
                       // [НОВОЕ] Mux — мультиплексирование соединений.
                       _Row(
                         icon: Icons.merge_type_rounded,
-                        title: 'Mux (мультиплексирование)',
-                        subtitle: 'Несколько потоков через одно соединение — быстрее открытие сайтов',
+                        title: tr('Mux (мультиплексирование)'),
+                        subtitle: tr('Несколько потоков через одно соединение — быстрее открытие сайтов'),
                         trailing: NeonToggle(value: _muxEnabled, onChanged: _setMuxEnabled),
                       ),
                       if (_muxEnabled) ...[
@@ -394,7 +398,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         Row(
                           children: [
                             const SizedBox(width: 48),
-                            const Text('Протокол:', style: TextStyle(fontSize: 11, color: AppColors.textDim)),
+                            Text(tr('Протокол:'), style: const TextStyle(fontSize: 11, color: AppColors.textDim)),
                             const Spacer(),
                             DropdownButton<String>(
                               value: _muxProtocol,
@@ -402,7 +406,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                               dropdownColor: AppColors.bgCard,
                               style: const TextStyle(color: AppColors.textDim, fontSize: 12),
                               items: _muxProtocolLabels.entries
-                                  .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
+                                  .map((e) => DropdownMenuItem(value: e.key, child: Text(tr(e.value))))
                                   .toList(),
                               onChanged: _setMuxProtocol,
                             ),
@@ -415,10 +419,10 @@ class _SecurityScreenState extends State<SecurityScreen> {
                       // _setAggressiveReconnect выше.
                       _Row(
                         icon: Icons.replay_circle_filled_rounded,
-                        title: 'Агрессивное переподключение',
+                        title: tr('Агрессивное переподключение'),
                         subtitle: _aggressiveReconnect
-                            ? 'До 8 попыток восстановить туннель при обрыве'
-                            : 'До 3 попыток восстановить туннель при обрыве',
+                            ? tr('До 8 попыток восстановить туннель при обрыве')
+                            : tr('До 3 попыток восстановить туннель при обрыве'),
                         trailing: NeonToggle(
                           value: _aggressiveReconnect,
                           onChanged: _setAggressiveReconnect,
@@ -430,22 +434,22 @@ class _SecurityScreenState extends State<SecurityScreen> {
                 const SizedBox(height: 14),
                 // [НОВОЕ] Хранение логов — срок автоудаления (1/7/30 дней)
                 // и ручное удаление всех записей. См. AppLogService.
-                const SectionTitle('Хранение логов'),
+                SectionTitle(tr('Хранение логов')),
                 NeonCard(
                   child: Column(
                     children: [
                       _Row(
                         icon: Icons.auto_delete_rounded,
-                        title: 'Срок хранения логов',
+                        title: tr('Срок хранения логов'),
                         subtitle:
-                            'Записи старше срока (${_logRetentionLabels[_logRetentionDays]}) удаляются автоматически',
+                            '${tr('Записи старше срока')} (${tr(_logRetentionLabels[_logRetentionDays]!)}) ${tr('удаляются автоматически')}',
                         trailing: DropdownButton<int>(
                           value: _logRetentionDays,
                           underline: const SizedBox.shrink(),
                           dropdownColor: AppColors.bgCard,
                           style: const TextStyle(color: AppColors.textDim, fontSize: 12),
                           items: _logRetentionLabels.entries
-                              .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
+                              .map((e) => DropdownMenuItem(value: e.key, child: Text(tr(e.value))))
                               .toList(),
                           onChanged: _setLogRetentionDays,
                         ),
@@ -453,8 +457,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
                       const Divider(height: 20),
                       _Row(
                         icon: Icons.summarize_rounded,
-                        title: 'Сохранено записей',
-                        subtitle: 'События подключения и ошибки за выбранный период',
+                        title: tr('Сохранено записей'),
+                        subtitle: tr('События подключения и ошибки за выбранный период'),
                         trailing: ValueListenableBuilder<int>(
                           valueListenable: AppLogService.instance.entryCount,
                           builder: (context, count, _) => Text(
@@ -470,7 +474,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                       // списком в стиле остальных экранов приложения.
                       Center(
                         child: PillButton(
-                          label: 'Просмотреть логи',
+                          label: tr('Просмотреть логи'),
                           icon: '🗒️',
                           onTap: () => Navigator.push(
                             context,
@@ -483,8 +487,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         child: OutlinedButton.icon(
                           onPressed: _deleteAllLogs,
                           icon: const Icon(Icons.delete_forever_rounded, size: 16, color: AppColors.danger),
-                          label: const Text('Удалить все логи',
-                              style: TextStyle(color: AppColors.danger, fontSize: 12)),
+                          label: Text(tr('Удалить все логи'),
+                              style: const TextStyle(color: AppColors.danger, fontSize: 12)),
                           style: OutlinedButton.styleFrom(
                             side: const BorderSide(color: AppColors.danger),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -499,6 +503,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
             ],
           ),
         ),
+      ),
       ),
     );
   }
