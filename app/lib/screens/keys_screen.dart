@@ -221,9 +221,20 @@ class _KeysScreenState extends State<KeysScreen> {
   @override
   Widget build(BuildContext context) {
     // [НОВОЕ] Модуль переводчика.
+    // [ИСПРАВЛЕНО — Material-иерархия] Экран открывается и как вкладка
+    // нижней навигации (там Scaffold уже есть у RootShell), и отдельным
+    // MaterialPageRoute из меню/баланса (menu_screen.dart::_go,
+    // balance_screen.dart::_go) — во втором случае без собственного
+    // Scaffold текст оставался без Material-предка и Flutter показывал
+    // аварийное жёлтое двойное подчёркивание. Вложенный Scaffold внутри
+    // Scaffold — стандартный и безопасный паттерн Flutter, лишнего AppBar
+    // здесь нет, так что для вкладки ничего не меняется.
     return AnimatedBuilder(
       animation: LocaleService.instance,
-      builder: (context, _) => RefreshIndicator(
+      builder: (context, _) => Scaffold(
+      backgroundColor: AppColors.bg,
+      body: SafeArea(
+        child: RefreshIndicator(
       onRefresh: _load,
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
@@ -282,6 +293,8 @@ class _KeysScreenState extends State<KeysScreen> {
             if (_keys != null && _keys!.isNotEmpty)
               PillButton(label: tr('Купить новый ключ'), dashed: true, onTap: _buyNew),
           ],
+        ),
+      ),
         ),
       ),
       ),
