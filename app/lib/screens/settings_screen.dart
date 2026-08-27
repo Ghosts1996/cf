@@ -4,6 +4,8 @@ import '../widgets/neon.dart';
 import '../services/api_client.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/locale_service.dart';
+import '../l10n/app_language.dart';
 
 /// Настройки — сведено по SCREEN 7 макета (.settings-row + .toggle).
 ///
@@ -141,7 +143,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.dpiBypass, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Изменение применится при следующем подключении — переподключись, чтобы включить сейчас')),
+        SnackBar(content: Text(tr('Изменение применится при следующем подключении — переподключись, чтобы включить сейчас'))),
       );
     }
   }
@@ -171,7 +173,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.proxyOnlyMode, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы сменить режим сейчас')),
+        SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы сменить режим сейчас'))),
       );
     }
   }
@@ -192,7 +194,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setString(PrefKeys.dnsServerProvider, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас')),
+        SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас'))),
       );
     }
   }
@@ -205,7 +207,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setString(PrefKeys.customDnsServer, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас')),
+        SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас'))),
       );
     }
   }
@@ -216,7 +218,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.ipv6Enabled, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Применится при следующем подключении — переподключись, чтобы включить сейчас')),
+        SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы включить сейчас'))),
       );
     }
   }
@@ -247,15 +249,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.bgCard,
-        title: const Text('Очистить кэш?'),
-        content: const Text(
-          'Локальные данные приложения (кэш серверов, избранное) будут удалены. '
-          'Вход в аккаунт при этом сохранится.',
-          style: TextStyle(color: AppColors.textDim, fontSize: 13),
+        title: Text(tr('Очистить кэш?')),
+        content: Text(
+          tr('Локальные данные приложения (кэш серверов, избранное) будут удалены. '
+          'Вход в аккаунт при этом сохранится.'),
+          style: const TextStyle(color: AppColors.textDim, fontSize: 13),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Отмена')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Очистить')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(tr('Отмена'))),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: Text(tr('Очистить'))),
         ],
       ),
     );
@@ -271,7 +273,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ]);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Кэш очищен')),
+        SnackBar(content: Text(tr('Кэш очищен'))),
       );
     }
   }
@@ -281,14 +283,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.bgCard,
-        title: const Text('Выйти из аккаунта?'),
-        content: const Text('Тебе нужно будет снова войти по email и паролю.',
-            style: TextStyle(color: AppColors.textDim, fontSize: 13)),
+        title: Text(tr('Выйти из аккаунта?')),
+        content: Text(tr('Тебе нужно будет снова войти по email и паролю.'),
+            style: const TextStyle(color: AppColors.textDim, fontSize: 13)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(tr('Отмена'))),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Выйти', style: TextStyle(color: AppColors.danger)),
+            child: Text(tr('Выйти'), style: const TextStyle(color: AppColors.danger)),
           ),
         ],
       ),
@@ -299,9 +301,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  // [НОВОЕ] Модуль переводчика — кнопка "Язык". Раньше строка была просто
+  // текстом ('Русский') без onTap — теперь открывает список языков из
+  // AppLanguage (см. lib/l10n/app_language.dart) и переключает через
+  // LocaleService.setLanguage. Список экрана перерисовывается сам —
+  // build() ниже обёрнут в AnimatedBuilder, слушающий LocaleService.
+  Future<void> _pickLanguage() async {
+    final chosen = await showDialog<AppLanguage>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: AppColors.bgCard,
+        title: Text(tr('Язык')),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final lang in AppLanguage.values)
+              RadioListTile<AppLanguage>(
+                value: lang,
+                groupValue: LocaleService.instance.language,
+                activeColor: AppColors.violet2,
+                title: Text(lang.label),
+                onChanged: (v) => Navigator.pop(context, v),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text(tr('Отмена'))),
+        ],
+      ),
+    );
+    if (chosen != null) {
+      await LocaleService.instance.setLanguage(chosen);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    // [НОВОЕ] Модуль переводчика — этот экран слушает LocaleService
+    // напрямую (а не только через глобальный AnimatedBuilder в main.dart),
+    // потому что именно тут находится кнопка "Язык": пользователь должен
+    // увидеть результат выбора мгновенно, на этом же экране, не выходя из
+    // него — иначе после выбора языка строка "Язык" продолжала бы
+    // показывать старое название до следующего открытия экрана.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
@@ -309,7 +353,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               AppHeader(trailing: Icons.arrow_back_rounded, onTrailingTap: () => Navigator.pop(context)),
-              const Text('Настройки', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(tr('Настройки'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const SizedBox(height: 10),
               if (!_loaded)
                 const Padding(
@@ -318,32 +362,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 )
               else ...[
                 _SettingsRow(
-                  label: 'Автоподключение при запуске',
-                  hint: 'Поднимает VPN сразу при открытии приложения, если уже есть сохранённый ключ',
+                  label: tr('Автоподключение при запуске'),
+                  hint: tr('Поднимает VPN сразу при открытии приложения, если уже есть сохранённый ключ'),
                   trailing: NeonToggle(value: _autoConnect, onChanged: _setAutoConnect),
                 ),
                 _SettingsRow(
-                  label: 'Умное подключение на публичном Wi-Fi',
-                  hint: 'Включает VPN при переходе на любую Wi-Fi-сеть — ОС не даёт отличить '
-                      'публичную от домашней без спецправ',
+                  label: tr('Умное подключение на публичном Wi-Fi'),
+                  hint: tr('Включает VPN при переходе на любую Wi-Fi-сеть — ОС не даёт отличить '
+                      'публичную от домашней без спецправ'),
                   trailing: NeonToggle(value: _smartWifi, onChanged: _setSmartWifi),
                 ),
                 _SettingsRow(
-                  label: 'Kill Switch',
-                  hint: 'Автоматически переподключает туннель при обрыве связи. Тот же '
-                      'переключатель, что и в разделе «Безопасность»',
+                  label: tr('Kill Switch'),
+                  hint: tr('Автоматически переподключает туннель при обрыве связи. Тот же '
+                      'переключатель, что и в разделе «Безопасность»'),
                   trailing: NeonToggle(value: _killSwitch, onChanged: _setKillSwitch),
                 ),
                 _SettingsRow(
-                  label: 'Обход DPI (фрагментация TLS)',
-                  hint: 'Дробит первый TLS-пакет на части — помогает, если провайдер режет '
-                      'Reality-соединения по сигнатуре. Применится при следующем подключении',
+                  label: tr('Обход DPI (фрагментация TLS)'),
+                  hint: tr('Дробит первый TLS-пакет на части — помогает, если провайдер режет '
+                      'Reality-соединения по сигнатуре. Применится при следующем подключении'),
                   trailing: NeonToggle(value: _dpiBypass, onChanged: _setDpiBypass),
                 ),
                 _SettingsRow(
-                  label: 'Режим прокси (без VPN-разрешения)',
-                  hint: 'Локальный SOCKS5/HTTP-порт на телефоне вместо системного VPN — Kill '
-                      'Switch и split-tunnel в этом режиме не работают',
+                  label: tr('Режим прокси (без VPN-разрешения)'),
+                  hint: tr('Локальный SOCKS5/HTTP-порт на телефоне вместо системного VPN — Kill '
+                      'Switch и split-tunnel в этом режиме не работают'),
                   trailing: NeonToggle(value: _proxyOnly, onChanged: _setProxyOnly),
                 ),
                 if (_proxyOnly)
@@ -353,27 +397,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       padding: const EdgeInsets.only(top: 4, bottom: 8),
                       child: Text(
                         address != null
-                            ? 'Активен: $address — укажи этот адрес в настройках прокси нужного приложения'
-                            : 'Порт появится здесь после подключения (127.0.0.1:2080, SOCKS5 и HTTP)',
+                            ? '${tr('Активен:')} $address — ${tr('укажи этот адрес в настройках прокси нужного приложения')}'
+                            : tr('Порт появится здесь после подключения (127.0.0.1:2080, SOCKS5 и HTTP)'),
                         style: const TextStyle(fontSize: 10, color: AppColors.textDim),
                       ),
                     ),
                   ),
                 _SettingsRow(
-                  label: 'Язык',
-                  // [ИСПРАВЛЕНО] Строка выглядела как настройка (с активным
-                  // видом), но выбора языка в приложении не существует —
-                  // локализации (intl/l10n) в коде нет вообще, весь
-                  // интерфейс жёстко на русском. Раньше это никак не
-                  // объяснялось. Честно показываем, что менять тут пока
-                  // нечего, вместо намёка на несуществующий выбор.
-                  hint: 'Пока доступен только русский — переключение языков не реализовано',
-                  trailing: const Text('Русский', style: TextStyle(color: AppColors.textDim, fontSize: 12)),
+                  label: tr('Язык'),
+                  // [ИСПРАВЛЕНО] Раньше строка выглядела как настройка (с
+                  // активным видом), но выбора языка в приложении не
+                  // существовало — локализации в коде не было вообще, весь
+                  // интерфейс жёстко на русском. Теперь кнопка реально
+                  // работает — см. _pickLanguage выше и модуль переводчика
+                  // в lib/l10n/ + lib/services/locale_service.dart.
+                  hint: tr('Меняет язык интерфейса приложения'),
+                  onTap: _pickLanguage,
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(LocaleService.instance.language.label,
+                          style: const TextStyle(color: AppColors.textDim, fontSize: 12)),
+                      const SizedBox(width: 4),
+                      const Icon(Icons.chevron_right_rounded, color: AppColors.textDim, size: 18),
+                    ],
+                  ),
                 ),
                 _SettingsRow(
-                  label: 'DNS-сервер',
-                  hint: 'DNS-over-HTTPS резолвер для доменов внутри туннеля. Применится при '
-                      'следующем подключении',
+                  label: tr('DNS-сервер'),
+                  hint: tr('DNS-over-HTTPS резолвер для доменов внутри туннеля. Применится при '
+                      'следующем подключении'),
                   trailing: DropdownButton<String>(
                     value: _dnsProvider,
                     underline: const SizedBox.shrink(),
@@ -396,7 +449,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       style: const TextStyle(fontSize: 12, color: AppColors.text),
                       decoration: InputDecoration(
                         isDense: true,
-                        hintText: 'Например: 9.9.9.11',
+                        hintText: tr('Например: 9.9.9.11'),
                         hintStyle: const TextStyle(color: AppColors.textDim, fontSize: 12),
                         filled: true,
                         fillColor: AppColors.bgCard,
@@ -410,15 +463,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 // [НОВОЕ] IPv6 — см. _setIpv6Enabled выше.
                 _SettingsRow(
-                  label: 'Разрешить IPv6 в туннеле',
-                  hint: 'Пропускает IPv6-трафик через VPN в дополнение к IPv4. Применится при '
-                      'следующем подключении',
+                  label: tr('Разрешить IPv6 в туннеле'),
+                  hint: tr('Пропускает IPv6-трафик через VPN в дополнение к IPv4. Применится при '
+                      'следующем подключении'),
                   trailing: NeonToggle(value: _ipv6Enabled, onChanged: _setIpv6Enabled),
                 ),
                 _SettingsRow(
-                  label: 'Очистить кэш',
-                  hint: 'Удаляет избранные серверы и локальный выбор split-туннелирования. '
-                      'Вход в аккаунт сохранится',
+                  label: tr('Очистить кэш'),
+                  hint: tr('Удаляет избранные серверы и локальный выбор split-туннелирования. '
+                      'Вход в аккаунт сохранится'),
                   onTap: _clearCache,
                   trailing: const Icon(Icons.chevron_right_rounded, color: AppColors.textDim),
                 ),
@@ -428,7 +481,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: OutlinedButton.icon(
                   onPressed: _logout,
                   icon: const Icon(Icons.logout_rounded, size: 16, color: AppColors.danger),
-                  label: const Text('Выйти из аккаунта', style: TextStyle(color: AppColors.danger, fontSize: 12)),
+                  label: Text(tr('Выйти из аккаунта'), style: const TextStyle(color: AppColors.danger, fontSize: 12)),
                   style: OutlinedButton.styleFrom(
                     side: const BorderSide(color: AppColors.danger),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -439,6 +492,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
         ),
+      ),
       ),
     );
   }
