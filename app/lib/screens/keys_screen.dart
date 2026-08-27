@@ -5,6 +5,7 @@ import '../widgets/neon.dart';
 import '../services/api_client.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/locale_service.dart';
 import 'plans_screen.dart';
 
 /// Экран «Мои ключи».
@@ -67,8 +68,8 @@ class _KeysScreenState extends State<KeysScreen> {
     final text = _manualKeyController.text.trim();
     if (text.isNotEmpty && !text.startsWith('vless://') && !text.startsWith('http://') && !text.startsWith('https://')) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Похоже на неверную ссылку — жду vless://... или http(s)://ссылку на подписку'),
+        SnackBar(
+          content: Text(tr('Похоже на неверную ссылку — жду vless://... или http(s)://ссылку на подписку')),
           backgroundColor: AppColors.danger,
         ),
       );
@@ -79,7 +80,7 @@ class _KeysScreenState extends State<KeysScreen> {
     if (mounted) {
       setState(() => _manualKeySaving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(text.isEmpty ? 'Ручной ключ удалён' : 'Ключ сохранён — теперь подключение пойдёт по нему')),
+        SnackBar(content: Text(text.isEmpty ? tr('Ручной ключ удалён') : tr('Ключ сохранён — теперь подключение пойдёт по нему'))),
       );
     }
   }
@@ -96,7 +97,7 @@ class _KeysScreenState extends State<KeysScreen> {
     final text = _manualKeyController.text.trim();
     if (text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Сначала вставь vless://-ссылку или ссылку на подписку')),
+        SnackBar(content: Text(tr('Сначала вставь vless://-ссылку или ссылку на подписку'))),
       );
       return;
     }
@@ -109,7 +110,7 @@ class _KeysScreenState extends State<KeysScreen> {
         context: context,
         builder: (_) => AlertDialog(
           backgroundColor: AppColors.bgCard,
-          title: Text('Найдено серверов: ${result.serverCount}'),
+          title: Text('${tr('Найдено серверов:')} ${result.serverCount}'),
           content: SizedBox(
             width: double.maxFinite,
             child: ListView(
@@ -129,13 +130,13 @@ class _KeysScreenState extends State<KeysScreen> {
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Ок')),
+            TextButton(onPressed: () => Navigator.pop(context), child: Text(tr('Ок'))),
           ],
         ),
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(result.error ?? 'Ключ не распознан'), backgroundColor: AppColors.danger),
+        SnackBar(content: Text(result.error ?? tr('Ключ не распознан')), backgroundColor: AppColors.danger),
       );
     }
   }
@@ -145,7 +146,7 @@ class _KeysScreenState extends State<KeysScreen> {
     await ManualKeyStore.instance.clear();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Ручной ключ удалён — снова используются ключи из личного кабинета')),
+        SnackBar(content: Text(tr('Ручной ключ удалён — снова используются ключи из личного кабинета'))),
       );
     }
   }
@@ -175,7 +176,7 @@ class _KeysScreenState extends State<KeysScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = 'Не удалось загрузить ключи: $e';
+        _error = '${tr('Не удалось загрузить ключи:')} \$e';
         _loading = false;
       });
     }
@@ -197,7 +198,7 @@ class _KeysScreenState extends State<KeysScreen> {
       final newLimit = await _api.upgradeKeyDevices((key['key_id'] as num).toInt());
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Лимит устройств увеличен до $newLimit')),
+          SnackBar(content: Text('${tr('Лимит устройств увеличен до')} $newLimit')),
         );
         _load();
       }
@@ -213,32 +214,24 @@ class _KeysScreenState extends State<KeysScreen> {
   void _copyLink(String link) {
     Clipboard.setData(ClipboardData(text: link));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Ссылка скопирована')),
+      SnackBar(content: Text(tr('Ссылка скопирована'))),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    // [ИСПРАВЛЕНО] KeysScreen встроен во вкладку RootShell (там уже есть
-    // общий Scaffold), но также открывается отдельным MaterialPageRoute —
-    // из MenuScreen, BalanceScreen и из самого себя (_buyNew/_extend ->
-    // PlansScreen и обратно). Во втором случае без собственного Scaffold
-    // текст вне NeonCard попадал под аварийный DefaultTextStyle Flutter с
-    // жёлтым двойным подчёркиванием (нет Material-предка). Вложенный
-    // Scaffold внутри Scaffold безопасен — тот же паттерн уже используется
-    // в servers_screen.dart, который тоже одновременно вкладка и маршрут.
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      body: SafeArea(
-        child: RefreshIndicator(
-          onRefresh: _load,
-          child: SingleChildScrollView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-            const AppHeader(trailing: Icons.menu_rounded, screenLabel: 'Мои ключи'),
+    // [НОВОЕ] Модуль переводчика.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => RefreshIndicator(
+      onRefresh: _load,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AppHeader(trailing: Icons.menu_rounded, screenLabel: tr('Мои ключи')),
             const SizedBox(height: 16),
             _ManualKeyCard(
               controller: _manualKeyController,
@@ -259,7 +252,7 @@ class _KeysScreenState extends State<KeysScreen> {
                     const SizedBox(height: 12),
                     Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: AppColors.danger, fontSize: 13)),
                     const SizedBox(height: 12),
-                    OutlinedButton(onPressed: _load, child: const Text('Повторить')),
+                    OutlinedButton(onPressed: _load, child: Text(tr('Повторить'))),
                   ],
                 ),
               ),
@@ -270,9 +263,9 @@ class _KeysScreenState extends State<KeysScreen> {
                   children: [
                     const Icon(Icons.vpn_key_off_rounded, color: AppColors.textDim, size: 36),
                     const SizedBox(height: 12),
-                    const Text('У тебя пока нет ключей', style: TextStyle(color: AppColors.textDim)),
+                    Text(tr('У тебя пока нет ключей'), style: const TextStyle(color: AppColors.textDim)),
                     const SizedBox(height: 12),
-                    ElevatedButton(onPressed: _buyNew, child: const Text('Оформить подписку')),
+                    ElevatedButton(onPressed: _buyNew, child: Text(tr('Оформить подписку'))),
                   ],
                 ),
               ),
@@ -287,11 +280,10 @@ class _KeysScreenState extends State<KeysScreen> {
                 const SizedBox(height: 12),
               ],
             if (_keys != null && _keys!.isNotEmpty)
-              PillButton(label: 'Купить новый ключ', dashed: true, onTap: _buyNew),
-              ],
-            ),
-          ),
+              PillButton(label: tr('Купить новый ключ'), dashed: true, onTap: _buyNew),
+          ],
         ),
+      ),
       ),
     );
   }
@@ -321,8 +313,8 @@ class _KeyCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Ключ #${data['key_id']}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-              NeonBadge(active ? 'активен' : 'истёк', color: active ? AppColors.success : AppColors.danger),
+              Text('${tr('Ключ')} #${data['key_id']}', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+              NeonBadge(active ? tr('активен') : tr('истёк'), color: active ? AppColors.success : AppColors.danger),
             ],
           ),
           const SizedBox(height: 10),
@@ -344,27 +336,27 @@ class _KeyCard extends StatelessWidget {
                       child: Text(link, maxLines: 1, overflow: TextOverflow.ellipsis,
                           style: const TextStyle(fontSize: 11, color: AppColors.textDim)),
                     ),
-                    const Text('Копировать', style: TextStyle(fontSize: 11, color: AppColors.violetGlow, fontWeight: FontWeight.w600)),
+                    Text(tr('Копировать'), style: const TextStyle(fontSize: 11, color: AppColors.violetGlow, fontWeight: FontWeight.w600)),
                   ],
                 ),
               ),
             )
           else
-            const Text('Ссылка временно недоступна — панель могла быть недоступна при запросе',
-                style: TextStyle(fontSize: 11, color: AppColors.textDim)),
+            Text(tr('Ссылка временно недоступна — панель могла быть недоступна при запросе'),
+                style: const TextStyle(fontSize: 11, color: AppColors.textDim)),
           const SizedBox(height: 10),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Лимит устройств', style: TextStyle(fontSize: 12, color: AppColors.textDim)),
+              Text(tr('Лимит устройств'), style: const TextStyle(fontSize: 12, color: AppColors.textDim)),
               Row(children: [
                 Text('$devicesLimit / 4', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
                 if (devicesLimit < 4) ...[
                   const SizedBox(width: 8),
                   GestureDetector(
                     onTap: onAddDevice,
-                    child: const Text('+ докупить (50 ₽)',
-                        style: TextStyle(fontSize: 11, color: AppColors.violetGlow, fontWeight: FontWeight.w600)),
+                    child: Text(tr('+ докупить (50 ₽)'),
+                        style: const TextStyle(fontSize: 11, color: AppColors.violetGlow, fontWeight: FontWeight.w600)),
                   ),
                 ],
               ]),
@@ -374,8 +366,8 @@ class _KeyCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Срок действия', style: TextStyle(fontSize: 12, color: AppColors.textDim)),
-              Text(daysLeft != null ? 'Осталось $daysLeft дн.' : '—',
+              Text(tr('Срок действия'), style: const TextStyle(fontSize: 12, color: AppColors.textDim)),
+              Text(daysLeft != null ? '${tr('Осталось')} $daysLeft ${tr('дн.')}' : '—',
                   style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
             ],
           ),
@@ -385,7 +377,7 @@ class _KeyCard extends StatelessWidget {
             child: ElevatedButton.icon(
               onPressed: onExtend,
               icon: const Icon(Icons.refresh_rounded, size: 16),
-              label: const Text('Продлить ключ'),
+              label: Text(tr('Продлить ключ')),
             ),
           ),
         ],
@@ -423,18 +415,18 @@ class _ManualKeyCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            children: const [
-              Icon(Icons.edit_note_rounded, size: 16, color: AppColors.violetGlow),
-              SizedBox(width: 8),
-              Text('Свой ключ (вручную)', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+            children: [
+              const Icon(Icons.edit_note_rounded, size: 16, color: AppColors.violetGlow),
+              const SizedBox(width: 8),
+              Text(tr('Свой ключ (вручную)'), style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
             ],
           ),
           const SizedBox(height: 6),
-          const Text(
-            'Вставь vless://-ссылку или ссылку на подписку — приложение подключится '
+          Text(
+            tr('Вставь vless://-ссылку или ссылку на подписку — приложение подключится '
             'именно по ней, в приоритете перед ключами из личного кабинета. Оставь поле '
-            'пустым и сохрани, чтобы вернуться к ключам из личного кабинета.',
-            style: TextStyle(fontSize: 11.5, color: AppColors.textDim, height: 1.4),
+            'пустым и сохрани, чтобы вернуться к ключам из личного кабинета.'),
+            style: const TextStyle(fontSize: 11.5, color: AppColors.textDim, height: 1.4),
           ),
           const SizedBox(height: 12),
           TextField(
@@ -443,7 +435,7 @@ class _ManualKeyCard extends StatelessWidget {
             minLines: 1,
             style: const TextStyle(fontSize: 12, color: AppColors.text),
             decoration: InputDecoration(
-              hintText: 'vless://... или https://.../sub/...',
+              hintText: tr('vless://... или https://.../sub/...'),
               hintStyle: const TextStyle(fontSize: 12, color: AppColors.textDim),
               filled: true,
               fillColor: const Color(0xFF0A0614),
@@ -474,11 +466,11 @@ class _ManualKeyCard extends StatelessWidget {
                           width: 16,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Text('Сохранить'),
+                      : Text(tr('Сохранить')),
                 ),
               ),
               const SizedBox(width: 10),
-              OutlinedButton(onPressed: saving ? null : onClear, child: const Text('Удалить')),
+              OutlinedButton(onPressed: saving ? null : onClear, child: Text(tr('Удалить'))),
             ],
           ),
           const SizedBox(height: 10),
@@ -498,7 +490,7 @@ class _ManualKeyCard extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.fact_check_rounded, size: 16),
-              label: const Text('Проверить ключ'),
+              label: Text(tr('Проверить ключ')),
             ),
           ),
         ],
