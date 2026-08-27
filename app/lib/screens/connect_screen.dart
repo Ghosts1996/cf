@@ -6,6 +6,7 @@ import '../widgets/neon.dart';
 import '../services/api_client.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/locale_service.dart';
 import '../state/selected_server.dart';
 import 'plans_screen.dart';
 import 'servers_screen.dart';
@@ -227,7 +228,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     setState(() => _manualKey = ManualKeyStore.instance.value);
     if (_tunnel.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Ключ обновлён. Переподключись, чтобы применить его.')),
+        SnackBar(content: Text(tr('Ключ обновлён. Переподключись, чтобы применить его.'))),
       );
     }
   }
@@ -358,7 +359,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _keyError = 'Не удалось проверить статус ключа: $e';
+        _keyError = '${tr('Не удалось проверить статус ключа:')} $e';
         _loadingKey = false;
       });
     }
@@ -441,11 +442,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
           _connectedKeyId = (newBest['key_id'] as num?)?.toInt();
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Срок действия предыдущего ключа истёк — переключились на следующий активный ключ')),
+              SnackBar(content: Text(tr('Срок действия предыдущего ключа истёк — переключились на следующий активный ключ'))),
             );
           }
         } catch (e) {
-          if (mounted) _showError('Ключ истёк, а переключиться на следующий не удалось: $e');
+          if (mounted) _showError('${tr('Ключ истёк, а переключиться на следующий не удалось:')} $e');
         } finally {
           if (mounted) setState(() => _connecting = false);
           _measureLatency();
@@ -462,7 +463,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         _activeKey = null;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Срок действия ключа истёк, других активных ключей нет — оформи новую подписку')),
+        SnackBar(content: Text(tr('Срок действия ключа истёк, других активных ключей нет — оформи новую подписку'))),
       );
     }
   }
@@ -513,7 +514,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     }
 
     if (connectionString == null || connectionString.isEmpty) {
-      _showError('Для этого ключа пока нет ссылки на конфигурацию сервера — обратись в поддержку.');
+      _showError(tr('Для этого ключа пока нет ссылки на конфигурацию сервера — обратись в поддержку.'));
       return;
     }
 
@@ -535,7 +536,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     } on TunnelException catch (e) {
       _showError(e.message, fallbackConnectionString: connectionString);
     } catch (e) {
-      _showError('Не удалось подключиться: $e', fallbackConnectionString: connectionString);
+      _showError('${tr('Не удалось подключиться:')} $e', fallbackConnectionString: connectionString);
     } finally {
       if (mounted) setState(() => _connecting = false);
     }
@@ -557,7 +558,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         action: fallbackConnectionString == null
             ? null
             : SnackBarAction(
-                label: 'Настройки VPN',
+                label: tr('Настройки VPN'),
                 textColor: AppColors.violet2,
                 onPressed: () => _tunnel.openSystemVpnSettingsHint(),
               ),
@@ -597,18 +598,18 @@ class _ConnectScreenState extends State<ConnectScreen> {
     // метод рабочий, просто его результат никогда не долетал до UI).
     // Теперь показываем то, что реально измерено, независимо от того,
     // подключены мы или нет — разница только в тексте на случай неудачи.
-    if (_latencyChecking && _latencyMs == null) return 'проверка соединения…';
+    if (_latencyChecking && _latencyMs == null) return tr('проверка соединения…');
     if (_latencyMs == null) {
       // Замер завершился, но значения нет — либо TCP-подключение к узлу
       // не удалось (сервер не отвечает), либо это самый первый рендер до
       // первого запуска _measureLatency() из initState().
       return _tunnel.isConnected
-          ? 'сервер не отвечает на проверку задержки'
-          : 'проверка соединения…';
+          ? tr('сервер не отвечает на проверку задержки')
+          : tr('проверка соединения…');
     }
-    if (_latencyMs! < 80) return '$_latencyMs мс · отличный сигнал';
-    if (_latencyMs! < 200) return '$_latencyMs мс · стабильно';
-    return '$_latencyMs мс · медленно';
+    if (_latencyMs! < 80) return '$_latencyMs ${tr('мс · отличный сигнал')}';
+    if (_latencyMs! < 200) return '$_latencyMs ${tr('мс · стабильно')}';
+    return '$_latencyMs ${tr('мс · медленно')}';
   }
 
   @override
@@ -620,11 +621,17 @@ class _ConnectScreenState extends State<ConnectScreen> {
     // лимит устройств API не возвращал. Не разыменовываем nullable значение.
     final devicesLimit = (_activeKey?['devices_limit'] as num?)?.toInt();
 
-    return SingleChildScrollView(
+    // [НОВОЕ] Модуль переводчика — главный экран приложения (первая
+    // вкладка), поэтому подписка на LocaleService особенно важна: именно
+    // сюда пользователь возвращается сразу после смены языка в
+    // "Настройки" -> "Язык".
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
       child: Column(
         children: [
-          const AppHeader(trailing: Icons.menu_rounded, screenLabel: 'Подключение'),
+          AppHeader(trailing: Icons.menu_rounded, screenLabel: tr('Подключение')),
           if (_hasManualKey)
             Padding(
               padding: const EdgeInsets.only(top: 10),
@@ -632,8 +639,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
                 children: [
                   const Icon(Icons.edit_note_rounded, size: 14, color: AppColors.violetGlow),
                   const SizedBox(width: 6),
-                  const Text('Используется ключ, добавленный вручную',
-                      style: TextStyle(fontSize: 11, color: AppColors.violetGlow, fontWeight: FontWeight.w600)),
+                  Text(tr('Используется ключ, добавленный вручную'),
+                      style: const TextStyle(fontSize: 11, color: AppColors.violetGlow, fontWeight: FontWeight.w600)),
                 ],
               ),
             ),
@@ -651,11 +658,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
                 children: [
                   const Icon(Icons.warning_rounded, color: AppColors.danger, size: 18),
                   const SizedBox(width: 10),
-                  const Expanded(
+                  Expanded(
                     child: Text(
-                      'Туннель неожиданно оборвался — восстанавливаю соединение. '
-                      'Интернет сейчас идёт БЕЗ защиты VPN.',
-                      style: TextStyle(fontSize: 11.5, color: AppColors.text, height: 1.4),
+                      tr('Туннель неожиданно оборвался — восстанавливаю соединение. '
+                      'Интернет сейчас идёт БЕЗ защиты VPN.'),
+                      style: const TextStyle(fontSize: 11.5, color: AppColors.text, height: 1.4),
                     ),
                   ),
                 ],
@@ -685,9 +692,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   // перезапуская всё приложение целиком.
                   GestureDetector(
                     onTap: _loadingKey ? null : _loadKeyState,
-                    child: const Text(
-                      'Повторить попытку',
-                      style: TextStyle(
+                    child: Text(
+                      tr('Повторить попытку'),
+                      style: const TextStyle(
                         color: AppColors.violet2,
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
@@ -708,7 +715,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
             final activeName = connected
                 ? (_tunnel.connectedServerName.value ?? SelectedServer.displayName.value)
                 : SelectedServer.displayName.value;
-            final label = activeName ?? 'Автовыбор';
+            final label = activeName ?? tr('Автовыбор');
             return ServerPill(
               code: _codeFromName(label),
               name: label,
@@ -738,12 +745,12 @@ class _ConnectScreenState extends State<ConnectScreen> {
               // обнуляются между тиками (см. _applyTrafficStats/
               // _pollNativeTraffic). Раньше в UI они нигде не
               // использовались — теперь карточки читают именно их.
-              StatMiniCard(label: 'Приём', value: _formatBytes(s?.downloadTotalBytes)),
+              StatMiniCard(label: tr('Приём'), value: _formatBytes(s?.downloadTotalBytes)),
               const SizedBox(width: 10),
-              StatMiniCard(label: 'Отдача', value: _formatBytes(s?.uploadTotalBytes)),
+              StatMiniCard(label: tr('Отдача'), value: _formatBytes(s?.uploadTotalBytes)),
               const SizedBox(width: 10),
               StatMiniCard(
-                label: 'Устройств',
+                label: tr('Устройств'),
                 value: devicesLimit != null ? '$devicesLimit' : '—',
               ),
             ],
@@ -755,7 +762,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
               child: ElevatedButton(
                 onPressed: () =>
                     Navigator.push(context, MaterialPageRoute(builder: (_) => const PlansScreen())),
-                child: const Text('Оформить подписку'),
+                child: Text(tr('Оформить подписку')),
               ),
             )
           else
@@ -765,7 +772,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   child: OutlinedButton(
                     onPressed: () =>
                         Navigator.push(context, MaterialPageRoute(builder: (_) => const ServersScreen())),
-                    child: const Text('Сменить сервер'),
+                    child: Text(tr('Сменить сервер')),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -780,19 +787,19 @@ class _ConnectScreenState extends State<ConnectScreen> {
                             width: 18, height: 18,
                             child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                           )
-                        : Text(connected ? 'Отключить' : 'Подключить'),
+                        : Text(connected ? tr('Отключить') : tr('Подключить')),
                   ),
                 ),
               ],
             ),
           const SizedBox(height: 14),
           PillButton(
-            label: 'Тест скорости',
+            label: tr('Тест скорости'),
             icon: '⚡',
             onTap: () {
               if (!connected) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Тест скорости доступен после подключения к серверу')),
+                  SnackBar(content: Text(tr('Тест скорости доступен после подключения к серверу'))),
                 );
                 return;
               }
@@ -800,6 +807,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
             },
           ),
         ],
+      ),
       ),
     );
   }
@@ -872,11 +880,11 @@ class _ConnectRing extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  !hasKey ? 'НЕТ КЛЮЧА' : (connected ? 'ПОДКЛЮЧЕНО' : 'ОТКЛЮЧЕНО'),
+                  !hasKey ? tr('НЕТ КЛЮЧА') : (connected ? tr('ПОДКЛЮЧЕНО') : tr('ОТКЛЮЧЕНО')),
                   style: orbitron(fontSize: 15, letterSpacing: 1),
                 ),
                 const SizedBox(height: 4),
-                const Text('VLESS · Reality', style: TextStyle(color: AppColors.textDim, fontSize: 11)),
+                Text(tr('VLESS · Reality'), style: const TextStyle(color: AppColors.textDim, fontSize: 11)),
                 if (connected) ...[
                   const SizedBox(height: 10),
                   Text(timerLabel,
