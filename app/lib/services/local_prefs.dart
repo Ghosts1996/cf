@@ -205,6 +205,12 @@ class PrefKeys {
   // "Хранение логов"). Записи журнала старше этого срока стираются
   // автоматически, значение по умолчанию — AppLogService.defaultRetentionDays.
   static const logRetentionDays = 'security.log_retention_days';
+
+  // [НОВОЕ] Модуль переводчика — выбранный язык интерфейса (ISO 639-1,
+  // 'ru' | 'en' | ...), см. services/locale_service.dart. Читается один
+  // раз в main() до runApp(), пишется из кнопки "Язык" на экране
+  // "Настройки" через LocaleService.setLanguage.
+  static const appLanguage = 'settings.app_language';
 }
 
 /// [НОВОЕ] Ин-мемори + на диске хранилище ручного ключа, добавленного
