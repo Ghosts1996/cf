@@ -6,6 +6,7 @@ import 'package:installed_apps/app_info.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/local_prefs.dart';
+import '../services/locale_service.dart';
 
 /// Split-туннелирование — сведено по SCREEN 8 макета (.app-toggle-row).
 ///
@@ -68,7 +69,7 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
       setState(() {
         _bypassed.addAll(savedBypassed);
         _loading = false;
-        _error = 'Выбор приложений доступен только на Android — на этой платформе список системы недоступен.';
+        _error = tr('Выбор приложений доступен только на Android — на этой платформе список системы недоступен.');
       });
       return;
     }
@@ -101,7 +102,7 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
         _loading = false;
         // Частая причина — нет QUERY_ALL_PACKAGES в AndroidManifest.xml
         // (см. NATIVE_SETUP.md) или сборка сделана без прогона scaffold.
-        _error = 'Не удалось получить список приложений: $e';
+        _error = '${tr('Не удалось получить список приложений:')} $e';
       });
     }
   }
@@ -119,7 +120,9 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
   @override
   Widget build(BuildContext context) {
     final isInclude = _mode == 'include';
-    return Scaffold(
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       body: SafeArea(
         child: Column(
           children: [
@@ -129,7 +132,7 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   AppHeader(trailing: Icons.arrow_back_rounded, onTrailingTap: () => Navigator.pop(context)),
-                  const Text('Split-туннелирование', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  Text(tr('Split-туннелирование'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 10),
                   // [НОВОЕ] Сегментированный переключатель режима — как
                   // "VPN для всех / выбранных приложений" в Hiddify.
@@ -144,14 +147,14 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
                       children: [
                         Expanded(
                           child: _ModeSegment(
-                            label: 'Обход выбранных',
+                            label: tr('Обход выбранных'),
                             selected: !isInclude,
                             onTap: () => _setMode('exclude'),
                           ),
                         ),
                         Expanded(
                           child: _ModeSegment(
-                            label: 'Только выбранные',
+                            label: tr('Только выбранные'),
                             selected: isInclude,
                             onTap: () => _setMode('include'),
                           ),
@@ -162,9 +165,9 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
                   const SizedBox(height: 10),
                   Text(
                     isInclude
-                        ? 'Через VPN работают ТОЛЬКО отмеченные ниже приложения — остальные всегда напрямую.'
-                        : 'Отмеченные ниже приложения работают в обход VPN — например банк или локальные сервисы. '
-                            'Список — реальные приложения с этого устройства.',
+                        ? tr('Через VPN работают ТОЛЬКО отмеченные ниже приложения — остальные всегда напрямую.')
+                        : tr('Отмеченные ниже приложения работают в обход VPN — например банк или локальные сервисы. '
+                            'Список — реальные приложения с этого устройства.'),
                     style: const TextStyle(color: AppColors.textDim, fontSize: 11, height: 1.5),
                   ),
                   const SizedBox(height: 10),
@@ -228,6 +231,7 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
               ),
           ],
         ),
+      ),
       ),
     );
   }
