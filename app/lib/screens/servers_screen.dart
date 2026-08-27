@@ -978,8 +978,8 @@ class _ServersScreenState extends State<ServersScreen> {
                   else
                     GestureDetector(
                       onTap: _realCheckAll,
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
                             horizontal: 10, vertical: 6),
                         child: Text(tr('Проверить'),
                             style: const TextStyle(
@@ -1003,8 +1003,8 @@ class _ServersScreenState extends State<ServersScreen> {
                         const TextStyle(color: AppColors.danger, fontSize: 12)),
               ),
             if (_hosts != null && _hosts!.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 20),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 20),
                 child: Text(tr('В панелях 3x-ui пока нет активных локаций.'),
                     style: const TextStyle(color: AppColors.textDim)),
               ),
