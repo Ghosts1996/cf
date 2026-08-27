@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
+import '../services/locale_service.dart';
 import 'keys_screen.dart';
 import 'plans_screen.dart';
 import 'servers_screen.dart';
@@ -72,14 +73,14 @@ class _MenuScreenState extends State<MenuScreen> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.bgCard,
-        title: const Text('Выйти из аккаунта?'),
-        content: const Text('Тебе нужно будет снова войти по email и паролю.',
-            style: TextStyle(color: AppColors.textDim, fontSize: 13)),
+        title: Text(tr('Выйти из аккаунта?')),
+        content: Text(tr('Тебе нужно будет снова войти по email и паролю.'),
+            style: const TextStyle(color: AppColors.textDim, fontSize: 13)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(tr('Отмена'))),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Выйти', style: TextStyle(color: AppColors.danger)),
+            child: Text(tr('Выйти'), style: const TextStyle(color: AppColors.danger)),
           ),
         ],
       ),
@@ -95,14 +96,14 @@ class _MenuScreenState extends State<MenuScreen> {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.bgCard,
-        title: const Text('Бесплатный период'),
-        content: const Text(
-          'Активировать бесплатный пробный период? Ключ появится сразу во всех доступных локациях '
-          'в разделе «Мои ключи».',
-          style: TextStyle(color: AppColors.textDim, fontSize: 13, height: 1.4),
+        title: Text(tr('Бесплатный период')),
+        content: Text(
+          tr('Активировать бесплатный пробный период? Ключ появится сразу во всех доступных локациях '
+          'в разделе «Мои ключи».'),
+          style: const TextStyle(color: AppColors.textDim, fontSize: 13, height: 1.4),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(context), child: Text(tr('Отмена'))),
           TextButton(
             onPressed: () async {
               Navigator.pop(context);
@@ -110,7 +111,7 @@ class _MenuScreenState extends State<MenuScreen> {
                 await _api.claimTrial();
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Триал активирован — смотри «Мои ключи»')),
+                    SnackBar(content: Text(tr('Триал активирован — смотри «Мои ключи»'))),
                   );
                   _go(const KeysScreen());
                 }
@@ -122,7 +123,7 @@ class _MenuScreenState extends State<MenuScreen> {
                 }
               }
             },
-            child: const Text('Активировать'),
+            child: Text(tr('Активировать')),
           ),
         ],
       ),
@@ -140,12 +141,20 @@ class _MenuScreenState extends State<MenuScreen> {
       return expiry != null && expiry.isAfter(DateTime.now());
     }).length;
 
-    return SingleChildScrollView(
+    // [НОВОЕ] Модуль переводчика — слушаем LocaleService, чтобы список
+    // пунктов меню и баланс сразу перерисовались новым языком, если
+    // пользователь меняет его на вложенном экране "Настройки" и
+    // возвращается назад (Navigator.pop не пересоздаёт MenuScreen сам по
+    // себе — без этой подписки старый язык остался бы виден до следующего
+    // захода на вкладку "Меню").
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const AppHeader(trailing: Icons.close_rounded, screenLabel: 'Меню'),
+          AppHeader(trailing: Icons.close_rounded, screenLabel: tr('Меню')),
           NeonCard(
             child: Row(
               children: [
@@ -155,13 +164,13 @@ class _MenuScreenState extends State<MenuScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Мой аккаунт', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                      Text(tr('Мой аккаунт'), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                       const SizedBox(height: 3),
                       Text(
                         _profile != null
-                            ? 'Баланс: ${_profile!['balance']} ₽'
-                                '${activeKeys != null ? ' · $activeKeys активных ключей' : ''}'
-                            : 'Загрузка баланса…',
+                            ? '${tr('Баланс:')} ${_profile!['balance']} ₽'
+                                '${activeKeys != null ? ' · $activeKeys ${tr('активных ключей')}' : ''}'
+                            : tr('Загрузка баланса…'),
                         style: const TextStyle(fontSize: 11, color: AppColors.textDim),
                       ),
                     ],
@@ -171,22 +180,22 @@ class _MenuScreenState extends State<MenuScreen> {
             ),
           ),
           const SizedBox(height: 6),
-          _MenuRow(icon: Icons.vpn_key_rounded, label: 'Мои ключи', onTap: () => _go(const KeysScreen())),
-          _MenuRow(icon: Icons.account_balance_wallet_rounded, label: 'Пополнить баланс', onTap: () => _go(const TopUpScreen())),
-          _MenuRow(icon: Icons.shopping_bag_rounded, label: 'Купить ключ / тарифы', onTap: () => _go(const PlansScreen())),
-          _MenuRow(icon: Icons.public_rounded, label: 'Серверы', onTap: () => _go(const ServersScreen())),
-          _MenuRow(icon: Icons.call_split_rounded, label: 'Split-туннелирование', onTap: () => _go(const SplitTunnelScreen())),
-          _MenuRow(icon: Icons.card_giftcard_rounded, label: 'Бесплатный период', onTap: _activateTrial),
-          _MenuRow(icon: Icons.group_rounded, label: 'Реферальная программа', onTap: () => _go(const ReferralScreen())),
-          _MenuRow(icon: Icons.security_rounded, label: 'Безопасность (Kill Switch, DNS)', onTap: () => _go(const SecurityScreen())),
-          _MenuRow(icon: Icons.settings_rounded, label: 'Настройки', onTap: () => _go(SettingsScreen(onLoggedOut: widget.onLoggedOut))),
-          _MenuRow(icon: Icons.support_agent_rounded, label: 'Поддержка и контакты', onTap: () => _go(const SupportScreen())),
+          _MenuRow(icon: Icons.vpn_key_rounded, label: tr('Мои ключи'), onTap: () => _go(const KeysScreen())),
+          _MenuRow(icon: Icons.account_balance_wallet_rounded, label: tr('Пополнить баланс'), onTap: () => _go(const TopUpScreen())),
+          _MenuRow(icon: Icons.shopping_bag_rounded, label: tr('Купить ключ / тарифы'), onTap: () => _go(const PlansScreen())),
+          _MenuRow(icon: Icons.public_rounded, label: tr('Серверы'), onTap: () => _go(const ServersScreen())),
+          _MenuRow(icon: Icons.call_split_rounded, label: tr('Split-туннелирование'), onTap: () => _go(const SplitTunnelScreen())),
+          _MenuRow(icon: Icons.card_giftcard_rounded, label: tr('Бесплатный период'), onTap: _activateTrial),
+          _MenuRow(icon: Icons.group_rounded, label: tr('Реферальная программа'), onTap: () => _go(const ReferralScreen())),
+          _MenuRow(icon: Icons.security_rounded, label: tr('Безопасность (Kill Switch, DNS)'), onTap: () => _go(const SecurityScreen())),
+          _MenuRow(icon: Icons.settings_rounded, label: tr('Настройки'), onTap: () => _go(SettingsScreen(onLoggedOut: widget.onLoggedOut))),
+          _MenuRow(icon: Icons.support_agent_rounded, label: tr('Поддержка и контакты'), onTap: () => _go(const SupportScreen())),
           const SizedBox(height: 16),
           Center(
             child: OutlinedButton.icon(
               onPressed: _logout,
               icon: const Icon(Icons.logout_rounded, size: 16, color: AppColors.danger),
-              label: const Text('Выйти из аккаунта', style: TextStyle(color: AppColors.danger, fontSize: 12)),
+              label: Text(tr('Выйти из аккаунта'), style: const TextStyle(color: AppColors.danger, fontSize: 12)),
               style: OutlinedButton.styleFrom(
                 side: const BorderSide(color: AppColors.danger),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -195,6 +204,7 @@ class _MenuScreenState extends State<MenuScreen> {
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -219,7 +229,7 @@ class _MenuRow extends StatelessWidget {
             children: [
               RingIconBadge(icon: icon, danger: false, size: 40),
               const SizedBox(width: 12),
-              Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+              Expanded(child: Text(tr(label), style: const TextStyle(fontSize: 13))),
               const Icon(Icons.chevron_right_rounded, color: AppColors.textDim, size: 16),
             ],
           ),
