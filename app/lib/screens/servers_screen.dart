@@ -7,6 +7,7 @@ import '../services/api_client.dart';
 import '../state/selected_server.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/locale_service.dart';
 
 /// Экран выбора сервера.
 ///
@@ -595,9 +596,9 @@ class _ServersScreenState extends State<ServersScreen> {
     }
     if (_tunnel.isConnected || _tunnel.isBusy) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(
-              'Сначала отключитесь от VPN — реальная проверка на время поднимает и гасит тестовое соединение тем же движком.'),
+              tr('Сначала отключитесь от VPN — реальная проверка на время поднимает и гасит тестовое соединение тем же движком.')),
         ));
       }
       return;
@@ -606,8 +607,8 @@ class _ServersScreenState extends State<ServersScreen> {
     final connectionString = await _resolveActiveConnectionString();
     if (connectionString == null || connectionString.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Нет активного ключа с подпиской — нечего проверять.'),
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(tr('Нет активного ключа с подпиской — нечего проверять.')),
         ));
       }
       return;
@@ -778,7 +779,7 @@ class _ServersScreenState extends State<ServersScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Не удалось переключиться на $name: $e')),
+          SnackBar(content: Text('${tr('Не удалось переключиться на')} $name: $e')),
         );
       }
     } finally {
@@ -875,7 +876,7 @@ class _ServersScreenState extends State<ServersScreen> {
             ) as Map<String, dynamic>;
             SelectedServer.select(
               selectedHost['host_name'] as String? ?? '',
-              selectedHost['host_name'] as String? ?? 'Без названия',
+              selectedHost['host_name'] as String? ?? tr('Без названия'),
             );
           }
         }
@@ -888,7 +889,7 @@ class _ServersScreenState extends State<ServersScreen> {
       // это не заглушка, а честная ошибка сети/интеграции.
       if (!mounted) return;
       setState(() {
-        _error = 'Не удалось получить список серверов: $e';
+        _error = '${tr('Не удалось получить список серверов:')} $e';
         _loading = false;
       });
     }
@@ -912,7 +913,9 @@ class _ServersScreenState extends State<ServersScreen> {
     // отдельный MaterialPageRoute с главного экрана. Во втором
     // случае без Scaffold текст вне NeonCard попадал под аварийный
     // DefaultTextStyle Flutter с жёлтым двойным подчёркиванием.
-    return Scaffold(
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       backgroundColor: AppColors.bg,
       body: SafeArea(
         child: RefreshIndicator(
@@ -926,11 +929,11 @@ class _ServersScreenState extends State<ServersScreen> {
             AppHeader(
               trailing: Icons.refresh_rounded,
               onTrailingTap: _load,
-              screenLabel: 'Выбор сервера',
+              screenLabel: tr('Выбор сервера'),
             ),
-            const Text(
-              'Список подтягивается напрямую из панелей 3x-ui через backend — новая локация появляется здесь автоматически.',
-              style: TextStyle(fontSize: 10, color: AppColors.textDim),
+            Text(
+              tr('Список подтягивается напрямую из панелей 3x-ui через backend — новая локация появляется здесь автоматически.'),
+              style: const TextStyle(fontSize: 10, color: AppColors.textDim),
             ),
             const SizedBox(height: 10),
             // [НОВОЕ] Кнопка настоящей проверки — см. докстринг `_realCheckAll`
@@ -949,16 +952,16 @@ class _ServersScreenState extends State<ServersScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('Реальная проверка серверов',
-                            style: TextStyle(
+                        Text(tr('Реальная проверка серверов'),
+                            style: const TextStyle(
                                 fontSize: 13, fontWeight: FontWeight.w600)),
                         const SizedBox(height: 2),
                         Text(
                           _tunnel.isConnected || _tunnel.isBusy
-                              ? 'сначала отключитесь от VPN'
+                              ? tr('сначала отключитесь от VPN')
                               : (_realChecking
-                                  ? 'проверяю ${_realCheckingId ?? "..."}'
-                                  : 'реально поднимает VLESS к каждому серверу — точнее пинга'),
+                                  ? '${tr('проверяю')} ${_realCheckingId ?? "..."}'
+                                  : tr('реально поднимает VLESS к каждому серверу — точнее пинга')),
                           style: const TextStyle(
                               fontSize: 10, color: AppColors.textDim),
                         ),
@@ -978,8 +981,8 @@ class _ServersScreenState extends State<ServersScreen> {
                       child: const Padding(
                         padding: EdgeInsets.symmetric(
                             horizontal: 10, vertical: 6),
-                        child: Text('Проверить',
-                            style: TextStyle(
+                        child: Text(tr('Проверить'),
+                            style: const TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
                                 color: AppColors.violetGlow)),
@@ -1002,14 +1005,14 @@ class _ServersScreenState extends State<ServersScreen> {
             if (_hosts != null && _hosts!.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 20),
-                child: Text('В панелях 3x-ui пока нет активных локаций.',
-                    style: TextStyle(color: AppColors.textDim)),
+                child: Text(tr('В панелях 3x-ui пока нет активных локаций.'),
+                    style: const TextStyle(color: AppColors.textDim)),
               ),
             if (_hosts != null)
               ..._hosts!.map((s) {
                 final host = s as Map<String, dynamic>;
                 final id = host['host_name'] as String? ?? '';
-                final name = id.isEmpty ? 'Без названия' : id;
+                final name = id.isEmpty ? tr('Без названия') : id;
                 final code = _codeFromName(name);
                 final isSelected = id == _selectedId;
                 final isFav = _favorites.contains(id);
@@ -1041,38 +1044,38 @@ class _ServersScreenState extends State<ServersScreen> {
                 if (isCurrentlyConnected) {
                   final tunnelPing = _connectedTunnelPing;
                   if (tunnelPing == null) {
-                    pingLabel = 'измеряю через VLESS...';
+                    pingLabel = tr('измеряю через VLESS...');
                     pingColor = AppColors.textDim;
                   } else if (tunnelPing < 80) {
-                    pingLabel = '$tunnelPing мс · отлично (через VLESS)';
+                    pingLabel = '$tunnelPing ${tr('мс · отлично (через VLESS)')}';
                     pingColor = AppColors.success;
                   } else if (tunnelPing < 180) {
-                    pingLabel = '$tunnelPing мс · через VLESS';
+                    pingLabel = '$tunnelPing ${tr('мс · через VLESS')}';
                     pingColor = AppColors.warning;
                   } else {
-                    pingLabel = '$tunnelPing мс · медленно (через VLESS)';
+                    pingLabel = '$tunnelPing ${tr('мс · медленно (через VLESS)')}';
                     pingColor = AppColors.danger;
                   }
                 } else if (ping == null) {
-                  pingLabel = 'измеряю...';
+                  pingLabel = tr('измеряю...');
                   pingColor = AppColors.textDim;
                 } else if (ping == -2) {
-                  pingLabel = 'нет данных для пинга';
+                  pingLabel = tr('нет данных для пинга');
                   pingColor = AppColors.textDim;
                 } else if (ping < 0) {
-                  pingLabel = 'недоступен';
+                  pingLabel = tr('недоступен');
                   pingColor = AppColors.danger;
                 } else if (isRealityOnly) {
-                  pingLabel = '~$ping мс · сеть (VLESS не проверен)';
+                  pingLabel = '~$ping ${tr('мс · сеть (VLESS не проверен)')}';
                   pingColor = AppColors.warning;
                 } else if (ping < 80) {
-                  pingLabel = '$ping мс · отлично';
+                  pingLabel = '$ping ${tr('мс · отлично')}';
                   pingColor = AppColors.success;
                 } else if (ping < 180) {
-                  pingLabel = '$ping мс';
+                  pingLabel = '$ping ${tr('мс')}';
                   pingColor = AppColors.warning;
                 } else {
-                  pingLabel = '$ping мс · медленно';
+                  pingLabel = '$ping ${tr('мс · медленно')}';
                   pingColor = AppColors.danger;
                 }
                 // [НОВОЕ] Результат НАСТОЯЩЕЙ проверки (см. _realCheckAll/
@@ -1083,18 +1086,18 @@ class _ServersScreenState extends State<ServersScreen> {
                 // (сервис на порту не откликнулся на настоящее
                 // VLESS/Reality-рукопожатие).
                 if (_realCheckingId == id) {
-                  pingLabel = 'проверяю по-настоящему...';
+                  pingLabel = tr('проверяю по-настоящему...');
                   pingColor = AppColors.textDim;
                 } else {
                   final realCheck = _realCheckResults[id];
                   if (realCheck != null) {
                     if (realCheck.ok) {
                       pingLabel =
-                          'работает · ${realCheck.latencyMs} мс (проверено)';
+                          '${tr('работает ·')} ${realCheck.latencyMs} ${tr('мс (проверено)')}';
                       pingColor = AppColors.success;
                     } else {
                       pingLabel =
-                          'не работает (${realCheck.error ?? "нет ответа"})';
+                          '${tr('не работает')} (${realCheck.error ?? tr("нет ответа")})';
                       pingColor = AppColors.danger;
                     }
                   }
@@ -1139,7 +1142,7 @@ class _ServersScreenState extends State<ServersScreen> {
                               strokeWidth: 2, color: AppColors.violetGlow),
                         )
                       else if (isSelected)
-                        const NeonBadge('выбран')
+                        NeonBadge(tr('выбран'))
                       else
                         const Icon(Icons.chevron_right_rounded,
                             color: AppColors.textDim, size: 18),
@@ -1147,7 +1150,7 @@ class _ServersScreenState extends State<ServersScreen> {
                   ),
                 );
               }),
-            const SectionTitle('Автовыбор'),
+            SectionTitle(tr('Автовыбор')),
             NeonCard(
               margin: const EdgeInsets.only(bottom: 10),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -1169,8 +1172,8 @@ class _ServersScreenState extends State<ServersScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('Авто-балансировка',
-                            style: TextStyle(
+                        Text(tr('Авто-балансировка'),
+                            style: const TextStyle(
                                 fontSize: 13, fontWeight: FontWeight.w600)),
                         const SizedBox(height: 2),
                         Text(
@@ -1181,9 +1184,9 @@ class _ServersScreenState extends State<ServersScreen> {
                           // функция на самом деле или нет.
                           _autoBalance
                               ? (_lastSwitchTarget != null
-                                  ? 'реально переключились на $_lastSwitchTarget'
-                                  : 'следим за пингом каждые 25 с и переключаем туннель сами')
-                              : 'выбор лучшего сервера',
+                                  ? '${tr('реально переключились на')} $_lastSwitchTarget'
+                                  : tr('следим за пингом каждые 25 с и переключаем туннель сами'))
+                              : tr('выбор лучшего сервера'),
                           style: const TextStyle(
                               fontSize: 10, color: AppColors.textDim),
                         ),
@@ -1212,6 +1215,7 @@ class _ServersScreenState extends State<ServersScreen> {
             ),
           ),
         ),
+      ),
       ),
     );
   }
