@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
+import '../services/locale_service.dart';
 import 'topup_screen.dart';
 import 'plans_screen.dart';
 import 'keys_screen.dart';
@@ -59,7 +60,7 @@ class _BalanceScreenState extends State<BalanceScreen> {
         // Не даём "битой" загрузке молча оставлять старые данные висеть
         // без объяснения — на этом экране баланс это главное, что нужно
         // видеть точно, а не "что получилось".
-        _error = e is ApiException ? e.message : 'Не удалось загрузить баланс';
+        _error = e is ApiException ? e.message : tr('Не удалось загрузить баланс');
         _loading = false;
       });
     }
@@ -83,7 +84,9 @@ class _BalanceScreenState extends State<BalanceScreen> {
     final balanceRaw = _profile?['balance'];
     final balanceLabel = balanceRaw != null ? '$balanceRaw ₽' : '—';
 
-    return RefreshIndicator(
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => RefreshIndicator(
       onRefresh: _load,
       color: AppColors.violet2,
       backgroundColor: AppColors.bgCard,
@@ -93,7 +96,7 @@ class _BalanceScreenState extends State<BalanceScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const AppHeader(screenLabel: 'Баланс'),
+            AppHeader(screenLabel: tr('Баланс')),
             if (_loading && _profile == null)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 40),
@@ -113,7 +116,7 @@ class _BalanceScreenState extends State<BalanceScreen> {
                         Expanded(
                           child: Text(_error!, style: const TextStyle(fontSize: 12, color: AppColors.text)),
                         ),
-                        TextButton(onPressed: _load, child: const Text('Повторить')),
+                        TextButton(onPressed: _load, child: Text(tr('Повторить'))),
                       ],
                     ),
                   ),
@@ -130,9 +133,9 @@ class _BalanceScreenState extends State<BalanceScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'БАЛАНС АККАУНТА',
-                      style: TextStyle(fontSize: 11, color: Colors.white70, letterSpacing: 1.5, fontWeight: FontWeight.w600),
+                    Text(
+                      tr('БАЛАНС АККАУНТА'),
+                      style: const TextStyle(fontSize: 11, color: Colors.white70, letterSpacing: 1.5, fontWeight: FontWeight.w600),
                     ),
                     const SizedBox(height: 8),
                     Text(balanceLabel, style: orbitron(fontSize: 34, color: Colors.white)),
@@ -149,12 +152,12 @@ class _BalanceScreenState extends State<BalanceScreen> {
               Row(
                 children: [
                   StatMiniCard(
-                    label: 'Активных ключей',
+                    label: tr('Активных ключей'),
                     value: activeKeys != null ? '$activeKeys' : '—',
                   ),
                   const SizedBox(width: 10),
                   StatMiniCard(
-                    label: 'Всего ключей',
+                    label: tr('Всего ключей'),
                     value: totalKeys != null ? '$totalKeys' : '—',
                   ),
                 ],
@@ -162,7 +165,7 @@ class _BalanceScreenState extends State<BalanceScreen> {
               const SizedBox(height: 20),
               Center(
                 child: PillButton(
-                  label: 'Пополнить баланс',
+                  label: tr('Пополнить баланс'),
                   icon: '💳',
                   filled: true,
                   onTap: () => _go(const TopUpScreen()),
@@ -171,7 +174,7 @@ class _BalanceScreenState extends State<BalanceScreen> {
               const SizedBox(height: 10),
               Center(
                 child: PillButton(
-                  label: 'Купить / продлить ключ',
+                  label: tr('Купить / продлить ключ'),
                   icon: '🔑',
                   onTap: () => _go(const PlansScreen()),
                 ),
@@ -180,12 +183,13 @@ class _BalanceScreenState extends State<BalanceScreen> {
               Center(
                 child: TextButton(
                   onPressed: () => _go(const KeysScreen()),
-                  child: const Text('Мои ключи', style: TextStyle(fontSize: 12, color: AppColors.textDim)),
+                  child: Text(tr('Мои ключи'), style: const TextStyle(fontSize: 12, color: AppColors.textDim)),
                 ),
               ),
             ],
           ],
         ),
+      ),
       ),
     );
   }
