@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
+import '../services/locale_service.dart';
 import 'topup_screen.dart';
 
 /// Экран оформления подписки.
@@ -78,7 +79,7 @@ class _PlansScreenState extends State<PlansScreen> {
       setState(() { _error = e.message; _loading = false; });
     } catch (e) {
       if (!mounted) return;
-      setState(() { _error = 'Не удалось загрузить тарифы: $e'; _loading = false; });
+      setState(() { _error = '${tr('Не удалось загрузить тарифы:')} $e'; _loading = false; });
     }
   }
 
@@ -100,10 +101,10 @@ class _PlansScreenState extends State<PlansScreen> {
   String _pluralDays(int n) {
     final mod100 = n % 100;
     final mod10 = n % 10;
-    if (mod100 >= 11 && mod100 <= 14) return 'дней';
-    if (mod10 == 1) return 'день';
-    if (mod10 >= 2 && mod10 <= 4) return 'дня';
-    return 'дней';
+    if (mod100 >= 11 && mod100 <= 14) return tr('дней');
+    if (mod10 == 1) return tr('день');
+    if (mod10 >= 2 && mod10 <= 4) return tr('дня');
+    return tr('дней');
   }
 
   String _periodLabel(num days) {
@@ -130,7 +131,7 @@ class _PlansScreenState extends State<PlansScreen> {
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_isExtend ? 'Ключ продлён' : 'Ключ выдан — смотри вкладку «Ключи»')),
+          SnackBar(content: Text(_isExtend ? tr('Ключ продлён') : tr('Ключ выдан — смотри вкладку «Ключи»'))),
         );
         Navigator.of(context).pop();
       }
@@ -143,7 +144,7 @@ class _PlansScreenState extends State<PlansScreen> {
             backgroundColor: AppColors.danger,
             action: insufficientBalance
                 ? SnackBarAction(
-                    label: 'Пополнить',
+                    label: tr('Пополнить'),
                     // [ИСПРАВЛЕНО] pushNamed('/topup') вёл на несуществующий
                     // именованный маршрут — крэш при нажатии. Ведём на
                     // реальный TopUpScreen (см. topup_screen.dart).
@@ -158,7 +159,7 @@ class _PlansScreenState extends State<PlansScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Не удалось оформить: $e'), backgroundColor: AppColors.danger),
+          SnackBar(content: Text('${tr('Не удалось оформить:')} $e'), backgroundColor: AppColors.danger),
         );
       }
     } finally {
@@ -168,25 +169,19 @@ class _PlansScreenState extends State<PlansScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [ИСПРАВЛЕНО] PlansScreen открывается ТОЛЬКО как отдельный
-    // MaterialPageRoute (с ConnectScreen, KeysScreen, BalanceScreen,
-    // MenuScreen) и никогда не встроен во вкладку с готовым Scaffold —
-    // без своего Scaffold текст вне NeonCard попадал под аварийный
-    // DefaultTextStyle Flutter с жёлтым двойным подчёркиванием
-    // (нет Material-предка). См. тот же паттерн в servers_screen.dart.
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              AppHeader(screenLabel: _isExtend ? 'Продление ключа' : 'Оформление подписки'),
-          const Text(
-            'Единый VPN-ключ даёт доступ ко всем локациям сразу — выбирать сервер не нужно. '
-            'Оплата — с баланса аккаунта.',
-            style: TextStyle(color: AppColors.textDim, fontSize: 11),
+    // [НОВОЕ] Модуль переводчика.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AppHeader(screenLabel: _isExtend ? tr('Продление ключа') : tr('Оформление подписки')),
+          Text(
+            tr('Единый VPN-ключ даёт доступ ко всем локациям сразу — выбирать сервер не нужно. '
+            'Оплата — с баланса аккаунта.'),
+            style: const TextStyle(color: AppColors.textDim, fontSize: 11),
           ),
           // [ИСПРАВЛЕНО] Раньше здесь не было отступа вообще — карточки
           // тарифов рисовались вплотную к описанию сверху и на некоторых
@@ -200,15 +195,15 @@ class _PlansScreenState extends State<PlansScreen> {
               child: Row(
                 children: [
                   Expanded(child: Text(_error!, style: const TextStyle(color: AppColors.danger, fontSize: 12))),
-                  TextButton(onPressed: _load, child: const Text('Повторить')),
+                  TextButton(onPressed: _load, child: Text(tr('Повторить'))),
                 ],
               ),
             ),
           if (_plans != null && _plans!.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 20),
-              child: Text('Тарифы пока не настроены в панели бота (нет тарифов для host "GLOBAL").',
-                  style: TextStyle(color: AppColors.textDim)),
+              child: Text(tr('Тарифы пока не настроены в панели бота (нет тарифов для host "GLOBAL").'),
+                  style: const TextStyle(color: AppColors.textDim)),
             ),
           if (_plans != null)
             for (var i = 0; i < _plans!.length; i++) ...[
@@ -231,17 +226,16 @@ class _PlansScreenState extends State<PlansScreen> {
                     )
                   : PillButton(
                       label: _isExtend
-                          ? 'Продлить — ${(_plans![_selected] as Map<String, dynamic>)['price']} ₽'
-                          : 'Получить ключ — ${(_plans![_selected] as Map<String, dynamic>)['price']} ₽',
+                          ? '${tr('Продлить —')} ${(_plans![_selected] as Map<String, dynamic>)['price']} ₽'
+                          : '${tr('Получить ключ —')} ${(_plans![_selected] as Map<String, dynamic>)['price']} ₽',
                       icon: '🔒',
                       filled: true,
                       onTap: _submit,
                     ),
             ),
           ],
-            ],
-          ),
-        ),
+        ],
+      ),
       ),
     );
   }
@@ -276,7 +270,7 @@ class _PlanCard extends StatelessWidget {
             children: [
               Text(periodLabel, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
               const SizedBox(height: 2),
-              Text('≈ ${perDay.toStringAsFixed(0)} ₽ / день',
+              Text('≈ ${perDay.toStringAsFixed(0)} ₽ / ${tr('день')}',
                   style: const TextStyle(fontSize: 10, color: AppColors.textDim)),
             ],
           ),
