@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
+import '../services/locale_service.dart';
 
 /// [НОВОЕ v4 — самый критичный недостающий экран во всём приложении]
 /// До этого файла в приложении НЕ БЫЛО ни одного экрана входа/регистрации —
@@ -85,7 +86,7 @@ class _AuthScreenState extends State<AuthScreen> {
     } on ApiException catch (e) {
       if (mounted) setState(() { _loading = false; _error = e.message; });
     } catch (e) {
-      if (mounted) setState(() { _loading = false; _error = 'Не удалось выполнить запрос: $e'; });
+      if (mounted) setState(() { _loading = false; _error = '${tr('Не удалось выполнить запрос:')} $e'; });
     }
   }
 
@@ -102,7 +103,7 @@ class _AuthScreenState extends State<AuthScreen> {
   // контракт API, а не проверенный по реальному коду).
   Future<void> _registerRequestCode() => _run(
         () => _api.registerSendCode(_emailCtrl.text.trim()),
-        successInfo: 'Код отправлен на почту (если такой email ещё не зарегистрирован)',
+        successInfo: tr('Код отправлен на почту (если такой email ещё не зарегистрирован)'),
         nextMode: _Mode.registerConfirm,
       );
 
@@ -118,7 +119,7 @@ class _AuthScreenState extends State<AuthScreen> {
 
   Future<void> _resetRequestCode() => _run(
         () => _api.resetPasswordSendCode(_emailCtrl.text.trim()),
-        successInfo: 'Если аккаунт с таким email существует — код отправлен на почту',
+        successInfo: tr('Если аккаунт с таким email существует — код отправлен на почту'),
         nextMode: _Mode.resetConfirm,
       );
 
@@ -128,13 +129,19 @@ class _AuthScreenState extends State<AuthScreen> {
           code: _codeCtrl.text.trim(),
           newPassword: _newPasswordCtrl.text,
         ),
-        successInfo: 'Пароль обновлён — теперь можно войти',
+        successInfo: tr('Пароль обновлён — теперь можно войти'),
         nextMode: _Mode.login,
       );
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    // [НОВОЕ] Модуль переводчика — экран входа слушает LocaleService
+    // напрямую: сюда можно попасть после разлогина уже с выбранным ранее
+    // языком (см. LocaleService.setLanguage в settings_screen.dart), и
+    // текст должен быть переведён сразу, без лишнего перехода по экранам.
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
       backgroundColor: AppColors.bg,
       body: SafeArea(
         child: SingleChildScrollView(
@@ -168,28 +175,29 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
               ),
               const SizedBox(height: 28),
-              Text(_title(), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(tr(_title()), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const SizedBox(height: 4),
-              Text(_subtitle(), style: const TextStyle(color: AppColors.textDim, fontSize: 12)),
+              Text(tr(_subtitle()), style: const TextStyle(color: AppColors.textDim, fontSize: 12)),
               const SizedBox(height: 18),
               NeonCard(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: _fields())),
               if (_error != null) ...[
                 const SizedBox(height: 10),
-                Text(_error!, style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+                Text(tr(_error!), style: const TextStyle(color: AppColors.danger, fontSize: 12)),
               ],
               if (_info != null) ...[
                 const SizedBox(height: 10),
-                Text(_info!, style: const TextStyle(color: AppColors.success, fontSize: 12)),
+                Text(tr(_info!), style: const TextStyle(color: AppColors.success, fontSize: 12)),
               ],
               const SizedBox(height: 18),
               _loading
                   ? const Center(child: Padding(padding: EdgeInsets.all(8), child: CircularProgressIndicator(strokeWidth: 2)))
-                  : ElevatedButton(onPressed: _primaryAction(), child: Text(_primaryLabel())),
+                  : ElevatedButton(onPressed: _primaryAction(), child: Text(tr(_primaryLabel()))),
               const SizedBox(height: 14),
               _secondaryActions(),
             ],
           ),
         ),
+      ),
       ),
     );
   }
@@ -218,27 +226,27 @@ class _AuthScreenState extends State<AuthScreen> {
     switch (_mode) {
       case _Mode.login:
         return [
-          _field(_emailCtrl, 'Email адрес', keyboardType: TextInputType.emailAddress),
+          _field(_emailCtrl, tr('Email адрес'), keyboardType: TextInputType.emailAddress),
           const SizedBox(height: 10),
-          _field(_passwordCtrl, 'Пароль', obscure: true),
+          _field(_passwordCtrl, tr('Пароль'), obscure: true),
         ];
       case _Mode.register:
         return [
-          _field(_emailCtrl, 'Email адрес', keyboardType: TextInputType.emailAddress),
+          _field(_emailCtrl, tr('Email адрес'), keyboardType: TextInputType.emailAddress),
           const SizedBox(height: 10),
-          _field(_usernameCtrl, 'Имя пользователя (необязательно)'),
+          _field(_usernameCtrl, tr('Имя пользователя (необязательно)')),
           const SizedBox(height: 10),
-          _field(_passwordCtrl, 'Пароль', obscure: true),
+          _field(_passwordCtrl, tr('Пароль'), obscure: true),
         ];
       case _Mode.registerConfirm:
-        return [_field(_codeCtrl, 'Код из письма', keyboardType: TextInputType.number)];
+        return [_field(_codeCtrl, tr('Код из письма'), keyboardType: TextInputType.number)];
       case _Mode.resetRequest:
-        return [_field(_emailCtrl, 'Email адрес', keyboardType: TextInputType.emailAddress)];
+        return [_field(_emailCtrl, tr('Email адрес'), keyboardType: TextInputType.emailAddress)];
       case _Mode.resetConfirm:
         return [
-          _field(_codeCtrl, 'Код из письма', keyboardType: TextInputType.number),
+          _field(_codeCtrl, tr('Код из письма'), keyboardType: TextInputType.number),
           const SizedBox(height: 10),
-          _field(_newPasswordCtrl, 'Новый пароль (минимум 6 символов)', obscure: true),
+          _field(_newPasswordCtrl, tr('Новый пароль (минимум 6 символов)'), obscure: true),
         ];
     }
   }
@@ -292,13 +300,13 @@ class _AuthScreenState extends State<AuthScreen> {
             Center(
               child: TextButton(
                 onPressed: () => switchTo(_Mode.register),
-                child: const Text('Нет аккаунта? Создать аккаунт', style: TextStyle(color: AppColors.violetGlow, fontSize: 12)),
+                child: Text(tr('Нет аккаунта? Создать аккаунт'), style: const TextStyle(color: AppColors.violetGlow, fontSize: 12)),
               ),
             ),
             Center(
               child: TextButton(
                 onPressed: () => switchTo(_Mode.resetRequest),
-                child: const Text('Забыли пароль?', style: TextStyle(color: AppColors.textDim, fontSize: 12)),
+                child: Text(tr('Забыли пароль?'), style: const TextStyle(color: AppColors.textDim, fontSize: 12)),
               ),
             ),
           ],
@@ -307,14 +315,14 @@ class _AuthScreenState extends State<AuthScreen> {
         return Center(
           child: TextButton(
             onPressed: () => switchTo(_Mode.login),
-            child: const Text('Уже есть аккаунт? Войти в кабинет', style: TextStyle(color: AppColors.violetGlow, fontSize: 12)),
+            child: Text(tr('Уже есть аккаунт? Войти в кабинет'), style: const TextStyle(color: AppColors.violetGlow, fontSize: 12)),
           ),
         );
       case _Mode.registerConfirm:
         return Center(
           child: TextButton(
             onPressed: () => switchTo(_Mode.register),
-            child: const Text('Отмена', style: TextStyle(color: AppColors.textDim, fontSize: 12)),
+            child: Text(tr('Отмена'), style: const TextStyle(color: AppColors.textDim, fontSize: 12)),
           ),
         );
       case _Mode.resetRequest:
@@ -322,7 +330,7 @@ class _AuthScreenState extends State<AuthScreen> {
         return Center(
           child: TextButton(
             onPressed: () => switchTo(_Mode.login),
-            child: const Text('Вернуться ко входу', style: TextStyle(color: AppColors.textDim, fontSize: 12)),
+            child: Text(tr('Вернуться ко входу'), style: const TextStyle(color: AppColors.textDim, fontSize: 12)),
           ),
         );
     }
