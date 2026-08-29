@@ -18,6 +18,23 @@ jobs:
     defaults:
       run:
         working-directory: app
+    # [ИСПРАВЛЕНО — реальный баг образа windows-latest] По умолчанию
+    # PUB_CACHE = C:\Users\runneradmin\.pub-cache. На раннерах GitHub
+    # Windows Defender/индексатор папок успевает положить служебный файл
+    # (например desktop.ini) в только что созданную ПУСТУЮ временную папку
+    # `_temp\dirXXXXXXXX` ещё до того, как `git clone --mirror` успевает
+    # туда что-то склонировать — поэтому git видит "already exists and is
+    # not empty" даже на самой первой попытке, с новым случайным именем
+    # папки каждый раз (это видно в логе: dir9e93c3d2, dir57e286f1,
+    # dir347b6388 — разные имена, но одна и та же ошибка). Дело не в
+    # "мусоре от прошлой попытки" (то есть предыдущий фикс с очисткой
+    # `_temp` не помогал по сути) — реальная причина в самой папке
+    # C:\Users\runneradmin\.pub-cache на этом образе раннера. Стандартное
+    # решение сообщества Dart/Flutter — увести PUB_CACHE на диск D:
+    # (на GitHub-раннерах Windows это отдельный более быстрый диск, где
+    # Defender/индексатор так не ведёт себя с новыми папками).
+    env:
+      PUB_CACHE: D:\pubcache
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,24 +50,22 @@ jobs:
       - name: Enable Windows desktop support
         run: flutter config --enable-windows-desktop
 
-      # [ИСПРАВЛЕНО — реальный баг] Известная проблема `dart pub` именно на
-      # Windows-раннерах: если клонирование git-зависимости
-      # (flutter_singbox_client, тянется из github.com/Ghosts1996/cf.git,
-      # ветка ccurecc_singbox_dns) прерывается на середине — сеть,
-      # антивирус на раннере на долю секунды блокирует файл и т.п. — pub
-      # автоматически повторяет попытку, но НЕ удаляет свою временную
-      # папку `_temp\dirXXXXXXXX` от предыдущей неудачной попытки. Повторный
-      # `git clone --mirror` в ту же папку падает с "destination path ...
-      # already exists and is not empty". На Linux (build-android.yml, тот
-      # же пакет, та же ветка, 152 успешных запуска) это не проявляется —
-      # там процесс клонирования быстрее и файлы не блокируются антивирусом,
-      # поэтому там баг просто не успевает случиться. Сама git-зависимость
-      # рабочая, ничего в pubspec.yaml менять не нужно.
-      # Оборачиваем в retry (тот же nick-fields/retry, что уже используется
-      # в build-android.yml для сборки APK) и перед каждой попыткой чистим
-      # временную папку pub — так, даже если один запуск словит эту
-      # Windows-специфичную блокировку, следующая попытка стартует с чистого
-      # места.
+      # Создаём кастомную папку под PUB_CACHE на D: заранее — так же, как
+      # это неявно делает pub при первом обращении, но явно и без сюрпризов.
+      - name: "Prepare custom PUB_CACHE on D:"
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path "$env:PUB_CACHE" | Out-Null
+
+      # [ИСПРАВЛЕНО — реальный баг образа windows-latest, см. комментарий
+      # у `env: PUB_CACHE` выше] Сама git-зависимость (flutter_singbox_client,
+      # github.com/Ghosts1996/cf.git, ветка ccurecc_singbox_dns) рабочая —
+      # build-android.yml тянет тот же пакет 152 раза без единого сбоя на
+      # ubuntu-latest. Проблема была в системной папке
+      # C:\Users\runneradmin\.pub-cache на Windows-образе раннера, а не в
+      # логике pub get — перенос PUB_CACHE на D: (шаг выше) устраняет
+      # причину напрямую. Retry оставляем как страховку на случай обычного
+      # сетевого сбоя при клонировании — на реальную причину бага он не
+      # влияет, но не мешает.
       - name: Flutter pub get
         uses: nick-fields/retry@v3
         with:
@@ -58,10 +73,7 @@ jobs:
           max_attempts: 3
           retry_wait_seconds: 15
           shell: pwsh
-          command: |
-            if (Test-Path "$env:PUB_CACHE\_temp") { Remove-Item -Recurse -Force "$env:PUB_CACHE\_temp" -ErrorAction SilentlyContinue }
-            cd app
-            flutter pub get
+          command: cd app; flutter pub get
 
       # Та же генерация фирменной иконки, что и в build-android.yml — иначе
       # .exe соберётся со стандартной иконкой Flutter вместо иконки VPNonLine
