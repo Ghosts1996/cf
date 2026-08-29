@@ -99,16 +99,19 @@ jobs:
         run: flutter test --coverage
         continue-on-error: true
 
-      # [ИСПРАВЛЕНО — тот же класс бага, что и с pub get выше, но на другом
-      # инструменте] `LNK1327: failure during running mt.exe` — известная
-      # проблема Windows-раннеров GitHub Actions: Windows Defender
-      # real-time protection на долю секунды блокирует свежесозданный .exe
-      # сразу после линковки, пока mt.exe пытается встроить в него манифест
-      # — тот же паттерн блокировки файлов антивирусом, что был с
-      # `git clone` у pub get (см. выше), только теперь на linker/mt.exe.
-      # Исключаем папку сборки из реального времени сканирования Defender
-      # заранее — GitHub-раннеры выполняются с правами администратора,
-      # Add-MpPreference доступен без дополнительных прав.
+      # [ИСПРАВЛЕНО #2 — предыдущая гипотеза (Defender) не подтвердилась]
+      # Лог показал: попытка 1 шла 91.7с (полная сборка) и упала на
+      # mt.exe, а попытки 2 и 3 падали почти мгновенно (8с) на ТОЙ ЖЕ
+      # ошибке — значит retry просто повторно бился об уже испорченные
+      # промежуточные файлы в build\windows, не пересобирая с нуля. Реальная
+      # причина LNK1327 здесь — гонка процессов MSBuild: Flutter Windows
+      # CMake-проект собирает параллельно несколько целей (сам .exe +
+      # плагины flutter_secure_storage_windows, url_launcher_windows,
+      # connectivity_plus и т.д.), и несколько worker-узлов MSBuild
+      # (node reuse) могут одновременно писать во временный файл манифеста
+      # — это известная проблема параллельных Windows-сборок Flutter на CI.
+      # Исключение из Defender оставляем (не мешает), но реальный фикс —
+      # ниже.
       - name: Exclude build folder from Windows Defender
         shell: pwsh
         run: |
@@ -117,20 +120,29 @@ jobs:
           Add-MpPreference -ExclusionProcess "link.exe" -ErrorAction SilentlyContinue
           Write-Host "Defender exclusions added for ${{ github.workspace }}, mt.exe, link.exe"
 
-      # [ВАЖНО] Тот же секрет SHOPBOT_API_KEY, что и в Android-сборке —
-      # единый ключ бэкенда для всех платформ клиента.
-      # Оборачиваем в retry как страховку: даже если исключение Defender
-      # выше почему-то не успело подхватиться (например, из-за задержки
-      # применения политики защитника), повторная попытка мимо того же
-      # временного файлового лока обычно проходит.
+      # [ИСПРАВЛЕНО #2] MSBUILDDISABLENODEREUSE=1 запрещает MSBuild
+      # переиспользовать worker-процессы между вызовами — это убирает
+      # гонку файловых блокировок между параллельными worker-узлами,
+      # которая и вызывает LNK1327 на mt.exe в параллельных Windows-сборках
+      # Flutter на CI. Внутри каждой попытки retry сначала делаем `flutter
+      # clean` — иначе повторная попытка бьётся об уже испорченные
+      # промежуточные файлы из предыдущей неудачной попытки (что и
+      # произошло в последнем логе: попытки 2-3 падали за 8 секунд вместо
+      # полной пересборки).
       - name: Build Windows release
         uses: nick-fields/retry@v3
+        env:
+          MSBUILDDISABLENODEREUSE: "1"
         with:
           timeout_minutes: 20
           max_attempts: 3
           retry_wait_seconds: 15
           shell: pwsh
-          command: cd app; flutter build windows --release --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+          command: |
+            cd app
+            flutter clean
+            flutter pub get
+            flutter build windows --release --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
 
       # [ВАЖНО] Предупреждение прямо в логе сборки, если windows/sing-box/
       # пустая — тогда .exe соберётся нормально, но реальный VPN на Windows
