@@ -1,0 +1,163 @@
+name: Build iOS IPA
+
+# [НОВОЕ] Аналог build-android.yml, но под iOS. Xcode-сборка возможна
+# только на macOS-раннере (GitHub Actions это поддерживает нативно —
+# отдельного Mac покупать не нужно).
+#
+# Сейчас Apple Developer аккаунта и сертификатов ещё нет, поэтому workflow
+# в текущем виде делает "unsigned"-сборку — она НЕ ставится на реальный
+# iPhone и НЕ годится для App Store, но подтверждает, что Flutter/Xcode-код
+# вообще компилируется под iOS (ловит поломки до того, как появится смысл
+# тратить время на подпись). Как только заведёшь Apple Developer аккаунт и
+# сертификат/профиль — добавь секреты, перечисленные в шаге
+# "Import signing certificate & profile" ниже, и workflow сам переключится
+# на полноценную подписанную сборку .ipa, готового к загрузке в App Store
+# Connect (тот же паттерн "если секрет есть — собираем настоящий релиз",
+# что и в build-android.yml с ANDROID_KEYSTORE_BASE64).
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master, fix/secure-configs-and-ci ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build Flutter iOS
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter (official)
+        uses: flutter-actions/setup-flutter@v2
+        with:
+          channel: stable
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # Та же правка, что и в build-android.yml: генератор иконок настроен
+      # в pubspec.yaml, но сам по себе не запускается — без этого шага и
+      # iOS-сборка ушла бы со стандартной иконкой Flutter.
+      - name: Generate app icons
+        run: dart run flutter_launcher_icons
+
+      - name: Flutter analyze
+        run: flutter analyze || true
+
+      - name: Run tests
+        run: flutter test --coverage || true
+
+      # Кэш CocoaPods — та же логика, что и кэш Gradle в Android-workflow:
+      # без него каждый запуск заново качает и собирает все Pod-зависимости
+      # (dart-sing-box-обёртки, plugin-обвязку и т.д.), что на macOS-раннере
+      # заметно дороже по времени, чем на Linux.
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: pods-${{ runner.os }}-${{ hashFiles('app/ios/Podfile.lock') }}
+          restore-keys: |
+            pods-${{ runner.os }}-
+
+      - name: Install CocoaPods dependencies
+        run: cd ios && pod install --repo-update
+
+      # [ВАЖНО] Секреты ниже пока НЕ заведены в репозитории — это ожидаемо.
+      # Пока их нет, шаг просто ничего не делает (условие if), и сборка
+      # ниже идёт по unsigned-ветке. Когда получишь Apple Developer аккаунт:
+      #   IOS_CERTIFICATE_BASE64      — .p12-сертификат распространения,
+      #                                  экспортированный из Keychain, в base64
+      #   IOS_CERTIFICATE_PASSWORD    — пароль, которым .p12 был защищён при экспорте
+      #   IOS_PROVISION_PROFILE_BASE64 — .mobileprovision профиль (App Store
+      #                                  или Ad Hoc — какой получишь), в base64
+      #   APPLE_TEAM_ID                — Team ID из developer.apple.com/account
+      - name: Import signing certificate & profile
+        id: signing
+        env:
+          CERT_B64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          PROFILE_B64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+        if: env.CERT_B64 != '' && env.PROFILE_B64 != ''
+        run: |
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security list-keychains -d user -s build.keychain $(security list-keychains -d user | sed 's/"//g')
+
+          echo "$CERT_B64" | base64 -d > certificate.p12
+          security import certificate.p12 -k build.keychain -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm certificate.p12
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          echo "$PROFILE_B64" | base64 -d > profile.mobileprovision
+          PROFILE_UUID=$(grep -A1 UUID profile.mobileprovision | grep string | sed -e 's/<string>//' -e 's/<\/string>//' | xargs)
+          cp profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/$PROFILE_UUID.mobileprovision
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      # Unsigned-сборка — работает всегда, без единого секрета. Только
+      # проверяет, что код валиден под iOS; на устройство не ставится.
+      - name: Build unsigned (verification build)
+        if: steps.signing.outputs.signed != 'true'
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 40
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: cd app && flutter build ios --release --no-codesign --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+
+      - name: Upload unsigned build (Runner.app)
+        if: steps.signing.outputs.signed != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-ios-unsigned
+          path: app/build/ios/iphoneos/Runner.app
+
+      # Подписанная сборка — включится сама, как только появятся секреты
+      # из шага "Import signing certificate & profile" выше.
+      # EXPORT_METHOD переключает способ подписи экспортируемого .ipa:
+      #   app-store — для загрузки в App Store Connect (обычный/TestFlight review)
+      #   ad-hoc    — для установки на конкретные зарегистрированные UDID
+      # Задаётся отдельным секретом/переменной репозитория IOS_EXPORT_METHOD,
+      # по умолчанию app-store.
+      - name: Build & archive (signed release)
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          EXPORT_METHOD: ${{ vars.IOS_EXPORT_METHOD || 'app-store' }}
+        run: |
+          cd app
+          flutter build ipa --release \
+            --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }} \
+            --export-options-plist=<(cat <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>$EXPORT_METHOD</string>
+            <key>teamID</key>
+            <string>$TEAM_ID</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+          </dict>
+          </plist>
+          EOF
+          )
+
+      - name: Upload signed IPA
+        if: steps.signing.outputs.signed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-ios-release-ipa
+          path: app/build/ios/ipa/*.ipa

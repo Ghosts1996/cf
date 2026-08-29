@@ -11,4 +11,18 @@
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
     </application>
   </compatibility>
+  <!-- [НОВОЕ — Windows real-VPN] Создание TUN-адаптера (виртуальной сетевой
+       карты, через которую реально идёт весь VPN-трафик) требует прав
+       администратора — это ограничение самой Windows, не sing-box и не
+       Flutter. requireAdministrator заставляет Windows показать UAC-запрос
+       ДО запуска приложения; без этого блока sing-box.exe не сможет поднять
+       TUN и подключение будет падать с понятной ошибкой (см.
+       WindowsSingboxRuntime._waitForClashApi в lib/services). -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
 </assembly>

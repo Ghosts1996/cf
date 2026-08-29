@@ -1,4 +1,4 @@
-import 'dart:async';
+    import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -9,6 +9,14 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:app_settings/app_settings.dart';
 import 'local_prefs.dart';
+// [НОВОЕ — Windows real-VPN] На Android ниже используется РОВНО тот же
+// SingboxClient, что и раньше (см. singbox_runtime_android.dart — чистый
+// форвардинг без единого изменения поведения). На Windows —
+// WindowsSingboxRuntime (см. singbox_runtime_windows.dart), реальный
+// VLESS/Reality-туннель через процесс sing-box.exe + TUN. Выбор реализации —
+// в createSingboxRuntime() по Platform.isWindows. Больше нигде в этом файле
+// ничего не менялось — все ~40 вызовов `_client.*` ниже работают как прежде.
+import 'singbox_runtime.dart';
 
 // [НОВОЕ] Отображаемый пинг слишком высокий по ощущениям пользователя —
 // делим реально измеренное значение на 5 перед показом на экране (только
@@ -25,7 +33,11 @@ class TunnelService {
   TunnelService._();
   static final TunnelService instance = TunnelService._();
 
-  final SingboxClient _client = SingboxClient();
+  // [ИЗМЕНЕНО — Windows real-VPN] Было `final SingboxClient _client =
+  // SingboxClient();`. На Android createSingboxRuntime() возвращает
+  // AndroidSingboxRuntime — тонкую обёртку над тем же самым SingboxClient()
+  // без единого изменения поведения (см. singbox_runtime_android.dart).
+  final SingboxRuntimeClient _client = createSingboxRuntime();
   static const _nativeStatsChannel = MethodChannel('vpnonline/native_stats');
   bool _initialized = false;
   // [ИСПРАВЛЕНО] Выключен по умолчанию — совпадает с fallback при чтении

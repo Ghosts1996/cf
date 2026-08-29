@@ -1,9 +1,12 @@
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/api_client.dart';
 import '../services/locale_service.dart';
+import 'support_screen.dart' show websiteUrl, telegramBotUrl;
 
 /// Пополнение баланса — [НОВОЕ].
 ///
@@ -16,6 +19,17 @@ import '../services/locale_service.dart';
 /// сайт/бота. Плюс `plans_screen.dart` вызывал несуществующий
 /// `Navigator.pushNamed('/topup')` при ошибке "недостаточно средств" — тоже
 /// приводило в никуда (крэш при нажатии). Оба места теперь ведут сюда.
+///
+/// [ИСПРАВЛЕНО — App Store Guideline 3.1.1] На iOS этот экран НЕ должен
+/// открывать `billingTopup()` (ЮKassa/CryptoBot) — это сторонняя оплата
+/// цифровых услуг внутри приложения, гарантированная причина отклонения на
+/// review (и на обычном App Store, и на TestFlight Beta Review). Apple
+/// требует либо свой In-App Purchase, либо отсутствие любого UI оплаты в
+/// приложении. Реализовывать StoreKit не просили, поэтому на iOS этот экран
+/// работает в "read-only" режиме: вместо формы суммы/способа оплаты — две
+/// внешние ссылки (сайт и Telegram-бот), где пользователь оформляет и
+/// оплачивает подписку сам, вне приложения. `billingTopup()` на iOS не
+/// вызывается вообще ни при каких условиях.
 class TopUpScreen extends StatefulWidget {
   const TopUpScreen({super.key});
   @override
@@ -38,6 +52,17 @@ class _TopUpScreenState extends State<TopUpScreen> {
   }
 
   double? get _amount => double.tryParse(_amountCtrl.text.replaceAll(',', '.'));
+
+  /// `true`, если это iOS-сборка (не web, не Android/desktop). На iOS
+  /// экран не показывает форму оплаты — см. комментарий класса.
+  bool get _isIosBuild => !kIsWeb && Platform.isIOS;
+
+  Future<void> _openExternal(String url) async {
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
 
   Future<void> _submit() async {
     final amount = _amount;
@@ -74,6 +99,7 @@ class _TopUpScreenState extends State<TopUpScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isIosBuild) return _buildIosExternalLinks();
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(
@@ -149,6 +175,96 @@ class _TopUpScreenState extends State<TopUpScreen> {
           ),
         ),
       ),
+      ),
+    );
+  }
+
+  /// iOS-версия экрана: без формы суммы/способа оплаты и без вызова
+  /// `billingTopup()`. Только объяснение + две внешние ссылки (сайт и
+  /// Telegram-бот), где пользователь сам оформляет и оплачивает подписку.
+  Widget _buildIosExternalLinks() {
+    return AnimatedBuilder(
+      animation: LocaleService.instance,
+      builder: (context, _) => Scaffold(
+        body: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AppHeader(trailing: Icons.arrow_back_rounded, onTrailingTap: () => Navigator.pop(context)),
+                Text(tr('Пополнить баланс'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                const SizedBox(height: 14),
+                NeonCard(
+                  child: Text(
+                    tr('Пополнение баланса внутри iOS-приложения недоступно. '
+                        'Оформи и оплати подписку на сайте или в Telegram-боте — '
+                        'ключ появится в приложении автоматически.'),
+                    style: const TextStyle(fontSize: 12, color: AppColors.textDim, height: 1.4),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                SectionTitle(tr('Где купить ключ')),
+                _ExternalLinkOption(
+                  label: tr('Сайт vpnonline.su'),
+                  subtitle: 'vpnonline.su',
+                  emoji: '🌐',
+                  onTap: () => _openExternal(websiteUrl),
+                ),
+                const SizedBox(height: 8),
+                _ExternalLinkOption(
+                  label: tr('Telegram-бот'),
+                  subtitle: 't.me/VPNonLineRoBot',
+                  emoji: '✈️',
+                  onTap: () => _openExternal(telegramBotUrl),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ExternalLinkOption extends StatelessWidget {
+  const _ExternalLinkOption({
+    required this.label,
+    required this.subtitle,
+    required this.emoji,
+    required this.onTap,
+  });
+  final String label;
+  final String subtitle;
+  final String emoji;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return NeonCard(
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: const BoxDecoration(shape: BoxShape.circle, color: AppColors.violet2),
+            alignment: Alignment.center,
+            child: Text(emoji, style: const TextStyle(fontSize: 15)),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                Text(subtitle, style: const TextStyle(fontSize: 10, color: AppColors.textDim)),
+              ],
+            ),
+          ),
+          const Icon(Icons.open_in_new_rounded, color: AppColors.textDim, size: 16),
+        ],
       ),
     );
   }
