@@ -16,15 +16,31 @@ namespace {
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
-constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
+// [НОВОЕ] Атрибуты DWM для явного цвета рамки/заголовка окна и текста в нём
+// (Windows 11, сборка 22000+). На более старых SDK эти константы могут
+// отсутствовать в dwmapi.h — определяем их сами по документации Microsoft.
+// См. https://learn.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
 
-/// Registry key for app theme preference.
-///
-/// A value of 0 indicates apps should use dark mode. A non-zero or missing
-/// value indicates apps should use light mode.
-constexpr const wchar_t kGetPreferredBrightnessRegKey[] =
-  L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
-constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme";
+// [НОВОЕ] Цвета рамки/заголовка окна под фирменную тёмно-фиолетовую палитру
+// приложения (см. lib/theme.dart -> AppColors.bgCard/AppColors.text), а не
+// системные белые/чёрные по умолчанию. COLORREF хранится в порядке
+// 0x00BBGGRR, поэтому байты идут в обратном порядке относительно
+// привычного HEX #RRGGBB.
+// AppColors.bgCard = #0F0A1C -> COLORREF 0x001C0A0F
+constexpr COLORREF kTitleBarColor = 0x001C0A0F;
+// AppColors.text = #F3F0FF -> COLORREF 0x00FFF0F3
+constexpr COLORREF kTitleTextColor = 0x00FFF0F3;
+
+constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
@@ -273,16 +289,27 @@ void Win32Window::OnDestroy() {
 }
 
 void Win32Window::UpdateTheme(HWND const window) {
-  DWORD light_mode;
-  DWORD light_mode_size = sizeof(light_mode);
-  LSTATUS result = RegGetValue(HKEY_CURRENT_USER, kGetPreferredBrightnessRegKey,
-                               kGetPreferredBrightnessRegValue,
-                               RRF_RT_REG_DWORD, nullptr, &light_mode,
-                               &light_mode_size);
+  // [ИЗМЕНЕНО] Раньше тёмная рамка включалась только если у пользователя в
+  // системе выбрана тёмная тема (чтение реестра ниже) — на светлой теме
+  // Windows заголовок окна оставался белым, что и видно на скриншоте
+  // пользователя. Приложение само по себе всегда тёмное (см.
+  // lib/theme.dart), поэтому рамку теперь всегда переключаем в тёмный режим
+  // независимо от системной темы — раскладка реестра больше не читается.
+  BOOL enable_dark_mode = TRUE;
+  DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &enable_dark_mode, sizeof(enable_dark_mode));
 
-  if (result == ERROR_SUCCESS) {
-    BOOL enable_dark_mode = light_mode == 0;
-    DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                          &enable_dark_mode, sizeof(enable_dark_mode));
-  }
+  // [НОВОЕ] На Windows 11 (сборка 22000+) можно явно задать цвет рамки и
+  // заголовка окна вместо системного чёрного/белого по умолчанию — красим
+  // её под фирменный тёмно-фиолетовый цвет карточек приложения. На более
+  // старых версиях Windows (10 или ранние сборки 11) эти вызовы просто
+  // ничего не делают (DwmSetWindowAttribute вернёт ошибку, которую мы
+  // намеренно игнорируем) — там останется обычная тёмная рамка от
+  // DWMWA_USE_IMMERSIVE_DARK_MODE выше.
+  DwmSetWindowAttribute(window, DWMWA_CAPTION_COLOR, &kTitleBarColor,
+                        sizeof(kTitleBarColor));
+  DwmSetWindowAttribute(window, DWMWA_BORDER_COLOR, &kTitleBarColor,
+                        sizeof(kTitleBarColor));
+  DwmSetWindowAttribute(window, DWMWA_TEXT_COLOR, &kTitleTextColor,
+                        sizeof(kTitleTextColor));
 }
