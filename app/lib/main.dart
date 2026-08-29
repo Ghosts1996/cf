@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -135,6 +137,25 @@ class VpnOnlineApp extends StatelessWidget {
             GlobalCupertinoLocalizations.delegate,
           ],
           home: const AppEntryPoint(),
+          // [НОВОЕ] Интерфейс спроектирован под телефонный экран. На Windows
+          // системное окно теперь стартует компактным (см.
+          // windows/runner/main.cpp), но пользователь может вручную растянуть
+          // его на весь монитор — без этого builder'а контент растягивался
+          // бы на всю ширину и выглядел неестественно. Ограничиваем контент
+          // "телефонной" шириной и центрируем его, только на Windows —
+          // Android/iOS не затрагиваем.
+          builder: (context, child) {
+            if (kIsWeb || !Platform.isWindows) return child ?? const SizedBox.shrink();
+            return ColoredBox(
+              color: AppColors.bg,
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 480),
+                  child: child,
+                ),
+              ),
+            );
+          },
         );
       },
     );
