@@ -106,3 +106,18 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# [НОВОЕ — Windows real-VPN] Копирует папку windows/sing-box/ (sing-box.exe +
+# wintun.dll — их нужно один раз скачать вручную, см.
+# windows/sing-box/ПОЛОЖИ_СЮДА_ФАЙЛЫ.txt) рядом с итоговым .exe приложения.
+# WindowsSingboxRuntime (lib/services/singbox_runtime_windows.dart) ищет их
+# именно по пути "<папка с exe>/sing-box/". Если папки в репозитории нет —
+# шаг просто ничего не копирует, сборка не ломается, но реальный VPN на
+# Windows работать не будет (checkConfig/connect вернут понятную ошибку
+# SINGBOX_MISSING/WINTUN_MISSING).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sing-box")
+  install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/sing-box"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}"
+    COMPONENT Runtime
+    PATTERN "*.txt" EXCLUDE)
+endif()
