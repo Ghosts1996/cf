@@ -1754,7 +1754,24 @@ class TunnelService {
     // него, независимо от схемы этого служебного 204-запроса внутри.
     final probeUri = Uri.parse('http://cp.cloudflare.com/generate_204');
 
-    if (proxyOnly) {
+    // [НОВОЕ — Windows real-VPN] На Windows sing-box.exe — ОТДЕЛЬНЫЙ процесс
+    // (не тот же процесс, что и Flutter-приложение, как на Android через
+    // libbox). WindowsSingboxRuntime.connect() (см. singbox_runtime_windows.dart)
+    // считает сессию "connected", как только у sing-box отвечает служебный
+    // Clash API — это подтверждает лишь то, что процесс жив, а НЕ то, что
+    // TUN-адаптер реально поднялся и VLESS-хендшейк до сервера прошёл
+    // (например: wintun.dll не смог создать адаптер, или сервер не отвечает,
+    // а sing-box-процесс при этом не падает). Ветка ниже (не self-probe,
+    // просто "подождать и поверить статусу") рассчитана именно на Android,
+    // где self-probe в принципе недостоверен (см. комментарий ниже) — на
+    // Windows эта причина не действует, поэтому здесь идём тем же путём, что
+    // и в proxy-режиме: реальный HTTP-запрос через локальный
+    // 127.0.0.1:$_proxyPort. Он всегда поднят (см. _buildSingBoxConfig —
+    // 'mixed-in' инбаунд добавляется независимо от proxyOnly) и honestly
+    // проходит через тот же исходящий VLESS-туннель, что и системный
+    // трафик — то есть именно то, чего раньше не хватало на Windows: раньше
+    // сессия считалась "подключено" без единой реальной проверки.
+    if (proxyOnly || Platform.isWindows) {
       // В proxy-режиме запрос явно направлен через локальный SOCKS/HTTP-порт
       // (127.0.0.1:$_proxyPort) — это соединение процесса приложения с самим
       // собой (loopback), оно не подчиняется системной маршрутизации VPN и
@@ -2125,4 +2142,4 @@ class TunnelException implements Exception {
   final String message;
   @override
   String toString() => message;
-}
+} 
