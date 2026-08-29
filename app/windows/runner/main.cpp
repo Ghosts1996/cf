@@ -32,7 +32,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   const int screen_w = ::GetSystemMetrics(SM_CXSCREEN);
   const int screen_h = ::GetSystemMetrics(SM_CYSCREEN);
   const unsigned int window_w = 420;
-  const unsigned int window_h = 860;
+  // [ИЗМЕНЕНО] Было 860 — по просьбе пользователя окно слишком вытянуто по
+  // вертикали на обычном Full HD экране (почти во весь экран по высоте).
+  // 720 по-прежнему укладывает весь UI без внутренней прокрутки контента
+  // ConnectScreen, но оставляет разумные отступы сверху/снизу на типичном
+  // 1080p мониторе. Пользователь всё ещё может вручную растянуть окно.
+  const unsigned int window_h = 720;
   Win32Window::Point origin(
       screen_w > static_cast<int>(window_w)
           ? (screen_w - static_cast<int>(window_w)) / 2
