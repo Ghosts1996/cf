@@ -26,15 +26,21 @@ jobs:
     # туда что-то склонировать — поэтому git видит "already exists and is
     # not empty" даже на самой первой попытке, с новым случайным именем
     # папки каждый раз (это видно в логе: dir9e93c3d2, dir57e286f1,
-    # dir347b6388 — разные имена, но одна и та же ошибка). Дело не в
-    # "мусоре от прошлой попытки" (то есть предыдущий фикс с очисткой
-    # `_temp` не помогал по сути) — реальная причина в самой папке
-    # C:\Users\runneradmin\.pub-cache на этом образе раннера. Стандартное
-    # решение сообщества Dart/Flutter — увести PUB_CACHE на диск D:
-    # (на GitHub-раннерах Windows это отдельный более быстрый диск, где
-    # Defender/индексатор так не ведёт себя с новыми папками).
-    env:
-      PUB_CACHE: D:\pubcache
+    # dir347b6388, dir2fdd8578, dir9198d584, dir895fc61f — разные имена,
+    # одна и та же ошибка). Дело не в "мусоре от прошлой попытки" —
+    # реальная причина в самой папке C:\Users\runneradmin\.pub-cache на
+    # этом образе раннера.
+    #
+    # [ИСПРАВЛЕНО #2 — почему просто `env: PUB_CACHE: D:\...` на уровне job
+    # не сработал] Лог показал, что PUB_CACHE всё равно оставался
+    # `/c/Users/runneradmin/.pub-cache`, несмотря на job-level env. Причина:
+    # `flutter-actions/setup-flutter@v2` сам прописывает PUB_CACHE через
+    # файл GITHUB_ENV (стандартный способ setup-экшенов задавать переменные
+    # для последующих шагов) — а такая запись выполняется ПОЗЖЕ, чем
+    # применяется job-level `env:`, и поэтому перебивает его для всех шагов
+    # после Setup Flutter. Поэтому переопределяем PUB_CACHE не через job
+    # `env:`, а отдельным шагом СРАЗУ ПОСЛЕ Setup Flutter — тем же
+    # механизмом GITHUB_ENV, только последним, значит именно он и победит.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,28 +50,32 @@ jobs:
         with:
           channel: stable
 
+      # [ИСПРАВЛЕНО #2] Переопределяем PUB_CACHE ПОСЛЕ Setup Flutter (он
+      # сам молча прописывает свой PUB_CACHE через GITHUB_ENV, поэтому
+      # переопределение ДО этого шага не срабатывает — см. комментарий
+      # выше). Диск D: на GitHub Windows-раннерах отдельный от системного
+      # C:, там не проявляется баг с "already exists and is not empty".
+      - name: Move PUB_CACHE to D drive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "D:\pubcache" | Out-Null
+          "PUB_CACHE=D:\pubcache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "PUB_CACHE overridden to D:\pubcache for all subsequent steps"
+
       - name: Show Flutter version
         run: flutter --version
 
       - name: Enable Windows desktop support
         run: flutter config --enable-windows-desktop
 
-      # Создаём кастомную папку под PUB_CACHE на D: заранее — так же, как
-      # это неявно делает pub при первом обращении, но явно и без сюрпризов.
-      - name: "Prepare custom PUB_CACHE on D:"
-        shell: pwsh
-        run: New-Item -ItemType Directory -Force -Path "$env:PUB_CACHE" | Out-Null
-
-      # [ИСПРАВЛЕНО — реальный баг образа windows-latest, см. комментарий
-      # у `env: PUB_CACHE` выше] Сама git-зависимость (flutter_singbox_client,
-      # github.com/Ghosts1996/cf.git, ветка ccurecc_singbox_dns) рабочая —
-      # build-android.yml тянет тот же пакет 152 раза без единого сбоя на
-      # ubuntu-latest. Проблема была в системной папке
-      # C:\Users\runneradmin\.pub-cache на Windows-образе раннера, а не в
-      # логике pub get — перенос PUB_CACHE на D: (шаг выше) устраняет
-      # причину напрямую. Retry оставляем как страховку на случай обычного
-      # сетевого сбоя при клонировании — на реальную причину бага он не
-      # влияет, но не мешает.
+      # Сама git-зависимость (flutter_singbox_client, github.com/Ghosts1996/
+      # cf.git, ветка ccurecc_singbox_dns) рабочая — build-android.yml тянет
+      # тот же пакет 152 раза без единого сбоя на ubuntu-latest. Проблема
+      # была в системной папке C:\Users\runneradmin\.pub-cache на
+      # Windows-образе раннера, а не в логике pub get — перенос PUB_CACHE
+      # на D: (шаг выше) устраняет причину напрямую. Retry оставляем как
+      # страховку на случай обычного сетевого сбоя при клонировании — на
+      # реальную причину бага он не влияет, но не мешает.
       - name: Flutter pub get
         uses: nick-fields/retry@v3
         with:
