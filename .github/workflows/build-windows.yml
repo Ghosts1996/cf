@@ -33,8 +33,35 @@ jobs:
       - name: Enable Windows desktop support
         run: flutter config --enable-windows-desktop
 
+      # [ИСПРАВЛЕНО — реальный баг] Известная проблема `dart pub` именно на
+      # Windows-раннерах: если клонирование git-зависимости
+      # (flutter_singbox_client, тянется из github.com/Ghosts1996/cf.git,
+      # ветка ccurecc_singbox_dns) прерывается на середине — сеть,
+      # антивирус на раннере на долю секунды блокирует файл и т.п. — pub
+      # автоматически повторяет попытку, но НЕ удаляет свою временную
+      # папку `_temp\dirXXXXXXXX` от предыдущей неудачной попытки. Повторный
+      # `git clone --mirror` в ту же папку падает с "destination path ...
+      # already exists and is not empty". На Linux (build-android.yml, тот
+      # же пакет, та же ветка, 152 успешных запуска) это не проявляется —
+      # там процесс клонирования быстрее и файлы не блокируются антивирусом,
+      # поэтому там баг просто не успевает случиться. Сама git-зависимость
+      # рабочая, ничего в pubspec.yaml менять не нужно.
+      # Оборачиваем в retry (тот же nick-fields/retry, что уже используется
+      # в build-android.yml для сборки APK) и перед каждой попыткой чистим
+      # временную папку pub — так, даже если один запуск словит эту
+      # Windows-специфичную блокировку, следующая попытка стартует с чистого
+      # места.
       - name: Flutter pub get
-        run: flutter pub get
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 15
+          shell: pwsh
+          command: |
+            if (Test-Path "$env:PUB_CACHE\_temp") { Remove-Item -Recurse -Force "$env:PUB_CACHE\_temp" -ErrorAction SilentlyContinue }
+            cd app
+            flutter pub get
 
       # Та же генерация фирменной иконки, что и в build-android.yml — иначе
       # .exe соберётся со стандартной иконкой Flutter вместо иконки VPNonLine
