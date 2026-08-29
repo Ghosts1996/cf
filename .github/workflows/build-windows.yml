@@ -45,6 +45,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # [ИСПРАВЛЕНО #3 — предыдущие два фикса (node reuse + flutter clean)
+      # не помогли: лог показал, что каждая из 3 попыток была ПОЛНОЙ чистой
+      # пересборкой (81-112с, все зависимости заново) и всё равно падала на
+      # том же LNK1327 в одном и том же месте — значит это не гонка
+      # процессов и не грязный кэш, а стабильно воспроизводимая проблема.
+      # Точечное исключение через Add-MpPreference -ExclusionPath (шаг
+      # ниже) могло тихо не сработать — `-ErrorAction SilentlyContinue`
+      # скрывает реальную причину отказа. Раз приложение — VPN-клиент
+      # (сетевая/туннельная функциональность), это классический кейс, когда
+      # Windows Defender карантинит/удаляет свежесобранный .exe прямо между
+      # link.exe и mt.exe как потенциально нежелательное ПО — отсюда
+      # "failure during running mt.exe" (mt.exe пытается открыть файл,
+      # которого уже нет). Отключаем real-time protection целиком, в
+      # самом начале job, с запасом времени на применение — это сильнее и
+      # надёжнее точечных исключений.
+      - name: Disable Windows Defender real-time protection
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          Set-MpPreference -DisableBehaviorMonitoring $true
+          Set-MpPreference -DisableIOAVProtection $true
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, IoavProtectionEnabled, BehaviorMonitorEnabled
+
       - name: Setup Flutter (official)
         uses: flutter-actions/setup-flutter@v2
         with:
