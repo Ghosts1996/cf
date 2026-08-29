@@ -67,6 +67,33 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   // (127.0.0.1).
   static const int _clashApiPort = 9095;
 
+  // [НОВОЕ — реальная причина "Подключено, но интернета нет / 0 МБ туда-
+  // обратно", подтверждено видео] Тот же самый JSON-конфиг, что строит
+  // `_buildSingBoxConfig()` в tunnel_service.dart, ВСЕГДА (на любой
+  // платформе, независимо от TUN) поднимает второй, независимый локальный
+  // 'mixed' (SOCKS5+HTTP) инбаунд на 127.0.0.1:2080 — `_prepareWindowsConfig`
+  // его не трогает, он остаётся и в Windows-конфиге. До этой правки
+  // `connect()` считал сессию "connected" сразу, как только отвечал
+  // Clash API (`/version`) — а это ТОЛЬКО доказывает, что процесс
+  // sing-box.exe запустился и слушает свой служебный порт. Это НИЧЕГО не
+  // говорит о том, что TUN-адаптер (WinTun) реально поднялся и что трафик
+  // через него/через outbound действительно идёт: если создание
+  // TUN-интерфейса на Windows тихо не удалось (нет прав администратора у
+  // ФАКТИЧЕСКИ запущенного процесса, антивирус/файрвол блокирует
+  // wintun.dll, драйвер конфликтует со старым зависшим адаптером и т.п.),
+  // sing-box.exe и его Clash API всё равно продолжают работать —
+  // приложение видело "connected" на полностью нерабочем туннеле, ровно
+  // как на видео (статус "Подключено", 0 МБ приём/отдача). Теперь ниже
+  // (`_verifyTunnelPassesTraffic`) перед тем, как реально выставить
+  // 'connected', делается настоящий HTTP-запрос ЧЕРЕЗ этот локальный
+  // прокси-порт — он идёт тем же VLESS/Reality outbound'ом, что и боевой
+  // трафик, но не зависит от TUN, поэтому честно проверяет именно
+  // "туннель реально передаёт данные", а не "процесс жив". Порт
+  // захардкожен намеренно (не через platform channel/аргументы) — он
+  // всегда одно и то же фиксированное значение 2080 в общем конфиге,
+  // см. tunnel_service.dart::_proxyPort.
+  static const int _localProxyPort = 2080;
+
   String get _sep => Platform.pathSeparator;
   String get _exeDir => File(Platform.resolvedExecutable).parent.path;
   String get _singboxDir => _joinPath([_exeDir, 'sing-box']);
@@ -401,6 +428,26 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
         );
       }
 
+      // [НОВОЕ] См. докстринг у _localProxyPort выше — без этой проверки
+      // "connected" означало только "процесс жив", а не "трафик идёт".
+      final trafficOk = await _verifyTunnelPassesTraffic();
+      if (!trafficOk) {
+        await disconnect();
+        throw PlatformException(
+          code: 'TUNNEL_NOT_PASSING_TRAFFIC',
+          message:
+              'sing-box запустился, но трафик через туннель не проходит '
+              '(TUN-адаптер не поднялся или сервер недоступен). Обычно '
+              'помогает: 1) убедиться, что приложение реально запущено от '
+              'имени администратора (должен был появиться UAC-запрос при '
+              'старте); 2) проверить, не блокирует ли антивирус/файрвол '
+              'wintun.dll; 3) в диспетчере устройств/сетевых подключениях '
+              'проверить, нет ли зависшего старого адаптера "VPNonLine" от '
+              'предыдущей сессии — если есть, удалить/отключить его и '
+              'перезагрузить компьютер.',
+        );
+      }
+
       _setState('connected');
       _startStatsPolling();
     } catch (_) {
@@ -422,6 +469,41 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
         // ещё не поднялся — попробуем ещё раз
       }
       await Future.delayed(const Duration(milliseconds: 300));
+    }
+    return false;
+  }
+
+  /// [НОВОЕ] Настоящая проверка "трафик реально идёт через outbound
+  /// VLESS/Reality" — запрос отправляется ЧЕРЕЗ локальный SOCKS/HTTP-прокси
+  /// sing-box'а (127.0.0.1:$_localProxyPort), а не напрямую, поэтому
+  /// проверяет именно туннель, а не обычный интернет компьютера (см.
+  /// докстринг _localProxyPort — та же логика, что уже используется для
+  /// честного замера пинга в tunnel_service.dart::connectedDelayMs()).
+  /// До трёх коротких попыток — сразу после старта sing-box'у иногда нужна
+  /// секунда-другая, чтобы outbound-соединение реально установилось.
+  Future<bool> _verifyTunnelPassesTraffic() async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final client = HttpClient();
+      client.findProxy = (_) => 'PROXY 127.0.0.1:$_localProxyPort';
+      client.connectionTimeout = const Duration(seconds: 4);
+      try {
+        final req = await client
+            .getUrl(Uri.parse('http://cp.cloudflare.com/generate_204'))
+            .timeout(const Duration(seconds: 4));
+        final res = await req.close().timeout(const Duration(seconds: 4));
+        await res.drain<void>();
+        if (res.statusCode == 204 || res.statusCode == 200) {
+          return true;
+        }
+      } catch (_) {
+        // Пробуем ещё раз ниже — процесс мог ещё не успеть полностью
+        // поднять outbound-соединение сразу после старта.
+      } finally {
+        client.close(force: true);
+      }
+      if (attempt < 2) {
+        await Future.delayed(const Duration(milliseconds: 700));
+      }
     }
     return false;
   }
