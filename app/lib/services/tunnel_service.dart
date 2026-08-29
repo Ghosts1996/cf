@@ -1824,7 +1824,6 @@ class TunnelService {
   Future<void> disconnect() async {
     if (!_initialized) return;
     _userInitiatedDisconnect = true;
-    _lastConnectionString = null;
     _autoReconnectAttempt = 0;
     killSwitchBlocking.value = false;
     _restartDurationTicker(false);
@@ -1844,6 +1843,10 @@ class TunnelService {
       _connectedHost = null;
       _connectedPort = null;
       localProxyAddress.value = null;
+      // См. подробный докстринг в основной ветке ниже — обнуляем строго
+      // ЗДЕСЬ, а не в начале метода, чтобы не было окна, где туннеля для
+      // switchPreferredHost() уже формально "нет", а status ещё "connected".
+      _lastConnectionString = null;
       return;
     }
     try {
@@ -1855,28 +1858,28 @@ class TunnelService {
       _connectedHost = null;
       _connectedPort = null;
       localProxyAddress.value = null;
-      // [ИСПРАВЛЕНО — реальная причина серии жалоб: "кнопка Отключить не
-      // отключает", "VPN как будто сам подключается", "не удалось
-      // переключиться на сервер: нет активного туннеля"] Строчкой выше по
-      // коду `_lastConnectionString = null` устанавливается СРАЗУ, в начале
-      // disconnect(). Но публичный `status.value.state` (то, что реально
-      // читает `isConnected`/UI) раньше менялся только КОСВЕННО — когда
-      // нативный слой (см. singbox_runtime_windows.dart) через какое-то
-      // время пришлёт в serviceStateStream событие "disconnected", и
-      // `_applyServiceState` его обработает. На Windows это событие могло
-      // прийти с задержкой или не прийти вовсе (гонка при завершении
-      // процесса) — из-за этого `isConnected` оставался `true` ещё какое-то
-      // время (или насовсем) уже ПОСЛЕ того, как `_lastConnectionString`
-      // был обнулён. Ровно это рассогласование и производило все три
-      // симптома: экран показывал "ПОДКЛЮЧЕНО" сколько угодно долго после
-      // нажатия "Отключить" (хотя реального туннеля уже не было — отсюда и
-      // "пропал интернет" при формально "подключённом" состоянии), и
-      // попытка сменить сервер видела `isConnected == true`, шла в
-      // `switchPreferredHost()`, а там уже `_lastConnectionString == null`
-      // -> честная ошибка "Нет активного туннеля". Теперь disconnect()
-      // сам, немедленно и безусловно, переводит публичный статус в
-      // "disconnected" — не дожидаясь и не полагаясь на то, придёт ли
-      // (и когда) подтверждение от нативного слоя.
+      // [ИСПРАВЛЕНО — РЕАЛЬНАЯ причина "Не удалось переключиться на ...:
+      // Нет активного туннеля, который можно переключить" на полностью
+      // рабочем подключении, воспроизведено на видео] `_lastConnectionString`
+      // раньше обнулялся СИНХРОННО в самой первой строке disconnect(), а
+      // публичный `status.value.state` (то, что реально читает
+      // `isConnected`/UI/кнопки) менялся только ЗДЕСЬ — ПОСЛЕ `await
+      // _client.disconnect()`. На Windows этот `await` не мгновенный: внутри
+      // — TerminateProcess дочернего sing-box.exe, ожидание его exitCode (до
+      // 2 секунд) и резервный `taskkill` по имени процесса (см.
+      // singbox_runtime_windows.dart::disconnect()/_forceKillByName). Всё
+      // это время — от первой строки disconnect() и до этого места —
+      // `_lastConnectionString` уже был `null`, а `status.value.state` всё
+      // ещё оставался `connected`: `isConnected` честно отвечал `true`.
+      // Если в этот же момент пользователь (или автобалансировка) пытался
+      // сменить сервер — `_onServerTapped()`/`_maybeApplyAutoBalance()`
+      // видели `isConnected == true`, шли в `switchPreferredHost()`, а там
+      // уже `_lastConnectionString == null` -> ошибка "Нет активного
+      // туннеля" на экране, который в этот самый момент показывал
+      // "ПОДКЛЮЧЕНО". Теперь `_lastConnectionString` обнуляется РОВНО в
+      // той же точке, что и публичный статус, — оба флага меняются
+      // атомарно, окна рассогласования между ними больше нет.
+      _lastConnectionString = null;
       _connectStartedAt = null;
       _restartDurationTicker(false);
       status.value = const TunnelStatus(
