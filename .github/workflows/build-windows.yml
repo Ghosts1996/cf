@@ -99,10 +99,38 @@ jobs:
         run: flutter test --coverage
         continue-on-error: true
 
+      # [ИСПРАВЛЕНО — тот же класс бага, что и с pub get выше, но на другом
+      # инструменте] `LNK1327: failure during running mt.exe` — известная
+      # проблема Windows-раннеров GitHub Actions: Windows Defender
+      # real-time protection на долю секунды блокирует свежесозданный .exe
+      # сразу после линковки, пока mt.exe пытается встроить в него манифест
+      # — тот же паттерн блокировки файлов антивирусом, что был с
+      # `git clone` у pub get (см. выше), только теперь на linker/mt.exe.
+      # Исключаем папку сборки из реального времени сканирования Defender
+      # заранее — GitHub-раннеры выполняются с правами администратора,
+      # Add-MpPreference доступен без дополнительных прав.
+      - name: Exclude build folder from Windows Defender
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionProcess "mt.exe" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionProcess "link.exe" -ErrorAction SilentlyContinue
+          Write-Host "Defender exclusions added for ${{ github.workspace }}, mt.exe, link.exe"
+
       # [ВАЖНО] Тот же секрет SHOPBOT_API_KEY, что и в Android-сборке —
       # единый ключ бэкенда для всех платформ клиента.
+      # Оборачиваем в retry как страховку: даже если исключение Defender
+      # выше почему-то не успело подхватиться (например, из-за задержки
+      # применения политики защитника), повторная попытка мимо того же
+      # временного файлового лока обычно проходит.
       - name: Build Windows release
-        run: flutter build windows --release --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 15
+          shell: pwsh
+          command: cd app; flutter build windows --release --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
 
       # [ВАЖНО] Предупреждение прямо в логе сборки, если windows/sing-box/
       # пустая — тогда .exe соберётся нормально, но реальный VPN на Windows
