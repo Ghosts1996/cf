@@ -1,0 +1,85 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master, fix/secure-configs-and-ci ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build Flutter Windows app
+    # [НОВОЕ] В отличие от build-android.yml (ubuntu-latest) — сборка под
+    # Windows обязана идти на windows-раннере: `flutter build windows`
+    # использует MSBuild/Visual Studio Build Tools, которых на Linux нет
+    # физически, это не вопрос настройки, а требование самого Flutter.
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter (official)
+        uses: flutter-actions/setup-flutter@v2
+        with:
+          channel: stable
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Enable Windows desktop support
+        run: flutter config --enable-windows-desktop
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      # Та же генерация фирменной иконки, что и в build-android.yml — иначе
+      # .exe соберётся со стандартной иконкой Flutter вместо иконки VPNonLine
+      # (flutter_launcher_icons в pubspec.yaml уже настроен и на windows: true).
+      - name: Generate app icons
+        run: dart run flutter_launcher_icons
+
+      - name: Flutter analyze
+        run: flutter analyze
+        continue-on-error: true
+
+      - name: Run tests
+        run: flutter test --coverage
+        continue-on-error: true
+
+      # [ВАЖНО] Тот же секрет SHOPBOT_API_KEY, что и в Android-сборке —
+      # единый ключ бэкенда для всех платформ клиента.
+      - name: Build Windows release
+        run: flutter build windows --release --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+
+      # [ВАЖНО] Предупреждение прямо в логе сборки, если windows/sing-box/
+      # пустая — тогда .exe соберётся нормально, но реальный VPN на Windows
+      # заработает только через автозагрузку sing-box.exe/wintun.dll при
+      # первом подключении клиента (см. singbox_runtime_windows.dart), а не
+      # "из коробки" сразу после установки — это ожидаемо, не ошибка сборки.
+      - name: Check bundled sing-box binaries
+        shell: bash
+        run: |
+          if [ ! -f "windows/sing-box/sing-box.exe" ] || [ ! -f "windows/sing-box/wintun.dll" ]; then
+            echo "::warning::windows/sing-box/ не содержит sing-box.exe и/или wintun.dll — приложение соберётся, но при первом подключении само скачает их у клиента (нужен интернет). Чтобы зашить файлы прямо в сборку — положи их в windows/sing-box/ перед пушем."
+          else
+            echo "sing-box.exe и wintun.dll найдены — будут зашиты прямо в сборку."
+          fi
+
+      # [НОВОЕ] flutter build windows кладёт готовый .exe + все .dll в
+      # build/windows/x64/runner/Release — упаковываем это целиком в один
+      # zip, чтобы результат можно было просто распаковать на любом
+      # Windows-компьютере и запустить, без отдельной установки.
+      - name: Zip Release folder
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "VPNonLine-windows.zip" -Force
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpnonline-windows
+          path: app/VPNonLine-windows.zip
