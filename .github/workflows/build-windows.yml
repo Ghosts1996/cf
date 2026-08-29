@@ -184,17 +184,24 @@ jobs:
             echo "sing-box.exe и wintun.dll найдены — будут зашиты прямо в сборку."
           fi
 
-      # [НОВОЕ] flutter build windows кладёт готовый .exe + все .dll в
-      # build/windows/x64/runner/Release — упаковываем это целиком в один
-      # zip, чтобы результат можно было просто распаковать на любом
-      # Windows-компьютере и запустить, без отдельной установки.
-      - name: Zip Release folder
+      # [ИЗМЕНЕНО] Раньше здесь просто паковали build/windows/x64/runner/Release
+      # целиком в .zip — пользователь получал папку с .exe и кучей .dll рядом,
+      # без установки: запускать нужно было прямо из распакованного архива, без
+      # ярлыков, без записи в "Установка и удаление программ", без
+      # деинсталлятора. Теперь собираем полноценный установщик через Inno
+      # Setup (см. windows/installer/installer.iss) — результат один .exe,
+      # который ставит приложение в Program Files и создаёт ярлыки.
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
-          Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "VPNonLine-windows.zip" -Force
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "windows\installer\installer.iss"
 
-      - name: Upload Windows build
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: vpnonline-windows
-          path: app/VPNonLine-windows.zip
+          name: vpnonline-windows-installer
+          path: installer-output/VPNonLine-Setup.exe
