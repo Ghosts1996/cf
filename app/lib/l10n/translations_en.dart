@@ -220,6 +220,15 @@ const Map<String, String> translationsEn = {
   'Не удалось создать платёж:': 'Failed to create the payment:',
   'Способ оплаты': 'Payment method',
   'ЮKassa · СБП / карта': 'YooKassa · SBP / card',
+  'Пополнение баланса внутри iOS-приложения недоступно. '
+      'Оформи и оплати подписку на сайте или в Telegram-боте — '
+      'ключ появится в приложении автоматически.':
+      'Topping up your balance inside the iOS app isn\'t available. '
+      'Subscribe and pay on the website or via the Telegram bot — '
+      'the key will appear in the app automatically.',
+  'Где купить ключ': 'Where to buy a key',
+  'Сайт vpnonline.su': 'vpnonline.su website',
+  'Telegram-бот': 'Telegram bot',
   'Пополнить': 'Top up',
 
   // ── keys_screen.dart ────────────────────────────────────────────────────
