@@ -38,3 +38,17 @@ target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
+
+# [ИСПРАВЛЕНО — LNK1327 "failure during running mt.exe" /
+# "Values of attribute 'level' not equal in different manifest snippets"]
+# Visual Studio-генератор CMake сам добавляет в манифест исполняемого файла
+# уровень UAC по умолчанию (/MANIFESTUAC:level='asInvoker'), не спрашивая
+# нас. У нас же runner.exe.manifest (добавлен как source-файл выше) уже
+# явно задаёт requestedExecutionLevel level="requireAdministrator" — он
+# нужен реально, чтобы Windows поднимала TUN-адаптер для sing-box. Когда
+# оба манифест-фрагмента доходят до mt.exe одновременно с РАЗНЫМИ
+# значениями level, слияние манифестов ломается с ошибкой c1010001, а
+# линковка падает с LNK1327. /MANIFESTUAC:NO отключает автоматическую
+# генерацию UAC-фрагмента линкером — единственным источником
+# requestedExecutionLevel остаётся runner.exe.manifest.
+target_link_options(${BINARY_NAME} PRIVATE "/MANIFESTUAC:NO")
