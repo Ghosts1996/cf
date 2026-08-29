@@ -770,8 +770,26 @@ class _ConnectScreenState extends State<ConnectScreen> {
               children: [
                 Expanded(
                   child: OutlinedButton(
-                    onPressed: () =>
-                        Navigator.push(context, MaterialPageRoute(builder: (_) => const ServersScreen())),
+                    // [ИСПРАВЛЕНО — та самая гонка с видео: "Не удалось
+                    // переключиться на ...: Нет активного туннеля", хотя
+                    // экран в этот момент показывал "ПОДКЛЮЧЕНО"] Кнопка
+                    // "Сменить сервер" раньше была активна ВСЕГДА, включая
+                    // те секунды, пока в фоне ещё выполняется
+                    // `_tunnel.disconnect()` (нажатие "Отключить" рядом).
+                    // Экран "Выбор сервера" при тапе по локации проверяет
+                    // `_tunnel.isConnected`, а тот в это окно ещё `true` —
+                    // публичный статус успевает стать `disconnected` только
+                    // после завершения disconnect() (на Windows это не
+                    // мгновенно: реальное завершение процесса sing-box.exe).
+                    // Теперь кнопка использует ТОТ ЖЕ флаг `_connecting ||
+                    // _tunnel.isBusy`, что и кнопка "Отключить" правее —
+                    // пока идёт переход между состояниями, обе кнопки
+                    // синхронно недоступны, и попасть в это окно гонки
+                    // через UI больше нельзя.
+                    onPressed: (_connecting || _tunnel.isBusy)
+                        ? null
+                        : () => Navigator.push(
+                            context, MaterialPageRoute(builder: (_) => const ServersScreen())),
                     child: Text(tr('Сменить сервер')),
                   ),
                 ),
