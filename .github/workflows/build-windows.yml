@@ -166,7 +166,6 @@ jobs:
         env:
           MSBUILDDISABLENODEREUSE: "1"
         run: |
-          cd app
           flutter clean
           flutter pub get
           flutter build windows --release -v --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
