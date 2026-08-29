@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import '../theme.dart';
 
@@ -22,6 +24,20 @@ class AppHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // [НОВОЕ — "нет кнопок назад" на Windows] AppHeader раньше давал только
+    // один слот — `trailing`. На части экранов туда посажена СОБСТВЕННАЯ
+    // кнопка экрана (обновить на "Выбор сервера", меню на "Подключение"),
+    // а не "назад" — экран в принципе не мог показать кнопку назад. На
+    // Android это было не страшно: у системы всегда есть аппаратная кнопка/
+    // жест "назад", он работает независимо от того, что нарисовано в
+    // интерфейсе. На Windows такого системного "назад" нет вообще — экран
+    // без trailing=arrow_back оказывался тупиком, из него нельзя было выйти
+    // ничем, кроме перезапуска приложения. Показываем отдельную кнопку
+    // "назад" слева от лого, только когда экран реально можно закрыть
+    // (`Navigator.canPop`) и только на Windows — на Android ничего не
+    // меняется (там это надёжно решает системная навигация, как и раньше).
+    final showBackButton =
+        !kIsWeb && Platform.isWindows && Navigator.canPop(context);
     return Column(
       children: [
         // [ИСПРАВЛЕНО] Раньше отступ сверху был всего 4px — на части
@@ -37,6 +53,22 @@ class AppHeader extends StatelessWidget {
             children: [
               Row(
                 children: [
+                  if (showBackButton)
+                    GestureDetector(
+                      onTap: () => Navigator.pop(context),
+                      child: Container(
+                        width: 32,
+                        height: 32,
+                        margin: const EdgeInsets.only(right: 10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF120B22),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppColors.border),
+                        ),
+                        child: const Icon(Icons.arrow_back_rounded,
+                            size: 16, color: AppColors.textDim),
+                      ),
+                    ),
                   Container(
                     width: 26,
                     height: 26,
