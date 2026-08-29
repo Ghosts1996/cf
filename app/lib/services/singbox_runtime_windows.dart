@@ -460,14 +460,30 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     _lastDownload = 0;
     _lastUpload = 0;
 
+    // [ИСПРАВЛЕНО — реальная причина "кнопка Отключить зависает и ничего не
+    // делает несколько секунд подряд", подтверждено видео с зависшим
+    // спиннером] Раньше здесь СНАЧАЛА посылался `ProcessSignal.sigterm` и
+    // код честно ждал до 5 секунд, пока процесс сам завершится, и только
+    // потом, по таймауту, переходил к `sigkill`. На Windows это ожидание
+    // было гарантированно бесполезным: Windows не имеет понятия о POSIX-
+    // сигналах, и Dart на этой платформе не может доставить произвольному
+    // дочернему процессу настоящий SIGTERM — `sing-box.exe` просто никогда
+    // не получал команду на завершение и продолжал работать все эти 5
+    // секунд, пока не срабатывал таймаут. Каждое нажатие "Отключить" из-за
+    // этого ощущалось как зависшая кнопка на добрые 5 секунд, прежде чем
+    // туннель реально останавливался. Теперь на Windows процесс убивается
+    // сразу через `sigkill` (это Windows честно доставляет — TerminateProcess)
+    // без бессмысленного ожидания несуществующего мягкого завершения.
     final proc = _process;
     _process = null;
     if (proc != null) {
-      proc.kill(ProcessSignal.sigterm);
+      proc.kill(ProcessSignal.sigkill);
       try {
-        await proc.exitCode.timeout(const Duration(seconds: 5));
+        await proc.exitCode.timeout(const Duration(seconds: 2));
       } catch (_) {
-        proc.kill(ProcessSignal.sigkill);
+        // Не откликнулся даже на sigkill за разумное время — не блокируем
+        // пользователя дальше, ниже всё равно есть подстраховка по имени
+        // процесса через taskkill.
       }
     }
 
