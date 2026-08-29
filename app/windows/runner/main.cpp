@@ -25,8 +25,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
-  Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1280, 720);
+  // [ИЗМЕНЕНО] Было 1280x720 в углу экрана (10,10) — для приложения с
+  // мобильным (телефонным) UI это выглядело как гигантское почти пустое
+  // окно. Берём компактный "телефонный" размер и центрируем окно на
+  // экране пользователя вместо фиксированного угла.
+  const int screen_w = ::GetSystemMetrics(SM_CXSCREEN);
+  const int screen_h = ::GetSystemMetrics(SM_CYSCREEN);
+  const unsigned int window_w = 420;
+  const unsigned int window_h = 860;
+  Win32Window::Point origin(
+      screen_w > static_cast<int>(window_w)
+          ? (screen_w - static_cast<int>(window_w)) / 2
+          : 10,
+      screen_h > static_cast<int>(window_h)
+          ? (screen_h - static_cast<int>(window_h)) / 2
+          : 10);
+  Win32Window::Size size(window_w, window_h);
   if (!window.Create(L"vpnonline_app", origin, size)) {
     return EXIT_FAILURE;
   }
