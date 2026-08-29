@@ -152,20 +152,24 @@ jobs:
       # промежуточные файлы из предыдущей неудачной попытки (что и
       # произошло в последнем логе: попытки 2-3 падали за 8 секунд вместо
       # полной пересборки).
-      - name: Build Windows release
-        uses: nick-fields/retry@v3
+      # [ДИАГНОСТИКА] Три разных фикса подряд (изоляция от Defender, отказ
+      # от переиспользования MSBuild-узлов, чистая пересборка) дали ИДЕНТИЧНЫЙ
+      # результат — значит причина не во внешней среде раннера, а в самом
+      # проекте/сборке. `flutter build windows` по умолчанию глушит
+      # детальный вывод MSBuild и показывает только финальную сводку
+      # линкера — добавляем `-v`, чтобы увидеть РЕАЛЬНУЮ команду mt.exe и
+      # её настоящий текст ошибки, без этого дальше чинить вслепую.
+      # Пока не выясним причину — оставляем только одну попытку (без
+      # ретраев), чтобы не тратить время раннера на 3x одинаковый лог.
+      - name: Build Windows release (verbose diagnostic)
+        shell: pwsh
         env:
           MSBUILDDISABLENODEREUSE: "1"
-        with:
-          timeout_minutes: 20
-          max_attempts: 3
-          retry_wait_seconds: 15
-          shell: pwsh
-          command: |
-            cd app
-            flutter clean
-            flutter pub get
-            flutter build windows --release --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+        run: |
+          cd app
+          flutter clean
+          flutter pub get
+          flutter build windows --release -v --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
 
       # [ВАЖНО] Предупреждение прямо в логе сборки, если windows/sing-box/
       # пустая — тогда .exe соберётся нормально, но реальный VPN на Windows
