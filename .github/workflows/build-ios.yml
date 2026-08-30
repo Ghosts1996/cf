@@ -24,7 +24,13 @@ on:
 jobs:
   build:
     name: Build Flutter iOS
-    runs-on: macos-14
+    # [ИСПРАВЛЕНО] macos-14 по умолчанию даёт Xcode со Swift tools 5.10 —
+    # пакет app_settings 5.2.0 (резолвится из "^5.1.1" в pubspec.yaml)
+    # требует Swift tools 6.0 (Xcode 16+). SPM падает на "resolve package
+    # dependencies" ещё до компиляции. macos-15 несёт Xcode с поддержкой
+    # Swift tools 6.0 по умолчанию — без этого фикса все 3 попытки retry
+    # гарантированно проваливаются с одной и той же ошибкой.
+    runs-on: macos-15
     defaults:
       run:
         working-directory: app
