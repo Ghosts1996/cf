@@ -295,46 +295,7 @@ class TunnelService {
     _restoringConnectStartedAt = true;
     try {
       await _ensureInitialized();
-      // [ИСПРАВЛЕНО — реальный баг со скриншота "открываю приложение
-      // заново — показывает ОТКЛЮЧЕНО и ошибку, а в шторке телефона VPN
-      // всё это время реально работает"] Раньше `_client.getServiceState()`
-      // спрашивался у нативной стороны РОВНО один раз. Прямо в первые
-      // доли секунды после холодного старта платформенный канал
-      // (MethodChannel) до нативного VpnService/foreground-сервиса иногда
-      // ещё не готов принять вызов — это не "VPN сломан", а обычная гонка
-      // между Flutter Engine и Android/iOS. Единственный неудачный вызов
-      // здесь раньше сразу уходил в catch ниже, `_connectStartedAt` не
-      // восстанавливался, а `status` вообще не переприсваивался — экран
-      // оставался в самом первом дефолтном состоянии (несвязанное
-      // "отключено"), хотя нативный туннель из прошлой сессии продолжал
-      // штатно работать. Хуже того: раз `isConnected` в этот момент был
-      // `false`, `ConnectScreen._loadKeyState()` (см. connect_screen.dart)
-      // при включённом тумблере "Автоподключение при запуске" решал, что
-      // VPN не поднят, и пытался подключиться ЗАНОВО — новая попытка шла
-      // за подпиской по сети (`_loadProfiles()` ниже по файлу) и, если
-      // мобильная сеть тоже ещё не успела подняться к этому же моменту
-      // (та же самая гонка холодного старта), падала с "Не удалось
-      // загрузить конфигурацию подписки" — то есть ошибка на экране и
-      // рабочий VPN в шторке одновременно, это ровно баг со скриншота.
-      // Несколько попыток с небольшой паузой дают платформенному каналу
-      // реальный шанс "проснуться", прежде чем метод сдастся и оставит
-      // `lastError` — как и `_fetchKeysWithRetry()` в connect_screen.dart,
-      // который решает точно ту же задачу для другого вызова.
-      dynamic actualState;
-      Object? lastSyncError;
-      for (var attempt = 1; attempt <= 3; attempt++) {
-        try {
-          actualState = await _client.getServiceState();
-          lastSyncError = null;
-          break;
-        } catch (e) {
-          lastSyncError = e;
-          if (attempt < 3) {
-            await Future.delayed(const Duration(milliseconds: 400));
-          }
-        }
-      }
-      if (lastSyncError != null) throw lastSyncError;
+      final actualState = await _client.getServiceState();
       // Сначала восстанавливаем момент подключения и лишь затем публикуем
       // состояние. Иначе экран кратко покажет 00:00:00 при возвращении в
       // приложение, хотя foreground VPN всё это время был подключён.
@@ -1592,29 +1553,11 @@ class TunnelService {
               'Подписка недоступна (${res.statusCode}). Попробуйте позднее.');
         }
         body = res.body;
-      } on TunnelException catch (_) {
-        // [НОВОЕ — офлайн-кэш подписки, см. докстринг ключей
-        // PrefKeys.cachedSubscription* в local_prefs.dart] Сервер ответил,
-        // но с кодом ошибки (например временная перезагрузка панели) —
-        // прежде чем показать пользователю жёсткую ошибку, пробуем
-        // подставить последнее УСПЕШНО скачанное тело этой же подписки с
-        // диска. Обновляется оно молча, без ведома пользователя, каждый
-        // раз при удачной загрузке (см. ниже) — то есть на диске лежит
-        // ровно то, что уже один раз реально сработало.
-        final cached = await _loadPersistedSubscriptionBody(source);
-        if (cached != null) {
-          body = cached;
-        } else {
-          rethrow;
-        }
+      } on TunnelException {
+        rethrow;
       } catch (e) {
-        final cached = await _loadPersistedSubscriptionBody(source);
-        if (cached != null) {
-          body = cached;
-        } else {
-          throw TunnelException(
-              'Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
-        }
+        throw TunnelException(
+            'Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
       }
     }
 
@@ -1627,45 +1570,7 @@ class TunnelService {
     _cachedSource = source;
     _cachedProfiles = profiles;
     _cachedAt = DateTime.now();
-    // [НОВОЕ] Пишем на диск ТОЛЬКО когда тело реально с сервера (не когда
-    // само `body` уже пришло из этого же диска несколькими строками выше —
-    // незачем переписывать файл тем же самым содержимым). Отличить эти два
-    // случая просто: если мы дошли сюда через `catch`-ветки выше, `body`
-    // мог быть кэшем — но тогда перезапись безвредна (то же самое
-    // значение), поэтому не усложняем проверкой и просто всегда сохраняем
-    // успешно распарсенный результат — на будущее, если сама подписка
-    // всё-таки обновилась через vless:// (для него сети не было вовсе).
-    if (!source.startsWith('vless://')) {
-      unawaited(_persistSubscriptionBody(source, body));
-    }
     return profiles;
-  }
-
-  /// [НОВОЕ] Читает с диска тело последней успешно скачанной подписки —
-  /// только если она совпадает по ссылке-источнику с той, что запрашивают
-  /// сейчас (иначе легко случайно подставить чужую/старую подписку другого
-  /// ключа). Возвращает `null`, если на диске ничего нет или ссылка другая
-  /// — вызывающий код (`_loadProfiles` выше) в этом случае просто пробрасывает
-  /// исходную сетевую ошибку дальше, как и раньше.
-  Future<String?> _loadPersistedSubscriptionBody(String source) async {
-    final savedSource =
-        await LocalPrefs.instance.getString(PrefKeys.cachedSubscriptionSource);
-    if (savedSource != source) return null;
-    final savedBody =
-        await LocalPrefs.instance.getString(PrefKeys.cachedSubscriptionBody);
-    if (savedBody == null || savedBody.trim().isEmpty) return null;
-    return savedBody;
-  }
-
-  /// [НОВОЕ] Сохраняет тело подписки на диск для [_loadPersistedSubscriptionBody]
-  /// выше. `unawaited` в месте вызова — запись на диск не должна задерживать
-  /// само подключение, которое и так уже дождалось ответа сети.
-  Future<void> _persistSubscriptionBody(String source, String body) async {
-    await LocalPrefs.instance
-        .setString(PrefKeys.cachedSubscriptionSource, source);
-    await LocalPrefs.instance.setString(PrefKeys.cachedSubscriptionBody, body);
-    await LocalPrefs.instance.setInt(
-        PrefKeys.cachedSubscriptionAtMillis, DateTime.now().millisecondsSinceEpoch);
   }
 
   List<_ParsedVless> _parseSubscriptionBody(String body) {
@@ -1933,7 +1838,17 @@ class TunnelService {
     // _hardKillSwitchEngaged и ничего не делает, если её нет, поэтому
     // безопасно вызывать всегда перед обычным disconnect().
     if (_hardKillSwitchEngaged) {
-      await _disengageHardKillSwitch();
+      // [НОВОЕ] Раньше `await _disengageHardKillSwitch()` ничем не был
+      // защищён — если бы он бросил исключение, оно ушло бы необработанным
+      // прямо в connect_screen.dart::_toggleConnection() и там навсегда
+      // блокировало бы кнопку "Отключить" (см. докстринг фикса в
+      // connect_screen.dart). try/catch здесь не даёт ни одному пути
+      // disconnect() вылететь наружу необработанным.
+      try {
+        await _disengageHardKillSwitch();
+      } catch (e) {
+        lastError.value = 'Отключение не удалось: $e';
+      }
       connectedServerName.value = null;
       _connectedHost = null;
       _connectedPort = null;
@@ -1944,129 +1859,48 @@ class TunnelService {
       _lastConnectionString = null;
       return;
     }
-    // [ИСПРАВЛЕНО — реальный баг "нажимаю Отключить, таймер сбрасывается,
-    // но VPN как был поднят, так и остаётся, интернета нет"] Раньше этот
-    // метод БЕЗУСЛОВНО перезаписывал `status.value` на "disconnected" в
-    // `finally`, даже если `await _client.disconnect()` выше бросил
-    // исключение (тогда просто писал его в `lastError`) — и, что хуже,
-    // даже если он завершился БЕЗ исключения, но нативная сторона на
-    // самом деле тоннель не остановила (плагин вернул успех, хотя
-    // VpnService/процесс sing-box.exe физически продолжают работать —
-    // такое реально бывает при гонках/зависшем драйвере). Экран послушно
-    // показывал "Отключено" и обнулённый таймер, а реальный TUN-адаптер
-    // как перехватывал весь трафик на несуществующий уже туннель, так и
-    // продолжал — то есть интернета не было ВООБЩЕ, и никакой кнопкой это
-    // было не починить, потому что UI больше не пытался ничего сделать.
-    // Теперь после `_client.disconnect()` мы явно перепроверяем реальное
-    // состояние через `getServiceState()` (с повторными попытками — то же
-    // самое "спроси нативную сторону, а не верь на слово", что уже
-    // используется в `syncRuntimeState()`) и подтверждаем "Отключено" в UI
-    // только когда это правда. Если разотключить не удалось — статус
-    // остаётся честным ("Подключено"), а пользователь видит понятную
-    // ошибку вместо тихой лжи на экране.
-    bool disconnectSucceeded = false;
-    // Две попытки, каждая — отдельный try/catch: если первая бросила
-    // исключение (например, платформенный канал временно недоступен),
-    // это не должно мешать честно попробовать ещё раз, прежде чем
-    // показать пользователю ошибку.
-    for (var attempt = 0; attempt < 2 && !disconnectSucceeded; attempt++) {
-      try {
-        await _client.disconnect();
-        disconnectSucceeded = await _confirmDisconnected();
-      } catch (e) {
-        lastError.value = 'Отключение не удалось: $e';
-      }
+    try {
+      await _client.disconnect();
+    } catch (e) {
+      lastError.value = 'Отключение не удалось: $e';
+    } finally {
+      connectedServerName.value = null;
+      _connectedHost = null;
+      _connectedPort = null;
+      localProxyAddress.value = null;
+      // [ИСПРАВЛЕНО — РЕАЛЬНАЯ причина "Не удалось переключиться на ...:
+      // Нет активного туннеля, который можно переключить" на полностью
+      // рабочем подключении, воспроизведено на видео] `_lastConnectionString`
+      // раньше обнулялся СИНХРОННО в самой первой строке disconnect(), а
+      // публичный `status.value.state` (то, что реально читает
+      // `isConnected`/UI/кнопки) менялся только ЗДЕСЬ — ПОСЛЕ `await
+      // _client.disconnect()`. На Windows этот `await` не мгновенный: внутри
+      // — TerminateProcess дочернего sing-box.exe, ожидание его exitCode (до
+      // 2 секунд) и резервный `taskkill` по имени процесса (см.
+      // singbox_runtime_windows.dart::disconnect()/_forceKillByName). Всё
+      // это время — от первой строки disconnect() и до этого места —
+      // `_lastConnectionString` уже был `null`, а `status.value.state` всё
+      // ещё оставался `connected`: `isConnected` честно отвечал `true`.
+      // Если в этот же момент пользователь (или автобалансировка) пытался
+      // сменить сервер — `_onServerTapped()`/`_maybeApplyAutoBalance()`
+      // видели `isConnected == true`, шли в `switchPreferredHost()`, а там
+      // уже `_lastConnectionString == null` -> ошибка "Нет активного
+      // туннеля" на экране, который в этот самый момент показывал
+      // "ПОДКЛЮЧЕНО". Теперь `_lastConnectionString` обнуляется РОВНО в
+      // той же точке, что и публичный статус, — оба флага меняются
+      // атомарно, окна рассогласования между ними больше нет.
+      _lastConnectionString = null;
+      _connectStartedAt = null;
+      _restartDurationTicker(false);
+      status.value = const TunnelStatus(
+        state: TunnelConnState.disconnected,
+        duration: 0,
+        download: 0,
+        upload: 0,
+        downloadTotalBytes: 0,
+        uploadTotalBytes: 0,
+      );
     }
-
-    if (!disconnectSucceeded) {
-      lastError.value ??=
-          'Не удалось отключить VPN. Попробуй ещё раз; если не поможет — '
-          'выключи VPN вручную в настройках устройства и открой приложение заново.';
-      // Публикуем РЕАЛЬНОЕ состояние (скорее всего всё ещё "подключено"),
-      // а не выдуманное "отключено" — дальше пользователь как минимум
-      // видит правду и может повторить попытку или разобраться руками.
-      try {
-        final actualState = await _client.getServiceState();
-        _applyServiceState(actualState);
-      } catch (_) {
-        // Если и это не получилось — оставляем status как есть (не хуже,
-        // чем было).
-      }
-      return;
-    }
-
-    connectedServerName.value = null;
-    _connectedHost = null;
-    _connectedPort = null;
-    localProxyAddress.value = null;
-    // [ИСПРАВЛЕНО — РЕАЛЬНАЯ причина "Не удалось переключиться на ...:
-    // Нет активного туннеля, который можно переключить" на полностью
-    // рабочем подключении, воспроизведено на видео] `_lastConnectionString`
-    // раньше обнулялся СИНХРОННО в самой первой строке disconnect(), а
-    // публичный `status.value.state` (то, что реально читает
-    // `isConnected`/UI/кнопки) менялся только ЗДЕСЬ — ПОСЛЕ `await
-    // _client.disconnect()`. На Windows этот `await` не мгновенный: внутри
-    // — TerminateProcess дочернего sing-box.exe, ожидание его exitCode (до
-    // 2 секунд) и резервный `taskkill` по имени процесса (см.
-    // singbox_runtime_windows.dart::disconnect()/_forceKillByName). Всё
-    // это время — от первой строки disconnect() и до этого места —
-    // `_lastConnectionString` уже был `null`, а `status.value.state` всё
-    // ещё оставался `connected`: `isConnected` честно отвечал `true`.
-    // Если в этот же момент пользователь (или автобалансировка) пытался
-    // сменить сервер — `_onServerTapped()`/`_maybeApplyAutoBalance()`
-    // видели `isConnected == true`, шли в `switchPreferredHost()`, а там
-    // уже `_lastConnectionString == null` -> ошибка "Нет активного
-    // туннеля" на экране, который в этот самый момент показывал
-    // "ПОДКЛЮЧЕНО". Теперь `_lastConnectionString` обнуляется РОВНО в
-    // той же точке, что и публичный статус, — оба флага меняются
-    // атомарно, окна рассогласования между ними больше нет.
-    _lastConnectionString = null;
-    _connectStartedAt = null;
-    _restartDurationTicker(false);
-    // [ИСПРАВЛЕНО] Раньше `tunnelConnectedAtMillis` в LocalPrefs НИКОГДА
-    // не очищался при ручном disconnect() — только внутри
-    // `_applyServiceState()`, и то лишь если `_runtimeStateSynced` уже
-    // `true`. В итоге при следующем холодном старте `syncRuntimeState()`
-    // находила старую отметку времени с прошлой сессии и, если нативная
-    // сторона на устройстве по любой причине опять сообщала "connected"
-    // (например, ровно из-за описанного выше бага — disconnect() не
-    // добивал реальный туннель), таймер сессии показывал время с САМОГО
-    // ПЕРВОГО подключения давным-давно, а не "только что открыл
-    // приложение". Явно стираем метку здесь же, синхронно с публичным
-    // статусом.
-    unawaited(
-        LocalPrefs.instance.setInt(PrefKeys.tunnelConnectedAtMillis, 0));
-    status.value = const TunnelStatus(
-      state: TunnelConnState.disconnected,
-      duration: 0,
-      download: 0,
-      upload: 0,
-      downloadTotalBytes: 0,
-      uploadTotalBytes: 0,
-    );
-  }
-
-  /// [НОВОЕ] Опрашивает нативную сторону несколько раз с небольшой паузой,
-  /// чтобы дать TUN-интерфейсу/процессу время реально остановиться, прежде
-  /// чем поверить, что disconnect() подействовал. Однократной проверки
-  /// сразу после `await _client.disconnect()` недостаточно — на Windows
-  /// это TerminateProcess + ожидание exitCode, на Android — асинхронная
-  /// остановка VpnService, и в обоих случаях состояние может ещё долю
-  /// секунды/секунду оставаться "connected", даже когда всё идёт штатно.
-  Future<bool> _confirmDisconnected() async {
-    for (var attempt = 0; attempt < 6; attempt++) {
-      try {
-        final state = await _client.getServiceState();
-        if (_mapServiceState(state) != TunnelConnState.connected) {
-          return true;
-        }
-      } catch (_) {
-        // Не смогли спросить нативную сторону — считаем попытку
-        // неудачной и пробуем ещё раз, а не сразу сдаёмся.
-      }
-      await Future.delayed(const Duration(milliseconds: 400));
-    }
-    return false;
   }
 
   Future<void> openSystemVpnSettingsHint() async {
