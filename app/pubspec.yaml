@@ -85,6 +85,18 @@ dependencies:
   # само узнавало о смене сети (Wi-Fi/мобильная/нет сети) — см.
   # services/network_watcher_service.dart.
   connectivity_plus: ^6.1.0
+  # [НОВОЕ] Значок приложения в системном трее Windows (рядом с часами) —
+  # раньше при закрытии окна крестиком приложение просто завершалось
+  # целиком, никакого значка в трее никогда не было (не забытый баг —
+  # функциональность физически отсутствовала). window_manager нужен, чтобы
+  # перехватить закрытие окна крестиком и вместо выхода СПРЯТАТЬ его (а не
+  # завершить процесс — иначе VPN-туннель, реально работающий отдельным
+  # процессом sing-box.exe, тоже пришлось бы останавливать при каждом
+  # закрытии окна). tray_manager рисует сам значок и его меню. Оба —
+  # только Windows/macOS/Linux (см. tray_service.dart — на Android/iOS
+  # просто не инициализируются).
+  window_manager: ^0.4.3
+  tray_manager: ^0.2.3
 
 dev_dependencies:
   flutter_test:
@@ -101,6 +113,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/icon/
+    - assets/tray/
 
 # Конфиг flutter_launcher_icons: генерирует mipmap/AppIcon.appiconset/etc.
 # из одного источника. image_path — полная иконка (фигура + фон, глубокий
