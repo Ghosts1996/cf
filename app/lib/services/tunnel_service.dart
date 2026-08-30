@@ -295,7 +295,46 @@ class TunnelService {
     _restoringConnectStartedAt = true;
     try {
       await _ensureInitialized();
-      final actualState = await _client.getServiceState();
+      // [ИСПРАВЛЕНО — реальный баг со скриншота "открываю приложение
+      // заново — показывает ОТКЛЮЧЕНО и ошибку, а в шторке телефона VPN
+      // всё это время реально работает"] Раньше `_client.getServiceState()`
+      // спрашивался у нативной стороны РОВНО один раз. Прямо в первые
+      // доли секунды после холодного старта платформенный канал
+      // (MethodChannel) до нативного VpnService/foreground-сервиса иногда
+      // ещё не готов принять вызов — это не "VPN сломан", а обычная гонка
+      // между Flutter Engine и Android/iOS. Единственный неудачный вызов
+      // здесь раньше сразу уходил в catch ниже, `_connectStartedAt` не
+      // восстанавливался, а `status` вообще не переприсваивался — экран
+      // оставался в самом первом дефолтном состоянии (несвязанное
+      // "отключено"), хотя нативный туннель из прошлой сессии продолжал
+      // штатно работать. Хуже того: раз `isConnected` в этот момент был
+      // `false`, `ConnectScreen._loadKeyState()` (см. connect_screen.dart)
+      // при включённом тумблере "Автоподключение при запуске" решал, что
+      // VPN не поднят, и пытался подключиться ЗАНОВО — новая попытка шла
+      // за подпиской по сети (`_loadProfiles()` ниже по файлу) и, если
+      // мобильная сеть тоже ещё не успела подняться к этому же моменту
+      // (та же самая гонка холодного старта), падала с "Не удалось
+      // загрузить конфигурацию подписки" — то есть ошибка на экране и
+      // рабочий VPN в шторке одновременно, это ровно баг со скриншота.
+      // Несколько попыток с небольшой паузой дают платформенному каналу
+      // реальный шанс "проснуться", прежде чем метод сдастся и оставит
+      // `lastError` — как и `_fetchKeysWithRetry()` в connect_screen.dart,
+      // который решает точно ту же задачу для другого вызова.
+      dynamic actualState;
+      Object? lastSyncError;
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        try {
+          actualState = await _client.getServiceState();
+          lastSyncError = null;
+          break;
+        } catch (e) {
+          lastSyncError = e;
+          if (attempt < 3) {
+            await Future.delayed(const Duration(milliseconds: 400));
+          }
+        }
+      }
+      if (lastSyncError != null) throw lastSyncError;
       // Сначала восстанавливаем момент подключения и лишь затем публикуем
       // состояние. Иначе экран кратко покажет 00:00:00 при возвращении в
       // приложение, хотя foreground VPN всё это время был подключён.
@@ -1553,11 +1592,29 @@ class TunnelService {
               'Подписка недоступна (${res.statusCode}). Попробуйте позднее.');
         }
         body = res.body;
-      } on TunnelException {
-        rethrow;
+      } on TunnelException catch (_) {
+        // [НОВОЕ — офлайн-кэш подписки, см. докстринг ключей
+        // PrefKeys.cachedSubscription* в local_prefs.dart] Сервер ответил,
+        // но с кодом ошибки (например временная перезагрузка панели) —
+        // прежде чем показать пользователю жёсткую ошибку, пробуем
+        // подставить последнее УСПЕШНО скачанное тело этой же подписки с
+        // диска. Обновляется оно молча, без ведома пользователя, каждый
+        // раз при удачной загрузке (см. ниже) — то есть на диске лежит
+        // ровно то, что уже один раз реально сработало.
+        final cached = await _loadPersistedSubscriptionBody(source);
+        if (cached != null) {
+          body = cached;
+        } else {
+          rethrow;
+        }
       } catch (e) {
-        throw TunnelException(
-            'Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
+        final cached = await _loadPersistedSubscriptionBody(source);
+        if (cached != null) {
+          body = cached;
+        } else {
+          throw TunnelException(
+              'Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
+        }
       }
     }
 
@@ -1570,7 +1627,45 @@ class TunnelService {
     _cachedSource = source;
     _cachedProfiles = profiles;
     _cachedAt = DateTime.now();
+    // [НОВОЕ] Пишем на диск ТОЛЬКО когда тело реально с сервера (не когда
+    // само `body` уже пришло из этого же диска несколькими строками выше —
+    // незачем переписывать файл тем же самым содержимым). Отличить эти два
+    // случая просто: если мы дошли сюда через `catch`-ветки выше, `body`
+    // мог быть кэшем — но тогда перезапись безвредна (то же самое
+    // значение), поэтому не усложняем проверкой и просто всегда сохраняем
+    // успешно распарсенный результат — на будущее, если сама подписка
+    // всё-таки обновилась через vless:// (для него сети не было вовсе).
+    if (!source.startsWith('vless://')) {
+      unawaited(_persistSubscriptionBody(source, body));
+    }
     return profiles;
+  }
+
+  /// [НОВОЕ] Читает с диска тело последней успешно скачанной подписки —
+  /// только если она совпадает по ссылке-источнику с той, что запрашивают
+  /// сейчас (иначе легко случайно подставить чужую/старую подписку другого
+  /// ключа). Возвращает `null`, если на диске ничего нет или ссылка другая
+  /// — вызывающий код (`_loadProfiles` выше) в этом случае просто пробрасывает
+  /// исходную сетевую ошибку дальше, как и раньше.
+  Future<String?> _loadPersistedSubscriptionBody(String source) async {
+    final savedSource =
+        await LocalPrefs.instance.getString(PrefKeys.cachedSubscriptionSource);
+    if (savedSource != source) return null;
+    final savedBody =
+        await LocalPrefs.instance.getString(PrefKeys.cachedSubscriptionBody);
+    if (savedBody == null || savedBody.trim().isEmpty) return null;
+    return savedBody;
+  }
+
+  /// [НОВОЕ] Сохраняет тело подписки на диск для [_loadPersistedSubscriptionBody]
+  /// выше. `unawaited` в месте вызова — запись на диск не должна задерживать
+  /// само подключение, которое и так уже дождалось ответа сети.
+  Future<void> _persistSubscriptionBody(String source, String body) async {
+    await LocalPrefs.instance
+        .setString(PrefKeys.cachedSubscriptionSource, source);
+    await LocalPrefs.instance.setString(PrefKeys.cachedSubscriptionBody, body);
+    await LocalPrefs.instance.setInt(
+        PrefKeys.cachedSubscriptionAtMillis, DateTime.now().millisecondsSinceEpoch);
   }
 
   List<_ParsedVless> _parseSubscriptionBody(String body) {
