@@ -16,6 +16,7 @@ import 'services/api_client.dart';
 import 'services/app_log_service.dart';
 import 'services/tunnel_service.dart';
 import 'services/locale_service.dart';
+import 'services/tray_service.dart';
 
 Future<void> main() async {
   // [НОВОЕ] main() теперь асинхронный (ждёт LocaleService.ensureLoaded()
@@ -74,6 +75,11 @@ Future<void> main() async {
   // слушает LocaleService.instance и перестраивается при смене языка из
   // кнопки "Язык" на экране "Настройки" — грузить язык заново не нужно.
   await LocaleService.instance.ensureLoaded();
+  // [НОВОЕ] Значок в системном трее Windows — см. services/tray_service.dart
+  // за подробным разбором, почему его раньше не было (не баг — просто не
+  // существовало кода). Внутри сам себя выключает на Android/iOS/web, так
+  // что вызывать безусловно здесь безопасно.
+  await TrayService.instance.init();
   runApp(const VpnOnlineApp());
 }
 
