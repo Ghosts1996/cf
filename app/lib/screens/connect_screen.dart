@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import '../theme.dart';
@@ -198,6 +199,12 @@ class _ConnectScreenState extends State<ConnectScreen> {
   /// дождаться этого перед `_loadKeyState()`, а не запускать параллельно),
   /// и только потом загружаем ключи/решаем про автоподключение.
   Future<void> _bootstrapConnectionState() async {
+    // [НОВОЕ] Кэш ключей — чисто локальное чтение с диска, сети не
+    // дожидается вообще, поэтому безопасно запустить его ДО
+    // `syncRuntimeState()`/`_loadKeyState()`, не откладывая их ни на
+    // миллисекунду: первый кадр экрана сразу может показать последний
+    // известный ключ, пока идут остальные, более медленные проверки.
+    unawaited(_hydrateFromCachedKeys());
     await _tunnel.syncRuntimeState();
     if (!mounted) return;
     _loadKeyState();
@@ -304,6 +311,37 @@ class _ConnectScreenState extends State<ConnectScreen> {
     }
   }
 
+  /// [НОВОЕ — офлайн-кэш ключей, см. PrefKeys.cachedKeysJson в
+  /// local_prefs.dart] Показывает последний известный ключ МГНОВЕННО, ещё
+  /// до первого сетевого ответа — вместо секунд спиннера/"НЕТ КЛЮЧА" на
+  /// каждом холодном старте, даже если сеть в итоге ответит нормально.
+  /// Раз в приложении уже увидели этот ключ раньше — незачем заново
+  /// показывать пустой экран, пока `_fetchKeysWithRetry()` идёт по кругу.
+  /// Настоящий сетевой ответ (см. `_loadKeyState` ниже) всё равно придёт
+  /// следом и тихо заменит эти данные на актуальные — это только для
+  /// первого кадра.
+  Future<void> _hydrateFromCachedKeys() async {
+    final raw = await LocalPrefs.instance.getString(PrefKeys.cachedKeysJson);
+    if (raw == null || raw.isEmpty || !mounted || _activeKey != null) return;
+    try {
+      final keys = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      final active = keys.where(_isActive).toList()
+        ..sort((a, b) {
+          final ea = _expiryOf(a);
+          final eb = _expiryOf(b);
+          if (ea == null && eb == null) return 0;
+          if (ea == null) return 1;
+          if (eb == null) return -1;
+          return eb.compareTo(ea);
+        });
+      if (active.isEmpty || !mounted) return;
+      setState(() => _activeKey = active.first);
+    } catch (_) {
+      // Битый/устаревший формат кэша — просто игнорируем, дождёмся
+      // обычного сетевого ответа ниже.
+    }
+  }
+
   Future<void> _loadKeyState() async {
     setState(() => _loadingKey = true);
     try {
@@ -316,6 +354,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
       // плохой сети (запрос идёт дольше обычного — шанс уйти со экрана за
       // это время выше).
       if (!mounted) return;
+      // [НОВОЕ] Обновляем офлайн-кэш сразу после удачного ответа сервера —
+      // именно этот JSON читает `_hydrateFromCachedKeys()` выше при
+      // следующем холодном старте.
+      unawaited(LocalPrefs.instance.setString(
+          PrefKeys.cachedKeysJson, jsonEncode(keys)));
+      unawaited(LocalPrefs.instance.setInt(
+          PrefKeys.cachedKeysAtMillis, DateTime.now().millisecondsSinceEpoch));
       final active = keys.cast<Map<String, dynamic>>().where(_isActive).toList();
       // [ИСПРАВЛЕНО] Раньше бралcя `active.first` — первый активный ключ в
       // том порядке, в котором его отдал бэкенд (обычно по дате покупки,
@@ -358,8 +403,19 @@ class _ConnectScreenState extends State<ConnectScreen> {
       }
     } catch (e) {
       if (!mounted) return;
+      // [НОВОЕ] Сеть недоступна (офлайн/таймаут) и все попытки
+      // `_fetchKeysWithRetry()` исчерпаны — раньше в этой ветке `_activeKey`
+      // просто оставался как есть, а на экране появлялась ошибка ПОВЕРХ
+      // уже показанного кольца. Если ключ уже отображается благодаря
+      // `_hydrateFromCachedKeys()` (или предыдущей успешной загрузке в
+      // этой же сессии) — не затираем его и не пугаем пользователя лишний
+      // раз текстом ошибки: он и так уже видит свой ключ и кнопку
+      // "Подключить" остаётся рабочей на кэшированных данных. Ошибку
+      // показываем только если совсем нечего показать взамен.
       setState(() {
-        _keyError = '${tr('Не удалось проверить статус ключа:')} $e';
+        if (_activeKey == null && !_hasManualKey) {
+          _keyError = '${tr('Не удалось проверить статус ключа:')} $e';
+        }
         _loadingKey = false;
       });
     }
