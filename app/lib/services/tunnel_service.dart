@@ -38,6 +38,51 @@ class TunnelService {
   // AndroidSingboxRuntime — тонкую обёртку над тем же самым SingboxClient()
   // без единого изменения поведения (см. singbox_runtime_android.dart).
   final SingboxRuntimeClient _client = createSingboxRuntime();
+
+  // [ИСПРАВЛЕНО — реальный баг из жалобы в Telegram: "жмёшь отключить ВПН,
+  // кнопка дезактивируется, крутится спиннер и горит ключик в шторке,
+  // приходится заходить в настройки приложения и отключать принудительно",
+  // а также второй баг из той же жалобы: "после сворачивания приложения
+  // свайпом и повторного захода — виснет, а счётчик времени сессии
+  // обнуляется"]
+  //
+  // Оба вызванных метода (`_client.disconnect()` и `_client.getServiceState()`
+  // ниже) — это MethodChannel-вызовы в НАТИВНЫЙ код плагина
+  // flutter_singbox_client (см. singbox_runtime_android.dart и докстринг в
+  // singbox_runtime.dart). Этот плагин подключён отдельной git-зависимостью
+  // (см. pubspec.yaml: `flutter_singbox_client` -> git ref
+  // `ccurecc_singbox_dns` в отдельной ветке того же репозитория) — его
+  // нативный Kotlin-код физически не входит в этот проект, и его нельзя
+  // исправить, редактируя только файлы app/lib/*.
+  //
+  // Раньше КАЖДЫЙ такой вызов был обёрнут только в `try {...} catch (_) {}`
+  // (или вообще ничем), но НЕ ограничен по времени. Если нативная сторона
+  // не отвечает (застрявший foreground VpnService — такое бывает на части
+  // прошивок Android, особенно после того как ОС "заморозила" процесс в
+  // фоне) — `await` на этой строке не завершается вообще никогда. Именно
+  // поэтому весь код ПОСЛЕ него (сброс `_connecting`, `finally`, обновление
+  // `status`) никогда не выполнялся: выполнение до него просто не доходило.
+  // Это и есть кнопка "Отключить", навсегда залипшая в состоянии
+  // "отключается" — а на экране "Подключение" (syncRuntimeState() ниже,
+  // вызывается при каждом возврате в приложение) это тот же самый механизм
+  // давал зависание при повторном открытии и, как следствие, никогда не
+  // восстановленный `_connectStartedAt` — отсюда обнулившийся счётчик.
+  //
+  // Починить сам зависающий нативный сервис отсюда нельзя — но можно (и
+  // нужно) гарантировать, что Dart-сторона и UI НЕ виснут вместе с ним.
+  // `.timeout(_nativeCallTimeout)` ниже гарантирует, что через 8 секунд
+  // управление ТОЧНО вернётся вызывающему коду (через `TimeoutException`,
+  // которую ловит уже существующий `catch`/`finally` на каждом месте
+  // вызова) — кнопка и экран разблокируются, даже если сам нативный сервис
+  // всё ещё зависший. Если он всё же отпустит чуть позже сам —
+  // `serviceStateStream` (уже слушается в `_ensureInitialized()`) всё равно
+  // пришлёт настоящее состояние и переопределит его.
+  static const Duration _nativeCallTimeout = Duration(seconds: 8);
+
+  Future<void> _disconnectNative() => _client.disconnect().timeout(_nativeCallTimeout);
+
+  Future<dynamic> _getServiceStateNative() =>
+      _client.getServiceState().timeout(_nativeCallTimeout);
   static const _nativeStatsChannel = MethodChannel('vpnonline/native_stats');
   bool _initialized = false;
   // [ИСПРАВЛЕНО] Выключен по умолчанию — совпадает с fallback при чтении
@@ -295,7 +340,7 @@ class TunnelService {
     _restoringConnectStartedAt = true;
     try {
       await _ensureInitialized();
-      final actualState = await _client.getServiceState();
+      final actualState = await _getServiceStateNative();
       // Сначала восстанавливаем момент подключения и лишь затем публикуем
       // состояние. Иначе экран кратко покажет 00:00:00 при возвращении в
       // приложение, хотя foreground VPN всё это время был подключён.
@@ -522,7 +567,7 @@ class TunnelService {
   Future<void> _disengageHardKillSwitch() async {
     if (!_hardKillSwitchEngaged) return;
     try {
-      await _client.disconnect();
+      await _disconnectNative();
     } catch (_) {}
     // [ВАЖНО] _hardKillSwitchEngaged намеренно остаётся true ещё чуть-чуть
     // после disconnect() — пока флаг true, guard в serviceStateStream-
@@ -1113,7 +1158,7 @@ class TunnelService {
           ok: true, latencyMs: scaleDisplayPingMs(sw.elapsedMilliseconds));
     } finally {
       try {
-        await _client.disconnect();
+        await _disconnectNative();
       } catch (_) {}
       // Та же пауза, что и в _settleAfterDisconnect() ниже — даём
       // нативному сервису реально освободиться, прежде чем следующая
@@ -1145,7 +1190,7 @@ class TunnelService {
   /// уведомление и т.д.) на 100%.
   Future<void> _settleAfterDisconnect() async {
     try {
-      await _client.disconnect();
+      await _disconnectNative();
     } catch (_) {}
     if (status.value?.state != TunnelConnState.disconnected) {
       final completer = Completer<void>();
@@ -1860,7 +1905,7 @@ class TunnelService {
       return;
     }
     try {
-      await _client.disconnect();
+      await _disconnectNative();
     } catch (e) {
       lastError.value = 'Отключение не удалось: $e';
     } finally {
