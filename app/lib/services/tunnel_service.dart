@@ -1849,48 +1849,129 @@ class TunnelService {
       _lastConnectionString = null;
       return;
     }
-    try {
-      await _client.disconnect();
-    } catch (e) {
-      lastError.value = 'Отключение не удалось: $e';
-    } finally {
-      connectedServerName.value = null;
-      _connectedHost = null;
-      _connectedPort = null;
-      localProxyAddress.value = null;
-      // [ИСПРАВЛЕНО — РЕАЛЬНАЯ причина "Не удалось переключиться на ...:
-      // Нет активного туннеля, который можно переключить" на полностью
-      // рабочем подключении, воспроизведено на видео] `_lastConnectionString`
-      // раньше обнулялся СИНХРОННО в самой первой строке disconnect(), а
-      // публичный `status.value.state` (то, что реально читает
-      // `isConnected`/UI/кнопки) менялся только ЗДЕСЬ — ПОСЛЕ `await
-      // _client.disconnect()`. На Windows этот `await` не мгновенный: внутри
-      // — TerminateProcess дочернего sing-box.exe, ожидание его exitCode (до
-      // 2 секунд) и резервный `taskkill` по имени процесса (см.
-      // singbox_runtime_windows.dart::disconnect()/_forceKillByName). Всё
-      // это время — от первой строки disconnect() и до этого места —
-      // `_lastConnectionString` уже был `null`, а `status.value.state` всё
-      // ещё оставался `connected`: `isConnected` честно отвечал `true`.
-      // Если в этот же момент пользователь (или автобалансировка) пытался
-      // сменить сервер — `_onServerTapped()`/`_maybeApplyAutoBalance()`
-      // видели `isConnected == true`, шли в `switchPreferredHost()`, а там
-      // уже `_lastConnectionString == null` -> ошибка "Нет активного
-      // туннеля" на экране, который в этот самый момент показывал
-      // "ПОДКЛЮЧЕНО". Теперь `_lastConnectionString` обнуляется РОВНО в
-      // той же точке, что и публичный статус, — оба флага меняются
-      // атомарно, окна рассогласования между ними больше нет.
-      _lastConnectionString = null;
-      _connectStartedAt = null;
-      _restartDurationTicker(false);
-      status.value = const TunnelStatus(
-        state: TunnelConnState.disconnected,
-        duration: 0,
-        download: 0,
-        upload: 0,
-        downloadTotalBytes: 0,
-        uploadTotalBytes: 0,
-      );
+    // [ИСПРАВЛЕНО — реальный баг "нажимаю Отключить, таймер сбрасывается,
+    // но VPN как был поднят, так и остаётся, интернета нет"] Раньше этот
+    // метод БЕЗУСЛОВНО перезаписывал `status.value` на "disconnected" в
+    // `finally`, даже если `await _client.disconnect()` выше бросил
+    // исключение (тогда просто писал его в `lastError`) — и, что хуже,
+    // даже если он завершился БЕЗ исключения, но нативная сторона на
+    // самом деле тоннель не остановила (плагин вернул успех, хотя
+    // VpnService/процесс sing-box.exe физически продолжают работать —
+    // такое реально бывает при гонках/зависшем драйвере). Экран послушно
+    // показывал "Отключено" и обнулённый таймер, а реальный TUN-адаптер
+    // как перехватывал весь трафик на несуществующий уже туннель, так и
+    // продолжал — то есть интернета не было ВООБЩЕ, и никакой кнопкой это
+    // было не починить, потому что UI больше не пытался ничего сделать.
+    // Теперь после `_client.disconnect()` мы явно перепроверяем реальное
+    // состояние через `getServiceState()` (с повторными попытками — то же
+    // самое "спроси нативную сторону, а не верь на слово", что уже
+    // используется в `syncRuntimeState()`) и подтверждаем "Отключено" в UI
+    // только когда это правда. Если разотключить не удалось — статус
+    // остаётся честным ("Подключено"), а пользователь видит понятную
+    // ошибку вместо тихой лжи на экране.
+    bool disconnectSucceeded = false;
+    // Две попытки, каждая — отдельный try/catch: если первая бросила
+    // исключение (например, платформенный канал временно недоступен),
+    // это не должно мешать честно попробовать ещё раз, прежде чем
+    // показать пользователю ошибку.
+    for (var attempt = 0; attempt < 2 && !disconnectSucceeded; attempt++) {
+      try {
+        await _client.disconnect();
+        disconnectSucceeded = await _confirmDisconnected();
+      } catch (e) {
+        lastError.value = 'Отключение не удалось: $e';
+      }
     }
+
+    if (!disconnectSucceeded) {
+      lastError.value ??=
+          'Не удалось отключить VPN. Попробуй ещё раз; если не поможет — '
+          'выключи VPN вручную в настройках устройства и открой приложение заново.';
+      // Публикуем РЕАЛЬНОЕ состояние (скорее всего всё ещё "подключено"),
+      // а не выдуманное "отключено" — дальше пользователь как минимум
+      // видит правду и может повторить попытку или разобраться руками.
+      try {
+        final actualState = await _client.getServiceState();
+        _applyServiceState(actualState);
+      } catch (_) {
+        // Если и это не получилось — оставляем status как есть (не хуже,
+        // чем было).
+      }
+      return;
+    }
+
+    connectedServerName.value = null;
+    _connectedHost = null;
+    _connectedPort = null;
+    localProxyAddress.value = null;
+    // [ИСПРАВЛЕНО — РЕАЛЬНАЯ причина "Не удалось переключиться на ...:
+    // Нет активного туннеля, который можно переключить" на полностью
+    // рабочем подключении, воспроизведено на видео] `_lastConnectionString`
+    // раньше обнулялся СИНХРОННО в самой первой строке disconnect(), а
+    // публичный `status.value.state` (то, что реально читает
+    // `isConnected`/UI/кнопки) менялся только ЗДЕСЬ — ПОСЛЕ `await
+    // _client.disconnect()`. На Windows этот `await` не мгновенный: внутри
+    // — TerminateProcess дочернего sing-box.exe, ожидание его exitCode (до
+    // 2 секунд) и резервный `taskkill` по имени процесса (см.
+    // singbox_runtime_windows.dart::disconnect()/_forceKillByName). Всё
+    // это время — от первой строки disconnect() и до этого места —
+    // `_lastConnectionString` уже был `null`, а `status.value.state` всё
+    // ещё оставался `connected`: `isConnected` честно отвечал `true`.
+    // Если в этот же момент пользователь (или автобалансировка) пытался
+    // сменить сервер — `_onServerTapped()`/`_maybeApplyAutoBalance()`
+    // видели `isConnected == true`, шли в `switchPreferredHost()`, а там
+    // уже `_lastConnectionString == null` -> ошибка "Нет активного
+    // туннеля" на экране, который в этот самый момент показывал
+    // "ПОДКЛЮЧЕНО". Теперь `_lastConnectionString` обнуляется РОВНО в
+    // той же точке, что и публичный статус, — оба флага меняются
+    // атомарно, окна рассогласования между ними больше нет.
+    _lastConnectionString = null;
+    _connectStartedAt = null;
+    _restartDurationTicker(false);
+    // [ИСПРАВЛЕНО] Раньше `tunnelConnectedAtMillis` в LocalPrefs НИКОГДА
+    // не очищался при ручном disconnect() — только внутри
+    // `_applyServiceState()`, и то лишь если `_runtimeStateSynced` уже
+    // `true`. В итоге при следующем холодном старте `syncRuntimeState()`
+    // находила старую отметку времени с прошлой сессии и, если нативная
+    // сторона на устройстве по любой причине опять сообщала "connected"
+    // (например, ровно из-за описанного выше бага — disconnect() не
+    // добивал реальный туннель), таймер сессии показывал время с САМОГО
+    // ПЕРВОГО подключения давным-давно, а не "только что открыл
+    // приложение". Явно стираем метку здесь же, синхронно с публичным
+    // статусом.
+    unawaited(
+        LocalPrefs.instance.setInt(PrefKeys.tunnelConnectedAtMillis, 0));
+    status.value = const TunnelStatus(
+      state: TunnelConnState.disconnected,
+      duration: 0,
+      download: 0,
+      upload: 0,
+      downloadTotalBytes: 0,
+      uploadTotalBytes: 0,
+    );
+  }
+
+  /// [НОВОЕ] Опрашивает нативную сторону несколько раз с небольшой паузой,
+  /// чтобы дать TUN-интерфейсу/процессу время реально остановиться, прежде
+  /// чем поверить, что disconnect() подействовал. Однократной проверки
+  /// сразу после `await _client.disconnect()` недостаточно — на Windows
+  /// это TerminateProcess + ожидание exitCode, на Android — асинхронная
+  /// остановка VpnService, и в обоих случаях состояние может ещё долю
+  /// секунды/секунду оставаться "connected", даже когда всё идёт штатно.
+  Future<bool> _confirmDisconnected() async {
+    for (var attempt = 0; attempt < 6; attempt++) {
+      try {
+        final state = await _client.getServiceState();
+        if (_mapServiceState(state) != TunnelConnState.connected) {
+          return true;
+        }
+      } catch (_) {
+        // Не смогли спросить нативную сторону — считаем попытку
+        // неудачной и пробуем ещё раз, а не сразу сдаёмся.
+      }
+      await Future.delayed(const Duration(milliseconds: 400));
+    }
+    return false;
   }
 
   Future<void> openSystemVpnSettingsHint() async {
