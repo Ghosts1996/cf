@@ -222,17 +222,50 @@ class _AppEntryPointState extends State<AppEntryPoint> {
   }
 
   Future<void> _bootstrap() async {
-    final showOnboarding = await OnboardingScreen.shouldShow();
-    if (showOnboarding) {
-      if (mounted) setState(() => _stage = _Stage.onboarding);
-      return;
+    // [НОВОЕ — фикс "чёрный экран навсегда при старте"] Раньше здесь не было
+    // try/catch: если SharedPreferences.getInstance() (OnboardingScreen.
+    // shouldShow()) или чтение токена из защищённого хранилища
+    // (ApiClient.restoreSession() -> FlutterSecureStorage, Android
+    // Keystore) кидали исключение — это на некоторых устройствах бывает,
+    // например при повреждённом/недоступном Keystore после смены
+    // блокировки экрана или после восстановления из бэкапа — Future всей
+    // цепочки просто падал необработанным. setState() ниже никогда не
+    // вызывался, `_stage` навсегда оставался `_Stage.loading`, а этот стейдж
+    // рисует ПУСТОЙ Scaffold на почти чёрном фоне (см. build() ниже) — то
+    // есть приложение зависало на голом чёрном экране без единого признака
+    // жизни и без всякой связи с тем, что реально грузится баланс/меню
+    // (это как раз уже отложено до входа, см. _Stage.app ниже). Теперь
+    // любая ошибка на этом шаге не оставляет пользователя в подвешенном
+    // состоянии — приложение просто откатывается на экран входа, а сама
+    // ошибка попадает в локальный журнал (экран "Безопасность" -> "Хранение
+    // логов") для диагностики.
+    try {
+      final showOnboarding = await OnboardingScreen.shouldShow();
+      if (showOnboarding) {
+        if (mounted) setState(() => _stage = _Stage.onboarding);
+        return;
+      }
+      await _checkSession();
+    } catch (e) {
+      AppLogService.instance.log(
+        'Ошибка запуска приложения: $e',
+        level: AppLogLevel.error,
+      );
+      if (mounted) setState(() => _stage = _Stage.auth);
     }
-    await _checkSession();
   }
 
   Future<void> _checkSession() async {
-    final restored = await ApiClient.instance.restoreSession();
-    if (mounted) setState(() => _stage = restored ? _Stage.app : _Stage.auth);
+    try {
+      final restored = await ApiClient.instance.restoreSession();
+      if (mounted) setState(() => _stage = restored ? _Stage.app : _Stage.auth);
+    } catch (e) {
+      AppLogService.instance.log(
+        'Ошибка восстановления сессии: $e',
+        level: AppLogLevel.error,
+      );
+      if (mounted) setState(() => _stage = _Stage.auth);
+    }
   }
 
   @override
