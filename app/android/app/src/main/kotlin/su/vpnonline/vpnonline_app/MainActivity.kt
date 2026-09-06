@@ -1,4 +1,3 @@
-
 package su.vpnonline.vpnonline_app
 
 import android.Manifest
@@ -61,6 +60,16 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "requestNotificationPermission" -> requestNotificationPermission(result)
                     "getUidTraffic" -> result.success(getUidTraffic())
+                    // [НОВОЕ] Имя пакета этой сборки. Нужно Dart-стороне,
+                    // чтобы исключить САМО приложение из туннеля (см.
+                    // tunnel_service.dart::_resolveSelfPackageName). Берём
+                    // именно у системы, а не константой в коде: если ты
+                    // когда-нибудь добавишь applicationIdSuffix для debug/
+                    // flavor-сборок, константа станет неверной и Android
+                    // отвергнет addDisallowedApplication с
+                    // NameNotFoundException — то есть VPN перестанет
+                    // подниматься. У системы имя правильное всегда.
+                    "getPackageName" -> result.success(packageName)
                     else -> result.notImplemented()
                 }
             }
