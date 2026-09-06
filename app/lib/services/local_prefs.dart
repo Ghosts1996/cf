@@ -284,6 +284,13 @@ class PrefKeys {
   // Цена: провайдер видит, что телефон обращается к api.vpnonline.su в
   // обход туннеля. Сам VPN-трафик это никак не раскрывает.
   static const excludeAppFromTunnel = 'security.exclude_app_from_tunnel';
+  // [НОВОЕ] Сохранённые результаты реальной проверки серверов (см.
+  // servers_screen.dart). Формат: {"at": millis, "results": {host_name:
+  // {"ok": bool, "ms": int?, "error": String?}}}. Нужен, чтобы при открытии
+  // экрана "Выбор сервера" сразу показывать последний известный результат,
+  // а не пустой список, пока идёт новая проверка (она занимает секунды на
+  // каждую локацию).
+  static const cachedRealCheckJson = 'servers.real_check_results';
   static const cachedProfileJson = 'vpn.cached_profile_json';
   static const cachedHostsJson = 'vpn.cached_hosts_json';
   static const cachedPlansJson = 'vpn.cached_plans_json';
