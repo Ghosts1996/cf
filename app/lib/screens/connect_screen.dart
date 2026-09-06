@@ -57,7 +57,8 @@ class ConnectScreen extends StatefulWidget {
   State<ConnectScreen> createState() => _ConnectScreenState();
 }
 
-class _ConnectScreenState extends State<ConnectScreen> {
+class _ConnectScreenState extends State<ConnectScreen>
+    with WidgetsBindingObserver {
   final _api = ApiClient.instance;
   final _tunnel = TunnelService.instance;
   bool _connecting = false;
@@ -104,6 +105,25 @@ class _ConnectScreenState extends State<ConnectScreen> {
   // названием функции.
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   bool? _wasOnWifi;
+  // [НОВОЕ] true, только если реальное состояние нативного VPN-сервиса
+  // действительно удалось прочитать (см. TunnelService.syncRuntimeState()).
+  // Пока оно НЕ известно, автоподключение запускать нельзя: приложение
+  // решило бы, что VPN выключен, и подняло бы ВТОРУЮ сессию поверх уже
+  // работающей первой — это и есть один из путей в зависание при повторном
+  // открытии приложения с включённым VPN.
+  bool _runtimeStateKnown = false;
+  // [НОВОЕ] true, если ключ на экране взят из локального кэша, а не из
+  // свежего ответа сервера. Нужно, чтобы отличать "ключей нет" от
+  // "сервер сейчас недоступен, показываем последнее известное".
+  bool _keysFromCache = false;
+  // Верхняя граница ожидания ответа нативной стороны при старте экрана.
+  // Сам syncRuntimeState() уже ограничивает каждый свой нативный вызов
+  // (TunnelService._nativeCallTimeout), но их там несколько подряд, и в
+  // худшем случае их сумма — это десятки секунд, всё это время экран
+  // показывал бы только спиннер. Таймаут ничего не отменяет: сама
+  // syncRuntimeState() продолжает выполняться в фоне и обновит status,
+  // когда закончит, — он лишь разблокирует загрузку ключей и интерфейс.
+  static const Duration _runtimeSyncTimeout = Duration(seconds: 15);
 
   @override
   void initState() {
@@ -171,6 +191,41 @@ class _ConnectScreenState extends State<ConnectScreen> {
     });
     _connectivitySub =
         Connectivity().onConnectivityChanged.listen(_onConnectivityChanged);
+    // [НОВОЕ — вторая половина бага "закрыл приложение, не выключая VPN"]
+    // syncRuntimeState() вызывалась РОВНО ОДИН РАЗ, в initState() этого
+    // экрана. Но Android далеко не всегда убивает процесс при сворачивании:
+    // очень часто Dart-изолят выживает, а Activity пересоздаётся — тогда
+    // initState() больше не выполняется, и приложение возвращается с тем
+    // состоянием туннеля, которое было в памяти на момент ухода в фон.
+    // Если за это время VPN отключили из шторки уведомлений (или его
+    // остановила сама система), экран продолжал показывать "ПОДКЛЮЧЕНО" и
+    // тикающий счётчик поверх уже мёртвого туннеля. Подписка на жизненный
+    // цикл перечитывает реальное состояние при каждом возврате в
+    // приложение.
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state != AppLifecycleState.resumed) return;
+    // Пока пользователь сам подключается/отключается, состояние и так
+    // меняется под контролем _toggleConnection() — лезть туда с
+    // параллельной синхронизацией незачем.
+    if (_connecting || _tunnel.isBusy) return;
+    unawaited(_resyncOnResume());
+  }
+
+  Future<void> _resyncOnResume() async {
+    try {
+      await _tunnel.syncRuntimeState().timeout(_runtimeSyncTimeout);
+    } catch (_) {
+      // Нативная сторона не ответила — оставляем то состояние, что есть,
+      // и не мешаем пользователю работать с экраном.
+    }
+    if (!mounted) return;
+    setState(() {});
+    if (_tunnel.isConnected && !_latencyChecking) _measureLatency();
   }
 
   /// [НОВОЕ] См. докстринг `_wasOnWifi` выше.
@@ -186,7 +241,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
     final smartWifi =
         await LocalPrefs.instance.getBool(PrefKeys.smartWifi, fallback: true);
     if (!smartWifi || !mounted) return;
-    if ((_activeKey != null || _hasManualKey) &&
+    // [НОВОЕ] Как и для автоподключения при запуске: пока реальное
+    // состояние туннеля неизвестно, поднимать соединение вслепую нельзя —
+    // можно попасть во вторую сессию поверх уже работающей.
+    if (_runtimeStateKnown &&
+        (_activeKey != null || _hasManualKey) &&
         !_tunnel.isConnected &&
         !_tunnel.isBusy) {
       unawaited(_toggleConnection());
@@ -198,8 +257,25 @@ class _ConnectScreenState extends State<ConnectScreen> {
   /// дождаться этого перед `_loadKeyState()`, а не запускать параллельно),
   /// и только потом загружаем ключи/решаем про автоподключение.
   Future<void> _bootstrapConnectionState() async {
-    await _tunnel.syncRuntimeState();
+    // [ИСПРАВЛЕНО — прямая причина "открываю приложение, а оно висит"]
+    // Раньше здесь стоял голый `await _tunnel.syncRuntimeState();` без
+    // какой-либо верхней границы по времени. Внутри неё — цепочка вызовов в
+    // нативный код плагина; если foreground VpnService после свайпа
+    // приложения из списка задач остался подвисшим, этот await не
+    // завершался, а значит `_loadKeyState()` ниже НИКОГДА не вызывался:
+    // `_loadingKey` навсегда оставался true, и на экране бесконечно
+    // крутился спиннер внутри кольца подключения. Таймаут не отменяет саму
+    // синхронизацию (она продолжит работать и обновит status, когда
+    // нативная сторона всё-таки ответит) — он лишь гарантирует, что
+    // интерфейс в любом случае поедет дальше.
+    var syncOk = false;
+    try {
+      syncOk = await _tunnel.syncRuntimeState().timeout(_runtimeSyncTimeout);
+    } catch (_) {
+      syncOk = false;
+    }
     if (!mounted) return;
+    setState(() => _runtimeStateKnown = syncOk);
     _loadKeyState();
   }
 
@@ -214,6 +290,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _keyWatchTimer?.cancel();
     _latencyTimer?.cancel();
     _connectivitySub?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
@@ -290,6 +367,26 @@ class _ConnectScreenState extends State<ConnectScreen> {
   /// соединения — `statusCode == 0`, см. `ApiClient._send`) — настоящую
   /// ошибку сервера (неверный токен и т.п.) повтор не исправит, только
   /// зря продержит человека перед пустым экраном лишние секунды.
+  /// Сортировка активных ключей по убыванию срока действия — один и тот же
+  /// порядок нужен в трёх местах (свежая загрузка, восстановление из кэша,
+  /// фоновая перепроверка), раньше он был скопирован в каждом из них.
+  void _sortByExpiryDesc(List<Map<String, dynamic>> keys) {
+    keys.sort((a, b) {
+      final ea = _expiryOf(a);
+      final eb = _expiryOf(b);
+      if (ea == null && eb == null) return 0;
+      if (ea == null) return 1; // ключи без даты — в конец
+      if (eb == null) return -1;
+      return eb.compareTo(ea); // по убыванию: сначала дальше всех истекающий
+    });
+  }
+
+  /// [ИЗМЕНЕНО] Офлайн-копия ключей больше НЕ читается и не пишется здесь.
+  /// Это делает единый слой загрузки внутри `ApiClient` (см. подробный
+  /// разбор в api_client.dart): он же дедуплицирует четыре одинаковых
+  /// `getKeys()`, которые все пять вкладок отправляют одновременно при
+  /// холодном старте. Экрану остаётся только показать, свежие данные или
+  /// сохранённые — это флаг `ApiClient.instance.keysFromCache`.
   Future<List<dynamic>> _fetchKeysWithRetry() async {
     const maxAttempts = 3;
     for (var attempt = 1;; attempt++) {
@@ -307,6 +404,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
   Future<void> _loadKeyState() async {
     setState(() => _loadingKey = true);
     try {
+      // `getKeys()` внутри сам отдаст сохранённую копию, если сеть не
+      // ответила (см. api_client.dart), поэтому цикл повторов ниже теперь
+      // срабатывает только когда показывать вообще нечего.
       final keys = await _fetchKeysWithRetry();
       // [ИСПРАВЛЕНО] Раньше здесь не было проверки `mounted` после
       // `await` — если пользователь успевал уйти с этого экрана (или
@@ -323,16 +423,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
       // подключение могло уйти на тот, что истекает раньше остальных.
       // Теперь явно выбираем ключ с МАКСИМАЛЬНЫМ `expiry_date`, т.е. с
       // наибольшим оставшимся сроком аренды — как и должно быть.
-      active.sort((a, b) {
-        final ea = _expiryOf(a);
-        final eb = _expiryOf(b);
-        if (ea == null && eb == null) return 0;
-        if (ea == null) return 1; // ключи без даты — в конец
-        if (eb == null) return -1;
-        return eb.compareTo(ea); // по убыванию: сначала дальше всех истекающий
-      });
+      _sortByExpiryDesc(active);
       setState(() {
         _activeKey = active.isNotEmpty ? active.first : null;
+        _keysFromCache = _api.keysFromCache;
         _keyError = null;
         _loadingKey = false;
       });
@@ -349,7 +443,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
         // включить автоподключение в Настройках, а не получать его "из
         // коробки" молча.
         final autoConnect = await LocalPrefs.instance.getBool(PrefKeys.autoConnect, fallback: false);
+        // [НОВОЕ] `_runtimeStateKnown` — см. докстринг поля. Если реальное
+        // состояние нативного сервиса прочитать не удалось, `isConnected`
+        // ниже равен false просто потому, что мы ничего не знаем, а не
+        // потому что VPN действительно выключен — автоподключение в этом
+        // случае поднимало бы вторую сессию поверх уже работающей.
         if (autoConnect &&
+            _runtimeStateKnown &&
             (_activeKey != null || _hasManualKey) &&
             !_tunnel.isConnected &&
             !_tunnel.isBusy) {
@@ -359,7 +459,23 @@ class _ConnectScreenState extends State<ConnectScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _keyError = '${tr('Не удалось проверить статус ключа:')} $e';
+        // [ИЗМЕНЕНО] Текст ошибки теперь зависит от того, есть ли что
+        // показать. Если ключ подставлен из кэша — это не "ключа нет", а
+        // "не удалось обновить", и пугать красным "НЕТ КЛЮЧА" не за что.
+        // Отдельно разбирается самый частый на практике случай: туннель
+        // поднят, но трафик через него не идёт — тогда недоступен не только
+        // личный кабинет, а вообще весь интернет на телефоне, и подсказка
+        // должна вести к отключению VPN, а не к "проверь интернет".
+        if (_activeKey != null) {
+          _keyError = _tunnel.isConnected
+              ? tr('Не удалось обновить данные через активный VPN — показан '
+                  'последний сохранённый ключ. Если сайты тоже не '
+                  'открываются, отключи VPN и подключись заново.')
+              : tr('Не удалось обновить список ключей — показан последний '
+                  'сохранённый.');
+        } else {
+          _keyError = '${tr('Не удалось проверить статус ключа:')} $e';
+        }
         _loadingKey = false;
       });
     }
@@ -497,7 +613,16 @@ class _ConnectScreenState extends State<ConnectScreen> {
   }
 
   Future<void> _toggleConnection() async {
-    if ((_activeKey == null && !_hasManualKey) || _connecting || _tunnel.isBusy) return;
+    if (_connecting || _tunnel.isBusy) return;
+    // [ИСПРАВЛЕНО — прямая причина "виснет, не отключается, приходится
+    // выключать из шторки"] Раньше первым же условием стояло
+    // `(_activeKey == null && !_hasManualKey) -> return`. То есть если
+    // список ключей не загрузился (а он не загружается ровно тогда, когда
+    // туннель поднят, но трафика через него нет), метод выходил СРАЗУ — и
+    // нажатие "Отключить" не делало ничего. Отключение действующего
+    // туннеля не должно ни на секунду зависеть от того, ответил ли backend:
+    // проверка наличия ключа нужна только для ПОДКЛЮЧЕНИЯ.
+    if (!_tunnel.isConnected && _activeKey == null && !_hasManualKey) return;
     final connectionString = _effectiveConnectionString;
 
     if (_tunnel.isConnected) {
@@ -655,6 +780,24 @@ class _ConnectScreenState extends State<ConnectScreen> {
       child: Column(
         children: [
           AppHeader(trailing: Icons.menu_rounded, screenLabel: tr('Подключение')),
+          // [НОВОЕ] Честная пометка: ключ на экране взят из сохранённой
+          // копии, потому что сервер сейчас не отвечает (см. слой кэша в
+          // api_client.dart). Без неё пользователь не отличит рабочее
+          // состояние от "показываю последнее, что помню".
+          if (_keysFromCache)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.cloud_off_rounded, size: 14, color: AppColors.textDim),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(tr('Данные о ключах сохранённые — сервер сейчас не отвечает'),
+                        style: const TextStyle(fontSize: 11, color: AppColors.textDim)),
+                  ),
+                ],
+              ),
+            ),
           if (_hasManualKey)
             Padding(
               padding: const EdgeInsets.only(top: 10),
@@ -693,8 +836,19 @@ class _ConnectScreenState extends State<ConnectScreen> {
             ),
           _ConnectRing(
             connected: connected,
-            hasKey: hasKey,
-            loading: _loadingKey || _connecting,
+            // [ИСПРАВЛЕНО] Если туннель РЕАЛЬНО поднят, кольцо не имеет
+            // права писать "НЕТ КЛЮЧА" и краснеть только потому, что
+            // /user/keys не ответил. Состояние туннеля известно от нативной
+            // стороны и не зависит от доступности backend.
+            hasKey: hasKey || connected,
+            // [ИСПРАВЛЕНО — "крутится спиннер вместо статуса"] `_loadingKey`
+            // держится до 49 секунд на плохой сети (3 попытки по 15 сек, см.
+            // _fetchKeysWithRetry). Всё это время пользователь при живом
+            // VPN видел спиннер вместо "ПОДКЛЮЧЕНО" и таймера. Спиннер в
+            // кольце теперь показывается только когда показать реально
+            // нечего: идёт само подключение, либо первая загрузка при
+            // отключённом туннеле и без единого ключа в кэше.
+            loading: _connecting || (_loadingKey && !connected && !hasKey),
             timerLabel: _timerLabel,
           ),
           const SizedBox(height: 28),
@@ -704,7 +858,19 @@ class _ConnectScreenState extends State<ConnectScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(_keyError!, style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+                  Text(
+                    _keyError!,
+                    style: TextStyle(
+                      // Красным — только когда показать действительно
+                      // нечего. Если ключ есть (пусть и из кэша), это
+                      // предупреждение, а не авария.
+                      color: _activeKey != null
+                          ? AppColors.textDim
+                          : AppColors.danger,
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
                   const SizedBox(height: 6),
                   // [НОВОЕ] До этой правки при сетевой ошибке пользователь
                   // застревал на "НЕТ КЛЮЧА" без единого способа повторить
@@ -779,7 +945,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
             ],
           ),
           const SizedBox(height: 16),
-          if (!hasKey && !_loadingKey)
+          if (!hasKey && !connected && !_loadingKey)
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
@@ -819,7 +985,15 @@ class _ConnectScreenState extends State<ConnectScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: (_loadingKey || _connecting || _tunnel.isBusy) ? null : _toggleConnection,
+                    // [ИСПРАВЛЕНО] `_loadingKey` убран из условия
+                    // блокировки — см. комментарий в _toggleConnection().
+                    // Пока грузится список ключей, кнопка "Отключить" на
+                    // поднятом туннеле обязана оставаться нажимаемой.
+                    onPressed: (_connecting ||
+                            _tunnel.isBusy ||
+                            (!connected && !hasKey))
+                        ? null
+                        : _toggleConnection,
                     style: connected
                         ? ElevatedButton.styleFrom(backgroundColor: const Color(0xFF241028))
                         : null,
