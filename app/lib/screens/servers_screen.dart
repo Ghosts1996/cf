@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import '../theme.dart';
@@ -122,6 +123,15 @@ class _ServersScreenState extends State<ServersScreen> {
   final Map<String, RealCheckResult> _realCheckResults = {};
   // true, пока идёт последовательный обход всех локаций в _realCheckAll().
   bool _realChecking = false;
+  // Когда реальная проверка последний раз доводилась до конца. Служит для
+  // паузы между автоматическими прогонами: проверка поднимает и гасит
+  // временную сессию sing-box на каждую локацию, это секунды работы и
+  // расход батареи — гонять её по кругу без остановки нельзя.
+  DateTime? _lastRealCheckAt;
+  static const _realCheckCooldown = Duration(minutes: 10);
+  // Автопроверка при открытии экрана запускается один раз за сессию экрана:
+  // дальше её перезапускает только отключение VPN или кнопка "Проверить".
+  bool _autoRealCheckScheduled = false;
   // host_name локации, которая проверяется прямо сейчас — для индикатора
   // на конкретной карточке.
   String? _realCheckingId;
@@ -168,6 +178,11 @@ class _ServersScreenState extends State<ServersScreen> {
     if (!mounted) return;
     setState(() {}); // обновить, какая карточка сейчас считается "текущей"
     unawaited(_measureConnectedTunnelPing());
+    // [НОВОЕ] VPN только что выключили — самое время перепроверить локации
+    // по-настоящему: пока туннель был поднят, сделать это было нельзя.
+    // Пауза `_realCheckCooldown` внутри не даст запускать проверку на
+    // каждое промежуточное событие статуса.
+    if (!_tunnel.isConnected && !_tunnel.isBusy) _maybeAutoRealCheck();
   }
 
   ({String? host, int? port, String? security, String? sni}) _pingEndpoint(
@@ -475,6 +490,12 @@ class _ServersScreenState extends State<ServersScreen> {
     }
   }
 
+  String _formatCheckTime(DateTime value) {
+    final h = value.hour.toString().padLeft(2, '0');
+    final m = value.minute.toString().padLeft(2, '0');
+    return '$h:$m';
+  }
+
   /// Есть ли у КАЖДОЙ локации из актуального списка её собственный реальный
   /// VLESS-адрес в `_realEndpoints`? Используется, чтобы решить, стоит ли
   /// на этом цикле замера ещё раз попробовать `_loadActiveConnectionString()`
@@ -639,12 +660,12 @@ class _ServersScreenState extends State<ServersScreen> {
   /// использует общий флаг `_switching`, чтобы авто-балансировка и ручной
   /// тап по серверу (см. `_maybeApplyAutoBalance`/`_onServerTapped`) не
   /// попытались тронуть тот же `_client` во время проверки.
-  Future<void> _realCheckAll() async {
+  Future<void> _realCheckAll({bool silent = false}) async {
     if (_realChecking || _switching || _hosts == null || _hosts!.isEmpty) {
       return;
     }
     if (_tunnel.isConnected || _tunnel.isBusy) {
-      if (mounted) {
+      if (mounted && !silent) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(
               tr('Сначала отключитесь от VPN — реальная проверка на время поднимает и гасит тестовое соединение тем же движком.')),
@@ -655,7 +676,7 @@ class _ServersScreenState extends State<ServersScreen> {
 
     final connectionString = await _resolveActiveConnectionString();
     if (connectionString == null || connectionString.isEmpty) {
-      if (mounted) {
+      if (mounted && !silent) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(tr('Нет активного ключа с подпиской — нечего проверять.')),
         ));
@@ -677,9 +698,15 @@ class _ServersScreenState extends State<ServersScreen> {
       final result = await _tunnel.realCheckProfile(connectionString, id);
       if (!mounted) break;
       setState(() => _realCheckResults[id] = result);
+      // Сохраняем после КАЖДОЙ локации, а не в конце цикла: проверка идёт
+      // секундами на локацию, и пользователь вполне может уйти с экрана
+      // или свернуть приложение на середине — уже полученные результаты в
+      // этом случае не должны пропасть.
+      _saveRealCheckResults();
     }
 
     if (!mounted) return;
+    _lastRealCheckAt = DateTime.now();
     setState(() {
       _realChecking = false;
       _switching = false;
@@ -841,6 +868,7 @@ class _ServersScreenState extends State<ServersScreen> {
   void initState() {
     super.initState();
     _loadPrefs();
+    unawaited(_restoreRealCheckResults());
     _load();
     // [ИЗМЕНЕНО] Раньше запускался условно, только если авто-балансировка
     // была включена (см. удалённый `_syncAutoBalanceTimer`) — теперь
@@ -871,6 +899,89 @@ class _ServersScreenState extends State<ServersScreen> {
   /// из LocalPrefs — раньше эти три значения были обычными полями State и
   /// всегда стартовали с дефолтов (пустое избранное, авто-баланс выкл,
   /// выбранный сервер = null) при каждом открытии экрана.
+  /// [НОВОЕ] Достаёт результаты прошлой реальной проверки с диска, чтобы
+  /// экран открывался сразу с осмысленными подписями, а не с "измеряю..."
+  /// у всех локаций, пока новая проверка идёт по ним по очереди.
+  Future<void> _restoreRealCheckResults() async {
+    try {
+      final raw = await _prefs.getString(PrefKeys.cachedRealCheckJson);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return;
+      final at = (decoded['at'] as num?)?.toInt() ?? 0;
+      final results = decoded['results'];
+      if (results is! Map<String, dynamic>) return;
+      final restored = <String, RealCheckResult>{};
+      results.forEach((hostName, value) {
+        if (value is! Map<String, dynamic>) return;
+        restored[hostName] = RealCheckResult(
+          ok: value['ok'] == true,
+          latencyMs: (value['ms'] as num?)?.toInt(),
+          error: value['error'] as String?,
+        );
+      });
+      if (!mounted || restored.isEmpty) return;
+      setState(() {
+        _realCheckResults.addAll(restored);
+        if (at > 0) {
+          _lastRealCheckAt = DateTime.fromMillisecondsSinceEpoch(at);
+        }
+      });
+    } catch (_) {
+      // Битый или недоступный кэш — просто откроемся без прошлых значений.
+    }
+  }
+
+  void _saveRealCheckResults() {
+    try {
+      final payload = <String, dynamic>{
+        'at': DateTime.now().millisecondsSinceEpoch,
+        'results': _realCheckResults.map((hostName, result) => MapEntry(
+              hostName,
+              <String, dynamic>{
+                'ok': result.ok,
+                if (result.latencyMs != null) 'ms': result.latencyMs,
+                if (result.error != null) 'error': result.error,
+              },
+            )),
+      };
+      unawaited(
+          _prefs.setString(PrefKeys.cachedRealCheckJson, jsonEncode(payload)));
+    } catch (_) {
+      // Не критично: в следующий раз экран просто откроется без прошлых
+      // значений, а сама проверка отработает как обычно.
+    }
+  }
+
+  /// [НОВОЕ] Автоматический запуск реальной проверки, пока VPN выключен.
+  ///
+  /// Обычный TCP-замер принципиально не может отличить рабочий
+  /// Reality-сервер от нерабочего: сервер под Reality отвечает настоящим
+  /// сертификатом сайта-приманки даже со сломанным инбаундом (подробный
+  /// разбор — в докстринге `_measureLivePing`). Достоверный ответ даёт
+  /// только реально поднятая VLESS-сессия. Раньше её нужно было запускать
+  /// руками кнопкой "Проверить", и до нажатия экран показывал оценку,
+  /// которой нельзя доверять. Теперь проверка идёт сама.
+  ///
+  /// Ограничения намеренные, а не забытые:
+  ///  * только при выключенном VPN — проверка поднимает временную сессию
+  ///    тем же единственным нативным клиентом, что и боевой туннель;
+  ///  * не чаще, чем раз в `_realCheckCooldown` — каждая локация это
+  ///    запуск и остановка ядра sing-box, несколько секунд и заметный
+  ///    расход батареи;
+  ///  * молча: ни одного всплывающего сообщения, экран просто по очереди
+  ///    заменяет подписи на подтверждённые.
+  void _maybeAutoRealCheck() {
+    if (_realChecking || _switching) return;
+    if (_tunnel.isConnected || _tunnel.isBusy) return;
+    if (_hosts == null || _hosts!.isEmpty) return;
+    final last = _lastRealCheckAt;
+    if (last != null && DateTime.now().difference(last) < _realCheckCooldown) {
+      return;
+    }
+    unawaited(_realCheckAll(silent: true));
+  }
+
   Future<void> _loadPrefs() async {
     final results = await Future.wait([
       _prefs.getStringSet(PrefKeys.favoriteServers),
@@ -933,6 +1044,13 @@ class _ServersScreenState extends State<ServersScreen> {
       });
       await _loadActiveConnectionString();
       _measureAllPings(hosts);
+      // [НОВОЕ] Хосты и подписка получены — можно запускать автоматическую
+      // реальную проверку (см. `_maybeAutoRealCheck`). Один раз за сессию
+      // экрана; дальше её перезапустит только отключение VPN или кнопка.
+      if (!_autoRealCheckScheduled) {
+        _autoRealCheckScheduled = true;
+        _maybeAutoRealCheck();
+      }
     } catch (e) {
       // Ожидаемо, пока backend/.env не настроены под реальную БД/панели —
       // это не заглушка, а честная ошибка сети/интеграции.
@@ -1010,7 +1128,14 @@ class _ServersScreenState extends State<ServersScreen> {
                               ? tr('сначала отключитесь от VPN')
                               : (_realChecking
                                   ? '${tr('проверяю')} ${_realCheckingId ?? "..."}'
-                                  : tr('реально поднимает VLESS к каждому серверу — точнее пинга')),
+                                  // [НОВОЕ] Проверка теперь идёт сама, пока
+                                  // VPN выключен (см. _maybeAutoRealCheck).
+                                  // Показываем, когда она отработала в
+                                  // последний раз, — иначе непонятно,
+                                  // насколько свежие подписи под локациями.
+                                  : (_lastRealCheckAt != null
+                                      ? '${tr('проверено в')} ${_formatCheckTime(_lastRealCheckAt!)} · ${tr('обновляется автоматически')}'
+                                      : tr('реально поднимает VLESS к каждому серверу — точнее пинга'))),
                           style: const TextStyle(
                               fontSize: 10, color: AppColors.textDim),
                         ),
