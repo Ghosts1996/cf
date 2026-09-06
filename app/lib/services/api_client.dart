@@ -473,7 +473,24 @@ class ApiClient {
   /// Новая локация, добавленная тобой в панель (таблица xui_hosts),
   /// появится здесь автоматически, без изменений кода — так уже работает
   /// сегодня на реальном сервере.
-  Future<List<dynamic>> getHosts() => _cached(_cacheHosts, _fetchHosts);
+  /// [ИЗМЕНЕНО] `forceRefresh: true` минует кэш и всегда идёт в сеть.
+  /// Нужен ровно одному вызывающему — замеру задержки до backend на главном
+  /// экране (connect_screen.dart::_measureLatency). Тот меряет секундомером
+  /// время ЭТОГО запроса, а закэшированный ответ возвращается мгновенно —
+  /// секундомер показывал бы 0 мс, что на экране превращалось в
+  /// "0 мс · отличный сигнал". Все остальные вызывающие (servers_screen)
+  /// оставляют значение по умолчанию и продолжают пользоваться кэшем.
+  Future<List<dynamic>> getHosts({bool forceRefresh = false}) {
+    if (forceRefresh) {
+      _invalidate([_cacheHosts]);
+      return _fetchHosts().then((data) {
+        _memory[_cacheHosts] = _CachedPayload(data, DateTime.now());
+        unawaited(_writeDiskCache(_cacheHosts, data));
+        return data;
+      });
+    }
+    return _cached(_cacheHosts, _fetchHosts);
+  }
 
   Future<List<dynamic>> _fetchHosts() async {
     final res = await _get(_u('/hosts'));
