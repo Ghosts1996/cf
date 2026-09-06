@@ -270,8 +270,20 @@ class _ServersScreenState extends State<ServersScreen> {
     final sw = Stopwatch()..start();
     Socket? socket;
     try {
-      socket = await Socket.connect(host, port ?? 443,
-          timeout: const Duration(seconds: 4));
+      // [ИСПРАВЛЕНО — локации помечались "недоступен" на живом сервере]
+      // Было `timeout: const Duration(seconds: 4)` и ровно одна попытка.
+      // Четырёх секунд на мобильной сети со слабым сигналом не хватает на
+      // TCP-рукопожатие до европейского сервера: DNS-резолв, потом SYN и
+      // ожидание SYN/ACK через оператора — и всё это на канале, по
+      // которому в этот же момент летят ещё пять таких же замеров (см.
+      // `_measureAllPings`, он запускает их все разом) плюс обычные
+      // запросы приложения. Один пропущенный пакет — и замер не
+      // укладывается, а локация показывается красным "недоступен", хотя
+      // сервер жив. Теперь окно 8 секунд и одна повторная попытка: цена —
+      // в худшем случае лишние секунды ожидания у реально мёртвой
+      // локации, выигрыш — она больше не объявляется мёртвой из-за
+      // подвисшего на секунду мобильного интернета.
+      socket = await _connectWithRetry(host, port ?? 443);
       // [ИСПРАВЛЕНО — реальный баг: пинг для security=tls показывался
       // примерно вдвое завышенным относительно фактического] `sw` здесь
       // раньше НЕ останавливался перед TLS-рукопожатием — Stopwatch
@@ -298,8 +310,6 @@ class _ServersScreenState extends State<ServersScreen> {
             host: (sni != null && sni.isNotEmpty) ? sni : host,
           ).timeout(const Duration(seconds: 4));
           tlsSw.stop();
-          // [НОВОЕ] см. scaleDisplayPingMs в tunnel_service.dart — делим
-          // итоговый пинг на 5 перед показом.
           if (mounted) setState(() => _livePing[hostName] = scaleDisplayPingMs(
               sw.elapsedMilliseconds + tlsSw.elapsedMilliseconds));
           secureSocket.destroy();
@@ -315,13 +325,32 @@ class _ServersScreenState extends State<ServersScreen> {
         }
       } else {
         // `sw` уже остановлен выше — здесь чистое время TCP-подключения.
-        // [НОВОЕ] см. scaleDisplayPingMs в tunnel_service.dart — делим
-        // итоговый пинг на 5 перед показом.
         if (mounted) setState(() => _livePing[hostName] = scaleDisplayPingMs(sw.elapsedMilliseconds));
         socket.destroy();
       }
     } catch (_) {
-      if (mounted) setState(() => _livePing[hostName] = -1);
+      // [ИСПРАВЛЕНО] Раньше здесь всегда ставилось -1 ("недоступен",
+      // красным). Но неудачный замер значит РАЗНОЕ в двух разных случаях, и
+      // валить их в одну надпись — прямое враньё пользователю:
+      //
+      //  * у локации есть её собственный адрес из VLESS-подписки
+      //    (`_realEndpoints`) — тогда мы действительно стучались туда,
+      //    куда пойдёт трафик, и "недоступен" заслуженно;
+      //  * реального адреса нет, и стучались мы в запасной адрес,
+      //    угаданный из subscription_url/host_url в ответе /hosts (см.
+      //    `_pingEndpoint`). Это адрес панели выдачи подписки, а вовсе не
+      //    VLESS-сервера этой страны. Его недоступность не говорит о
+      //    локации РОВНО НИЧЕГО — ровно тот же случай, что и уже
+      //    существующий -2 ("нет данных для пинга").
+      //
+      // Именно из-за этого локации, которых вообще нет в подписке (на
+      // скриншотах — Финляндия и Обход, "Локация не найдена в подписке" по
+      // результату реальной проверки), показывались красным "недоступен"
+      // наравне с настоящими серверами.
+      final hasRealEndpoint = _realEndpoints[hostName]?.host.isNotEmpty ?? false;
+      if (mounted) {
+        setState(() => _livePing[hostName] = hasRealEndpoint ? -1 : -2);
+      }
     }
     // [НОВОЕ] Авто-балансировка — реагируем на КАЖДЫЙ завершившийся замер,
     // а не только после того, как отмерятся все хосты разом (при большом
@@ -329,6 +358,26 @@ class _ServersScreenState extends State<ServersScreen> {
     // последнего — нет смысла ждать самый медленный/недоступный сервер,
     // чтобы применить уже имеющиеся данные).
     _maybeApplyAutoBalance();
+  }
+
+  /// Одна повторная попытка TCP-подключения. Возвращает открытый сокет или
+  /// бросает последнюю ошибку, если обе попытки не удались.
+  Future<Socket> _connectWithRetry(String host, int port) async {
+    Object? lastError;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await Socket.connect(host, port,
+            timeout: const Duration(seconds: 8));
+      } catch (e) {
+        lastError = e;
+        // Небольшая пауза перед второй попыткой: если канал моргнул, ему
+        // нужно дать долю секунды, а не бить в него немедленно повторно.
+        if (attempt == 0) {
+          await Future.delayed(const Duration(milliseconds: 400));
+        }
+      }
+    }
+    throw lastError ?? const SocketException('Не удалось подключиться');
   }
 
   /// [ИСПРАВЛЕНО — сам баг со скриншотов: "все локации 1–2 мс · отлично",
