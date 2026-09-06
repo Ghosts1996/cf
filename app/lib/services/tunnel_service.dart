@@ -194,6 +194,10 @@ class TunnelService {
   static const _fallbackSelfPackage = 'su.vpnonline.vpnonline_app';
   Future<String?>? _selfPackageFuture;
 
+  // Отложенное стирание сохранённого момента старта сессии — см.
+  // _schedulePersistedStartWipe(). null, когда стирание не запланировано.
+  Timer? _persistedStartWipeTimer;
+
   final ValueNotifier<TunnelStatus?> status = ValueNotifier(null);
   final ValueNotifier<String?> lastError = ValueNotifier(null);
   final ValueNotifier<bool> killSwitchBlocking = ValueNotifier(false);
@@ -346,6 +350,38 @@ class TunnelService {
     return saved;
   }
 
+  /// [НОВОЕ — вторая половина фикса "счётчик обнуляется при перезапуске"]
+  ///
+  /// Событие "disconnected" стирало сохранённое время старта НЕМЕДЛЕННО.
+  /// Но нативная сторона вполне может прислать короткую пару
+  /// disconnected -> connected на живом туннеле: при возврате приложения из
+  /// фона, при пересоздании Activity, при переключении Wi-Fi/мобильной
+  /// сети, при повторной привязке плагина к уже работающему foreground
+  /// VpnService. Мгновенное стирание превращало такой миг в потерю всей
+  /// истории сессии: обратно приходило "connected", восстанавливать было
+  /// уже нечего, и отсчёт начинался с нуля при живом туннеле.
+  ///
+  /// Теперь между событием и записью на диск есть пауза. Если за это время
+  /// туннель вернулся в "connected" — стирание отменяется, и счётчик
+  /// продолжает идти с настоящего момента старта. Настоящее отключение
+  /// паузы не замечает: она короткая, а `disconnect()` (то есть явное
+  /// действие пользователя) стирает сохранённое сразу, не дожидаясь её.
+  void _schedulePersistedStartWipe() {
+    _persistedStartWipeTimer?.cancel();
+    _persistedStartWipeTimer = Timer(const Duration(seconds: 5), () {
+      _persistedStartWipeTimer = null;
+      // За время паузы туннель мог вернуться — тогда стирать нечего.
+      if (isConnected) return;
+      _persistConnectStart(null);
+      _clearPersistedSessionRoute();
+    });
+  }
+
+  void _cancelPersistedStartWipe() {
+    _persistedStartWipeTimer?.cancel();
+    _persistedStartWipeTimer = null;
+  }
+
   /// Пишет момент старта сессии и на диск, и в зеркало в памяти — оба
   /// источника обязаны меняться вместе, иначе `_restorableConnectStart()`
   /// вернёт устаревшее значение уже в этом же запуске приложения.
@@ -452,10 +488,18 @@ class TunnelService {
       // 'connected' — старый код успевал записать в LocalPrefs ноль между
       // этими двумя событиями, после чего восстанавливать было нечего.
       // Сессия считается завершённой только по настоящему 'disconnected'.
+      if (mapped == TunnelConnState.connected) {
+        // Туннель на месте — если стирание было запланировано мигом ранее,
+        // отменяем его (см. _schedulePersistedStartWipe).
+        _cancelPersistedStartWipe();
+      }
       if (mapped == TunnelConnState.disconnected) {
+        // Отметку в ПАМЯТИ сбрасываем сразу — от неё зависит то, что видит
+        // пользователь. Запись на диске переживает короткую паузу: см.
+        // _schedulePersistedStartWipe().
         _connectStartedAt = null;
         if (_runtimeStateSynced) {
-          _persistConnectStart(null);
+          _schedulePersistedStartWipe();
         }
       }
     }
@@ -636,14 +680,29 @@ class TunnelService {
           connectedServerName.value = _persistedServerName;
         }
       } else {
-        // Туннель на самом деле не поднят — предыдущая сессия точно
-        // завершилась, старую отметку времени можно спокойно сбросить.
-        // [НОВОЕ] Сбрасываем её и на диске тоже: иначе протухшее значение
-        // пережило бы этот запуск и позже, при следующем событии
-        // "connected", было бы принято за начало текущей сессии.
+        // Туннель по данным нативной стороны не поднят — отметку времени в
+        // ПАМЯТИ сбрасываем.
+        //
+        // [ИСПРАВЛЕНО — из-за этого счётчик всё равно обнулялся при
+        // перезапуске] Здесь же стояло стирание значения НА ДИСКЕ
+        // (`_persistConnectStart(null)` + `_clearPersistedSessionRoute()`).
+        // Выглядело логично, а на деле убивало ровно то, ради чего всё
+        // затевалось. При холодном старте нативный плагин далеко не всегда
+        // успевает привязаться к уже работающему foreground VpnService к
+        // моменту, когда мы спрашиваем `getServiceState()` — он честно
+        // отвечает "не подключено", хотя туннель в фоне живёт (и трафик по
+        // нему идёт, см. 27 МБ на счётчике приёма при нулевом таймере).
+        // Мы на это отвечали стиранием сохранённого времени старта, а
+        // когда через долю секунды по стриму приходило настоящее
+        // "connected" — восстанавливать было уже нечего, и отсчёт начинался
+        // с нуля. То же самое происходило при каждом возврате приложения
+        // из фона (см. connect_screen.dart::didChangeAppLifecycleState).
+        //
+        // Стирать с диска имеет право только подтверждённое событие
+        // "disconnected" в `_applyServiceState()` (оно вызывается строкой
+        // ниже) и явный `disconnect()` — там мы точно знаем, что сессия
+        // закончилась, а не что плагин ещё не проснулся.
         _connectStartedAt = null;
-        _persistConnectStart(null);
-        _clearPersistedSessionRoute();
       }
       _restoringConnectStartedAt = false;
       _applyServiceState(actualState);
@@ -716,9 +775,28 @@ class TunnelService {
       return;
     }
     if (Platform.isAndroid) unawaited(_pollNativeTraffic());
+    var ticksSincePersist = 0;
     _durationTicker = Timer.periodic(const Duration(seconds: 1), (_) {
       final current = status.value;
       if (current == null || current.state != TunnelConnState.connected) return;
+      // [НОВОЕ — страховка для счётчика сессии] Раз в минуту переписываем
+      // момент старта на диск, пока туннель поднят. Основная запись
+      // происходит один раз, в момент подключения, и если она по любой
+      // причине не доехала до диска (процесс убили в ту же секунду,
+      // хранилище было занято, значение позже кто-то стёр) — счётчик после
+      // перезапуска начинал с нуля, и починить это было уже нечем.
+      // Значение при этом НЕ меняется: пишется всё тот же `_connectStartedAt`,
+      // то есть время в счётчике не смещается ни на секунду. Цена — одна
+      // запись в SharedPreferences в минуту, только пока VPN включён.
+      ticksSincePersist++;
+      if (ticksSincePersist >= 60) {
+        ticksSincePersist = 0;
+        final startedAt = _connectStartedAt;
+        if (startedAt != null &&
+            startedAt.millisecondsSinceEpoch != _persistedConnectedAtMillis) {
+          _persistConnectStart(startedAt);
+        }
+      }
       status.value = TunnelStatus(
         state: current.state,
         duration: DateTime.now()
@@ -1131,6 +1209,7 @@ class TunnelService {
     // `_applyServiceState()`, подставило бы сюда время старта ПРЕДЫДУЩЕЙ
     // сессии, и счётчик на экране показал бы заведомо завышенное время.
     _connectStartedAt = null;
+    _cancelPersistedStartWipe();
     _persistConnectStart(null);
     _downloadTotalBytes = 0;
     _uploadTotalBytes = 0;
@@ -2370,6 +2449,9 @@ class TunnelService {
       _lastConnectionString = null;
       _lastPreferredHostName = null;
       _connectStartedAt = null;
+      // Явное действие пользователя — стираем сразу, без паузы из
+      // _schedulePersistedStartWipe().
+      _cancelPersistedStartWipe();
       _persistConnectStart(null);
       _clearPersistedSessionRoute();
       // [ИСПРАВЛЕНО] В этой ветке публичный `status` не публиковался
@@ -2425,7 +2507,9 @@ class TunnelService {
       _connectStartedAt = null;
       // [НОВОЕ] Сессия завершена по воле пользователя — стираем и то, что
       // сохранено на диск, иначе следующий холодный старт восстановил бы
-      // отметку времени и маршрут уже несуществующей сессии.
+      // отметку времени и маршрут уже несуществующей сессии. Здесь без
+      // паузы: намерение пользователя однозначно.
+      _cancelPersistedStartWipe();
       _persistConnectStart(null);
       _clearPersistedSessionRoute();
       _restartDurationTicker(false);
@@ -2558,6 +2642,7 @@ class TunnelService {
 
   Future<void> dispose() async {
     _restartDurationTicker(false);
+    _cancelPersistedStartWipe();
     _closeDelayProbeClient();
     await _stateSub?.cancel();
     await _statsSub?.cancel();
