@@ -323,6 +323,22 @@ class _ConnectScreenState extends State<ConnectScreen>
 
   bool get _hasManualKey => _manualKey != null && _manualKey!.trim().isNotEmpty;
 
+  /// [ИСПРАВЛЕНО — "после подключения название сервера меняется на
+  /// некрасивое"] До подключения экран показывает имя локации из `/hosts`
+  /// ("🇩🇪 Германия — Франкфурт"), а после — `remark` из самой
+  /// VLESS-ссылки, куда панель 3x-ui дописывает название сервиса:
+  /// "VPNonLine | 🇩🇪 Германия — Франкфурт". Из-за этого при подключении
+  /// строка на глазах удлинялась, а код локации в кружке слева менялся с
+  /// "D" на "VP" — по первым буквам служебного префикса вместо страны.
+  /// Отрезаем всё до последней вертикальной черты: остаётся ровно то же
+  /// имя, что и до подключения. Если черты нет — имя не трогаем вообще.
+  String _prettyServerName(String raw) {
+    final separator = raw.lastIndexOf('|');
+    if (separator < 0) return raw.trim();
+    final tail = raw.substring(separator + 1).trim();
+    return tail.isEmpty ? raw.trim() : tail;
+  }
+
   /// Код локации для ServerPill — те же первые буквы имени, что и на
   /// ServersScreen (см. `_codeFromName` там), чтобы отображение не
   /// расходилось между экранами.
@@ -598,9 +614,19 @@ class _ConnectScreenState extends State<ConnectScreen>
       }
       final sw = Stopwatch()..start();
       try {
-        await _api.getHosts();
+        // [ИСПРАВЛЕНО — "0 мс · отличный сигнал" на отключённом VPN]
+        // Секундомер меряет время ЭТОГО запроса. После появления кэша в
+        // ApiClient повторный `getHosts()` в пределах 20 секунд возвращался
+        // мгновенно из памяти, секундомер честно показывал 0 мс, а
+        // `_latencyLabel` ниже красил это в "отличный сигнал" — то есть
+        // экран сообщал о прекрасной связи, вообще не сходив в сеть.
+        // `forceRefresh: true` заставляет запрос реально уйти на сервер.
+        await _api.getHosts(forceRefresh: true);
         sw.stop();
-        if (mounted) setState(() => _latencyMs = scaleDisplayPingMs(sw.elapsedMilliseconds));
+        // Нулевое или отрицательное время — не результат замера, а его
+        // отсутствие: показывать "0 мс · отличный сигнал" нельзя.
+        final measured = scaleDisplayPingMs(sw.elapsedMilliseconds);
+        if (mounted) setState(() => _latencyMs = measured > 0 ? measured : null);
       } catch (_) {
         sw.stop();
         if (mounted) setState(() => _latencyMs = null);
@@ -745,6 +771,16 @@ class _ConnectScreenState extends State<ConnectScreen>
     // Теперь показываем то, что реально измерено, независимо от того,
     // подключены мы или нет — разница только в тексте на случай неудачи.
     if (_latencyChecking && _latencyMs == null) return tr('проверка соединения…');
+    // [ИСПРАВЛЕНО] Ноль (и тем более отрицательное) — это НЕ замер, а его
+    // отсутствие. Раньше такое значение попадало в ветку `< 80` ниже и
+    // выводилось как "0 мс · отличный сигнал". Второй рубеж защиты: сам
+    // источник значения уже отфильтрован в _measureLatency(), но пусть
+    // невозможное состояние не сможет пролезть в текст и отсюда.
+    if (_latencyMs != null && _latencyMs! <= 0) {
+      return _tunnel.isConnected
+          ? tr('сервер не отвечает на проверку задержки')
+          : tr('проверка соединения…');
+    }
     if (_latencyMs == null) {
       // Замер завершился, но значения нет — либо TCP-подключение к узлу
       // не удалось (сервер не отвечает), либо это самый первый рендер до
@@ -902,7 +938,9 @@ class _ConnectScreenState extends State<ConnectScreen>
             final activeName = connected
                 ? (_tunnel.connectedServerName.value ?? SelectedServer.displayName.value)
                 : SelectedServer.displayName.value;
-            final label = activeName ?? tr('Автовыбор');
+            final label = activeName != null
+                ? _prettyServerName(activeName)
+                : tr('Автовыбор');
             return ServerPill(
               code: _codeFromName(label),
               name: label,
