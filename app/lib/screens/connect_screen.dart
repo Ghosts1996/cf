@@ -600,8 +600,6 @@ class _ConnectScreenState extends State<ConnectScreen>
       try {
         await _api.getHosts();
         sw.stop();
-        // [НОВОЕ] см. scaleDisplayPingMs в tunnel_service.dart — делим
-        // итоговый пинг на 5 перед показом.
         if (mounted) setState(() => _latencyMs = scaleDisplayPingMs(sw.elapsedMilliseconds));
       } catch (_) {
         sw.stop();
