@@ -18,15 +18,39 @@ import 'local_prefs.dart';
 // ничего не менялось — все ~40 вызовов `_client.*` ниже работают как прежде.
 import 'singbox_runtime.dart';
 
-// [НОВОЕ] Отображаемый пинг слишком высокий по ощущениям пользователя —
-// делим реально измеренное значение на 5 перед показом на экране (только
-// косметика для UI, на реальную сетевую задержку и работу VPN не влияет).
-// round() вместо truncate(), чтобы 1-4 мс не схлопывались в 0, а clamp(1,..)
-// не даёт получить "0 мс" даже для совсем маленьких величин.
+// [ИСПРАВЛЕНО — прямая причина жалобы "экран серверов показывает
+// неправильную информацию о состоянии сети"]
+//
+// Раньше здесь измеренное значение ДЕЛИЛОСЬ НА 5 и дополнительно
+// прижималось снизу к 3 мс: `final scaled = rawMs ~/ 5; return scaled < 3
+// ? 3 : scaled;`. Это добавлялось как косметика ("пинг по ощущениям
+// слишком большой"), но на практике оно уничтожило весь смысл экрана
+// "Выбор сервера":
+//
+//  1. Нижняя граница в 3 мс схлопывала В ОДНО ЧИСЛО все локации, чей
+//     реальный TCP-пинг был меньше 15 мс. А это ровно то, что происходит,
+//     когда несколько локаций подписки стоят за одним общим фронтом:
+//     сравни свой скриншот (Каскадное/Германия/Нидерланды/Англия/Обход —
+//     ВСЕ "3 мс · отлично") с Hiddify по тому же ключу в ту же минуту
+//     (Германия 65, Нидерланды 83, Каскадное и Англия — крестик). Экран
+//     показывал одинаковое "отлично" в том числе для двух серверов,
+//     которые в реальности не работают вообще.
+//  2. Порог "отлично" (< 80 мс, см. connect_screen.dart::_latencyLabel и
+//     servers_screen.dart) после деления на 5 срабатывал на реальных
+//     400 мс — то есть "отлично" писалось буквально всегда.
+//  3. Числа стали несопоставимы ни с Hiddify, ни с любым другим клиентом,
+//     из-за чего невозможно понять, врёт приложение или нет.
+//
+// Теперь возвращается настоящее измеренное значение. Цифры станут больше
+// (это те же 65/83 мс, что показывает Hiddify) — но они наконец означают
+// то, что написано, и разные локации снова отличаются друг от друга.
+//
+// Функция намеренно оставлена на месте, а не удалена из всех четырёх мест
+// вызова: если захочешь вернуть косметику или ввести свою шкалу — правится
+// ровно одна эта строка, а не весь UI.
 int scaleDisplayPingMs(int rawMs) {
   if (rawMs <= 0) return rawMs;
-  final scaled = rawMs ~/ 5;
-  return scaled < 3 ? 3 : scaled;
+  return rawMs;
 }
 
 class TunnelService {
@@ -145,6 +169,50 @@ class TunnelService {
   // на это время — сама `syncRuntimeState()`.
   bool _restoringConnectStartedAt = false;
 
+  // [НОВОЕ — фикс "закрыл приложение, не выключая VPN; открыл заново —
+  // приложение виснет, а счётчик времени сессии снова с 00:00:00"]
+  //
+  // Зеркало того, что реально лежит на диске (LocalPrefs) о ТЕКУЩЕЙ сессии.
+  // Читается ОДИН раз, в самом начале `_initializeOnce()` — до того как
+  // оформлена подписка на `serviceStateStream`, то есть до того как
+  // нативная сторона физически может прислать первое событие. Раньше
+  // сохранённый момент старта читался ТОЛЬКО внутри `syncRuntimeState()`;
+  // если та падала или не успевала (нативный вызов подвис — см.
+  // `_nativeCallTimeout`), пришедшее следом по стриму событие "connected"
+  // попадало в `_applyServiceState()` с пустым `_connectStartedAt`, и тот
+  // молча подставлял `DateTime.now()` — счётчик стартовал заново, хотя
+  // туннель в фоне не отключался ни на секунду, и сохранённое на диске
+  // время старта тут же затиралось этим самым `now`.
+  int _persistedConnectedAtMillis = 0;
+  String? _persistedConnectionString;
+  String? _persistedPreferredHost;
+  String? _persistedServerName;
+  // Кэшируется сам Future, а не bool-флаг "уже загружено": флаг, взводимый
+  // синхронно ДО завершения чтения с диска, — та самая ошибка, которая уже
+  // была найдена и исправлена в ManualKeyStore (см. local_prefs.dart).
+  Future<void>? _persistedSessionLoadFuture;
+
+  // Сохранённая отметка старше этого срока считается мусором, оставшимся
+  // от давно завершившейся сессии (процесс мог быть убит до того, как в
+  // LocalPrefs успел записаться ноль). Без верхней границы такой мусор
+  // однажды показал бы "сессия идёт 43 дня" на только что поднятом туннеле.
+  static const Duration _maxRestorableSessionAge = Duration(days: 7);
+
+  // [НОВОЕ] true, пока выполняется connect(). Нужен, чтобы цикл авто-
+  // переподключения Kill Switch (_onStatusChanged) не запускал ВТОРОЙ
+  // connect() поверх уже идущего: connect() между попытками сам гасит
+  // сессию (_settleAfterDisconnect), а каждое такое гашение приходит сюда
+  // как обычное событие "disconnected" — раньше это считалось обрывом
+  // туннеля и планировало ещё одно подключение через 3 секунды, параллельно
+  // с тем, которое в этот момент ещё перебирало серверы.
+  bool _connectInProgress = false;
+
+  // [НОВОЕ] Имя пакета этой сборки — нужно, чтобы исключить САМО приложение
+  // из туннеля (см. PrefKeys.excludeAppFromTunnel и _resolveSelfPackageName
+  // ниже). Спрашивается у системы один раз за запуск и кэшируется.
+  static const _fallbackSelfPackage = 'su.vpnonline.vpnonline_app';
+  Future<String?>? _selfPackageFuture;
+
   final ValueNotifier<TunnelStatus?> status = ValueNotifier(null);
   final ValueNotifier<String?> lastError = ValueNotifier(null);
   final ValueNotifier<bool> killSwitchBlocking = ValueNotifier(false);
@@ -166,17 +234,182 @@ class TunnelService {
   DateTime? _cachedAt;
   static const _cacheTtl = Duration(seconds: 45);
 
-  Future<void> _ensureInitialized() async {
-    if (_initialized) return;
-    await _client.initialize();
+  // [ИСПРАВЛЕНО — вторая причина того же зависания] Раньше два вызова
+  // `_ensureInitialized()`, случившихся почти одновременно, оба видели
+  // `_initialized == false` и оба доходили до подписки на стримы. Такое
+  // реально происходит при холодном старте: RootShell (main.dart) монтирует
+  // все пять вкладок одним кадром, ConnectScreen идёт в `syncRuntimeState()`,
+  // а ServersScreen может параллельно уйти в `realCheckProfile()` — оба
+  // метода начинаются с `await _ensureInitialized()`. Вторая подписка
+  // ЗАТИРАЛА поля `_stateSub`/`_statsSub`/`_faultSub`, но сама первая
+  // подписка не отменялась и продолжала жить: `_applyServiceState`
+  // вызывался по два раза на каждое событие плагина, а `dispose()` мог
+  // отменить только последнюю. Кэшируем сам Future первой инициализации —
+  // все конкурентные вызовы ждут ОДНУ и ту же инициализацию (тот же приём,
+  // что уже применён в `ManualKeyStore._loadFuture`, см. local_prefs.dart).
+  Future<void>? _initializing;
 
-    _stateSub = _client.serviceStateStream.listen(_applyServiceState);
-    _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
-    _faultSub = _client.faultStream.listen((error) {
-      lastError.value = error.toString();
-    });
+  Future<void> _ensureInitialized() {
+    if (_initialized) return Future<void>.value();
+    return _initializing ??= _initializeOnce();
+  }
+
+  Future<void> _initializeOnce() async {
+    try {
+      // Сохранённое состояние сессии читаем ДО подписки на стримы: как
+      // только подписка оформлена, нативная сторона может прислать событие
+      // в любой момент, а `_applyServiceState()` обязан к этому моменту уже
+      // знать сохранённый момент старта (см. `_restorableConnectStart`),
+      // иначе он подставит `DateTime.now()` и обнулит счётчик работающей
+      // сессии.
+      await _loadPersistedSession();
+      // [ИСПРАВЛЕНО — ГЛАВНАЯ причина зависания при повторном открытии
+      // приложения с работающим в фоне VPN] `_client.initialize()` — это
+      // MethodChannel-вызов в нативный Kotlin-код плагина. Все ОСТАЛЬНЫЕ
+      // вызовы к нативной стороне в этом файле уже давно ограничены по
+      // времени (см. `_nativeCallTimeout` и обёртки `_disconnectNative`/
+      // `_getServiceStateNative` выше), а этот — единственный — оставался
+      // без ограничения вообще. Если после свайпа приложения из списка
+      // задач foreground VpnService остался в подвисшем состоянии (обычное
+      // дело на части прошивок Android), `await` на этой строке не
+      // завершался НИКОГДА. А из-за этого не завершалась и вся цепочка
+      // выше: `syncRuntimeState()` -> `_bootstrapConnectionState()` в
+      // connect_screen.dart -> `_loadKeyState()`. Экран навсегда оставался
+      // в состоянии загрузки — ровно то, что выглядит как "приложение
+      // зависло при запуске". Таймаут не чинит сам подвисший нативный
+      // сервис (его код физически не в этом проекте, см. pubspec.yaml —
+      // git-зависимость flutter_singbox_client), но гарантирует, что
+      // Dart-сторона и интерфейс не виснут вместе с ним.
+      await _client.initialize().timeout(_nativeCallTimeout);
+    } on TimeoutException {
+      lastError.value = 'Ядро VPN не ответило за '
+          '${_nativeCallTimeout.inSeconds} с — состояние туннеля может быть '
+          'неточным. Если VPN не отключается, отключи его из шторки '
+          'уведомлений.';
+    } catch (_) {
+      // Инициализация провалилась не по таймауту, а по существу — старое
+      // поведение сохраняем: ошибка уходит вызывающему коду, `_initialized`
+      // остаётся false, следующий вызов попробует ещё раз (для этого
+      // сбрасываем кэш Future, иначе повторная попытка вечно получала бы
+      // ту же самую упавшую Future).
+      _initializing = null;
+      rethrow;
+    }
+
+    try {
+      _stateSub = _client.serviceStateStream.listen(_applyServiceState);
+      _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
+      _faultSub = _client.faultStream.listen((error) {
+        lastError.value = error.toString();
+      });
+    } catch (e) {
+      // Плагин мог не отдать стримы, если его initialize() выше отвалился
+      // по таймауту. Это не повод рушить весь запуск приложения — состояние
+      // всё равно будет перечитано явным getServiceState() в
+      // syncRuntimeState(), просто без живых обновлений по подписке.
+      lastError.value = 'Не удалось подписаться на события ядра VPN: $e';
+    }
 
     _initialized = true;
+  }
+
+  /// [НОВОЕ] Однократное чтение сохранённого состояния сессии с диска —
+  /// см. докстринг полей `_persisted*` выше. Никогда не бросает наружу:
+  /// недоступный или битый SharedPreferences не должен мешать приложению
+  /// запуститься, в худшем случае просто не восстановится счётчик.
+  Future<void> _loadPersistedSession() {
+    return _persistedSessionLoadFuture ??= _loadPersistedSessionOnce();
+  }
+
+  Future<void> _loadPersistedSessionOnce() async {
+    try {
+      _persistedConnectedAtMillis = await LocalPrefs.instance
+          .getInt(PrefKeys.tunnelConnectedAtMillis, fallback: 0);
+      final raw =
+          await LocalPrefs.instance.getString(PrefKeys.tunnelSessionRouteJson);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return;
+      final savedConnectionString = decoded['connection_string'];
+      final savedPreferredHost = decoded['preferred_host'];
+      final savedServerName = decoded['server_name'];
+      _persistedConnectionString =
+          savedConnectionString is String && savedConnectionString.isNotEmpty
+              ? savedConnectionString
+              : null;
+      _persistedPreferredHost =
+          savedPreferredHost is String && savedPreferredHost.isNotEmpty
+              ? savedPreferredHost
+              : null;
+      _persistedServerName =
+          savedServerName is String && savedServerName.isNotEmpty
+              ? savedServerName
+              : null;
+    } catch (_) {
+      // Значения остаются нулевыми/null — восстановления просто не будет.
+    }
+  }
+
+  /// Сохранённый момент старта сессии, если ему можно доверять. `null`
+  /// означает "нет пригодного значения" — вызывающий код в этом случае
+  /// начинает отсчёт заново.
+  DateTime? _restorableConnectStart() {
+    if (_persistedConnectedAtMillis <= 0) return null;
+    final saved =
+        DateTime.fromMillisecondsSinceEpoch(_persistedConnectedAtMillis);
+    final now = DateTime.now();
+    // Время на устройстве перевели назад (или часовой пояс сменился так,
+    // что отметка оказалась "в будущем") — считать разницу бессмысленно.
+    if (saved.isAfter(now)) return null;
+    if (now.difference(saved) > _maxRestorableSessionAge) return null;
+    return saved;
+  }
+
+  /// Пишет момент старта сессии и на диск, и в зеркало в памяти — оба
+  /// источника обязаны меняться вместе, иначе `_restorableConnectStart()`
+  /// вернёт устаревшее значение уже в этом же запуске приложения.
+  void _persistConnectStart(DateTime? at) {
+    final millis = at?.millisecondsSinceEpoch ?? 0;
+    _persistedConnectedAtMillis = millis;
+    unawaited(
+        LocalPrefs.instance.setInt(PrefKeys.tunnelConnectedAtMillis, millis));
+  }
+
+  /// [НОВОЕ] Сохраняет, ЧЕМ именно поднят текущий туннель: подписка,
+  /// предпочтённая локация и имя сервера, к которому реально подключились.
+  ///
+  /// Зачем: `_lastConnectionString` — обычное поле в памяти, оно исчезает
+  /// вместе с процессом. После того как пользователь закрыл приложение
+  /// свайпом (а foreground VpnService продолжил работать) и открыл его
+  /// заново, это поле было `null` при живом туннеле — из-за чего ломались
+  /// сразу две вещи: `switchPreferredHost()` отвечал "Нет активного
+  /// туннеля, который можно переключить" на кнопку "Сменить сервер"
+  /// (см. servers_screen.dart::_onServerTapped), а `_onStatusChanged()`
+  /// молча выходил по проверке `_lastConnectionString == null`, то есть
+  /// Kill Switch и авто-переподключение вообще не работали до первого
+  /// ручного подключения в новом запуске.
+  void _persistSessionRoute() {
+    _persistedConnectionString = _lastConnectionString;
+    _persistedPreferredHost = _lastPreferredHostName;
+    _persistedServerName = connectedServerName.value;
+    final payload = <String, String>{
+      if (_lastConnectionString != null)
+        'connection_string': _lastConnectionString!,
+      if (_lastPreferredHostName != null)
+        'preferred_host': _lastPreferredHostName!,
+      if (connectedServerName.value != null)
+        'server_name': connectedServerName.value!,
+    };
+    unawaited(LocalPrefs.instance
+        .setString(PrefKeys.tunnelSessionRouteJson, jsonEncode(payload)));
+  }
+
+  void _clearPersistedSessionRoute() {
+    _persistedConnectionString = null;
+    _persistedPreferredHost = null;
+    _persistedServerName = null;
+    unawaited(
+        LocalPrefs.instance.setString(PrefKeys.tunnelSessionRouteJson, ''));
   }
 
   void _applyServiceState(dynamic state) {
@@ -211,19 +444,37 @@ class TunnelService {
     // сама `syncRuntimeState()`.
     if (!_restoringConnectStartedAt) {
       if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
-        _connectStartedAt = DateTime.now();
-        if (_runtimeStateSynced) {
-          unawaited(LocalPrefs.instance.setInt(
-            PrefKeys.tunnelConnectedAtMillis,
-            _connectStartedAt!.millisecondsSinceEpoch,
-          ));
+        // [ИСПРАВЛЕНО — счётчик времени сессии обнулялся при перезапуске
+        // приложения] Раньше здесь БЕЗУСЛОВНО стоял `DateTime.now()`.
+        // Из-за этого любое событие "connected", пришедшее по стриму мимо
+        // окна восстановления в `syncRuntimeState()` (она подвисла на
+        // нативном вызове, отвалилась по таймауту или просто не успела —
+        // всё это реальные, а не гипотетические ситуации при холодном
+        // старте), трактовалось как начало НОВОЙ сессии: счётчик уходил на
+        // 00:00:00, а сохранённое на диске настоящее время старта тут же
+        // затиралось этим `now` — восстанавливать при следующем запуске
+        // было уже нечего. Теперь сначала спрашиваем сохранённое значение
+        // (оно прочитано с диска ещё до подписки на стрим, см.
+        // `_loadPersistedSession`), и `now` берём только если пригодного
+        // сохранённого значения действительно нет.
+        final restored = _restorableConnectStart();
+        _connectStartedAt = restored ?? DateTime.now();
+        if (restored == null && _runtimeStateSynced) {
+          _persistConnectStart(_connectStartedAt);
         }
       }
-      if (mapped != TunnelConnState.connected) {
+      // [ИСПРАВЛЕНО] Условие было `mapped != TunnelConnState.connected` —
+      // то есть сохранённая отметка стиралась ещё и на ПРОМЕЖУТОЧНЫХ
+      // состояниях 'connecting'/'disconnecting'. Нативный плагин при
+      // повторном подключении Flutter-стороны к уже работающему сервису
+      // вполне может прислать сначала 'connecting' и только потом
+      // 'connected' — старый код успевал записать в LocalPrefs ноль между
+      // этими двумя событиями, после чего восстанавливать было нечего.
+      // Сессия считается завершённой только по настоящему 'disconnected'.
+      if (mapped == TunnelConnState.disconnected) {
         _connectStartedAt = null;
         if (_runtimeStateSynced) {
-          unawaited(LocalPrefs.instance
-              .setInt(PrefKeys.tunnelConnectedAtMillis, 0));
+          _persistConnectStart(null);
         }
       }
     }
@@ -336,29 +587,99 @@ class TunnelService {
   /// комментарий в `_applyServiceState()`. Флаг `_restoringConnectStartedAt`
   /// не даёт ни одному входящему событию трогать `_connectStartedAt`, пока
   /// этот метод сам не выяснит и не проставит правильное значение.
-  Future<void> syncRuntimeState() async {
+  ///
+  /// [ИЗМЕНЕНО] Метод теперь возвращает `true`, если состояние нативной
+  /// стороны реально удалось прочитать, и `false`, если попытка сорвалась
+  /// (нативный вызов не ответил, платформенный канал ещё не готов и т.п.).
+  /// Единственный вызывающий код — `ConnectScreen._bootstrapConnectionState()`
+  /// — использует это, чтобы НЕ запускать автоподключение вслепую: если
+  /// реальное состояние туннеля неизвестно, а тумблер "Автоподключение при
+  /// запуске" включён, приложение раньше решало, что VPN выключен, и
+  /// поднимало ВТОРУЮ сессию поверх уже работающей первой.
+  Future<bool> syncRuntimeState() {
+    // [НОВОЕ] Тот же приём, что и в `_ensureInitialized()` выше. Вызовов
+    // стало два (initState экрана и возврат приложения из фона, см.
+    // connect_screen.dart::didChangeAppLifecycleState), и они могут
+    // пересечься во времени. Два одновременных восстановления мешали бы
+    // друг другу через общий флаг `_restoringConnectStartedAt`: тот, кто
+    // закончит первым, снял бы защиту у второго прямо посреди его работы.
+    return _syncingRuntimeState ??= _syncRuntimeStateOnce().whenComplete(() {
+      _syncingRuntimeState = null;
+    });
+  }
+
+  Future<bool>? _syncingRuntimeState;
+
+  Future<bool> _syncRuntimeStateOnce() async {
     _restoringConnectStartedAt = true;
+    var synced = false;
     try {
       await _ensureInitialized();
       final actualState = await _getServiceStateNative();
+      final actuallyConnected =
+          _mapServiceState(actualState) == TunnelConnState.connected;
       // Сначала восстанавливаем момент подключения и лишь затем публикуем
       // состояние. Иначе экран кратко покажет 00:00:00 при возвращении в
       // приложение, хотя foreground VPN всё это время был подключён.
-      if (_mapServiceState(actualState) == TunnelConnState.connected) {
-        final savedAt = await LocalPrefs.instance
-            .getInt(PrefKeys.tunnelConnectedAtMillis, fallback: 0);
-        if (savedAt > 0) {
-          _connectStartedAt = DateTime.fromMillisecondsSinceEpoch(savedAt);
+      if (actuallyConnected) {
+        // [ИЗМЕНЕНО] Читаем не с диска повторно, а из уже загруженного
+        // зеркала (`_loadPersistedSession()` отработала внутри
+        // `_ensureInitialized()` выше) — и через ту же проверку на
+        // вменяемость значения, что и в `_applyServiceState()`, чтобы оба
+        // пути восстановления вели себя одинаково.
+        final restored = _restorableConnectStart();
+        // [ИСПРАВЛЕНО] Если сохранённого значения нет (первый запуск после
+        // обновления приложения, чистая установка поверх уже работающего
+        // туннеля, стёртые данные приложения), фиксируем и СОХРАНЯЕМ старт
+        // прямо здесь. Раньше в этом случае `_connectStartedAt` оставался
+        // null, `_applyServiceState()` ниже подставлял `DateTime.now()`, но
+        // записать его на диск не мог: `_runtimeStateSynced` взводится
+        // только в `finally`, то есть ПОЗЖЕ этого вызова. В результате
+        // отсчёт шёл в памяти правильно, но на диск не попадал вообще — и
+        // следующий перезапуск приложения снова начинал с нуля.
+        _connectStartedAt = restored ?? DateTime.now();
+        if (restored == null) _persistConnectStart(_connectStartedAt);
+        // [НОВОЕ] Туннель поднят, но процесс приложения перезапускался —
+        // поля `_lastConnectionString`/`_lastPreferredHostName`/
+        // `connectedServerName` живут только в памяти и после перезапуска
+        // пусты. Возвращаем их из сохранённого состояния (см.
+        // `_persistSessionRoute`), иначе на живом туннеле не работают ни
+        // кнопка "Сменить сервер", ни Kill Switch.
+        if (_lastConnectionString == null &&
+            _persistedConnectionString != null) {
+          _lastConnectionString = _persistedConnectionString;
+          _lastPreferredHostName = _persistedPreferredHost;
+        }
+        if (connectedServerName.value == null &&
+            _persistedServerName != null) {
+          connectedServerName.value = _persistedServerName;
         }
       } else {
         // Туннель на самом деле не поднят — предыдущая сессия точно
         // завершилась, старую отметку времени можно спокойно сбросить.
+        // [НОВОЕ] Сбрасываем её и на диске тоже: иначе протухшее значение
+        // пережило бы этот запуск и позже, при следующем событии
+        // "connected", было бы принято за начало текущей сессии.
         _connectStartedAt = null;
+        _persistConnectStart(null);
+        _clearPersistedSessionRoute();
       }
       _restoringConnectStartedAt = false;
       _applyServiceState(actualState);
-      if (_mapServiceState(actualState) == TunnelConnState.connected) {
-        _applyTrafficStats(await _client.getTrafficStats());
+      // Состояние туннеля на этот момент уже прочитано и опубликовано —
+      // именно это и означает `synced` для вызывающего кода (можно ли
+      // доверять `isConnected`). Счётчики трафика ниже — только цифры на
+      // экране; их неудача не должна превращать успешную синхронизацию в
+      // неуспешную и блокировать автоподключение.
+      synced = true;
+      if (actuallyConnected) {
+        try {
+          _applyTrafficStats(
+              await _client.getTrafficStats().timeout(_nativeCallTimeout));
+        } catch (_) {
+          // Счётчики подтянутся сами при следующем тике trafficStatsStream
+          // или нативного поллинга (_pollNativeTraffic).
+        }
       }
     } catch (e) {
       lastError.value = 'Не удалось обновить состояние VPN: $e';
@@ -385,6 +706,7 @@ class TunnelService {
       _runtimeStateSynced = true;
       _restoringConnectStartedAt = false;
     }
+    return synced;
   }
 
   TunnelConnState _mapServiceState(dynamic state) {
@@ -485,9 +807,49 @@ class TunnelService {
     }
   }
 
+  /// [НОВОЕ] Имя пакета приложения. Спрашиваем у нативной стороны, а не
+  /// пишем константой: если когда-нибудь появится applicationIdSuffix для
+  /// debug/flavor-сборок, константа станет неверной, а Android на неверное
+  /// имя в addDisallowedApplication бросает NameNotFoundException — VPN
+  /// просто не поднимется. Константа ниже используется только как запасной
+  /// вариант, если метод канала недоступен (например, установлен старый APK,
+  /// собранный до появления "getPackageName" в MainActivity.kt): сейчас
+  /// applicationId в android/app/build.gradle.kts ровно такой и суффиксов
+  /// у сборок нет, так что запасной вариант корректен для текущего проекта.
+  Future<String?> _resolveSelfPackageName() {
+    return _selfPackageFuture ??= _resolveSelfPackageNameOnce();
+  }
+
+  Future<String?> _resolveSelfPackageNameOnce() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final name = await _nativeStatsChannel
+          .invokeMethod<String>('getPackageName')
+          .timeout(_nativeCallTimeout);
+      if (name != null && name.isNotEmpty) return name;
+    } on MissingPluginException {
+      // Старая сборка APK без этого метода канала.
+    } on PlatformException {
+      // Нативная сторона ответила ошибкой.
+    } on TimeoutException {
+      // Канал не ответил — не повод задерживать подключение.
+    }
+    return _fallbackSelfPackage;
+  }
+
   void _onStatusChanged(TunnelConnState state) {
     if (state != TunnelConnState.disconnected) return;
     if (_userInitiatedDisconnect) return;
+    // [ИСПРАВЛЕНО — гонка "два connect() одновременно"] `connect()` между
+    // попытками сам гасит сессию (`_settleAfterDisconnect`), и каждое такое
+    // гашение приходит сюда обычным событием "disconnected". Раньше это
+    // считалось обрывом туннеля: счётчик попыток увеличивался, и через 3
+    // секунды планировался ЕЩЁ ОДИН `connect()` — параллельно тому, который
+    // в этот момент всё ещё перебирал серверы подписки. Две конкурирующие
+    // попытки поднять VpnService на одном нативном клиенте — это ровно тот
+    // сценарий, который отдаёт PlatformException(CONNECT_FAILED, "Service
+    // failed to start") на всех серверах подряд.
+    if (_connectInProgress) return;
     if (_lastConnectionString == null) return;
     if (!_killSwitchEnabled) return;
     // [ИЗМЕНЕНО] Раньше при исчерпании попыток авто-переподключения метод
@@ -505,6 +867,11 @@ class TunnelService {
     _autoReconnectAttempt++;
     Future.delayed(Duration(seconds: 3), () async {
       if (_userInitiatedDisconnect) return;
+      // За эти 3 секунды подключение могло начаться другим путём (кнопка
+      // "Подключить", смена сервера, автоподключение при возврате Wi-Fi) —
+      // повторная проверка, потому что к моменту срабатывания таймера
+      // ситуация уже другая, чем была при его постановке.
+      if (_connectInProgress) return;
       try {
         await connect(_lastConnectionString!,
             preferredHostName: _lastPreferredHostName);
@@ -716,7 +1083,28 @@ class TunnelService {
     return null;
   }
 
+  /// [НОВОЕ] Публичная обёртка над `_connectInternal` — единственное её
+  /// назначение — не дать двум подключениям выполняться одновременно.
+  /// Раньше такой защиты не было вообще: экран `ConnectScreen` блокировал
+  /// свою кнопку флагом `_connecting`, но цикл авто-переподключения Kill
+  /// Switch (`_onStatusChanged`) и автобалансировка серверов
+  /// (`switchPreferredHost`) звали `connect()` мимо любого UI-флага.
   Future<String> connect(String connectionString,
+      {String? preferredHostName}) async {
+    if (_connectInProgress) {
+      throw TunnelException(
+          'Подключение уже выполняется — дождись его завершения.');
+    }
+    _connectInProgress = true;
+    try {
+      return await _connectInternal(connectionString,
+          preferredHostName: preferredHostName);
+    } finally {
+      _connectInProgress = false;
+    }
+  }
+
+  Future<String> _connectInternal(String connectionString,
       {String? preferredHostName}) async {
     lastError.value = null;
     await _ensureInitialized();
@@ -757,6 +1145,12 @@ class TunnelService {
     // ConnectScreen вызовет syncRuntimeState(), поэтому с этого момента
     // разрешаем сохранить время старта сессии.
     _runtimeStateSynced = true;
+    // [НОВОЕ] Явное начало НОВОЙ сессии: обнуляем и отметку в памяти, и
+    // сохранённую на диске. Без этого восстановление, добавленное в
+    // `_applyServiceState()`, подставило бы сюда время старта ПРЕДЫДУЩЕЙ
+    // сессии, и счётчик на экране показал бы заведомо завышенное время.
+    _connectStartedAt = null;
+    _persistConnectStart(null);
     _downloadTotalBytes = 0;
     _uploadTotalBytes = 0;
     _displayDownloadBytes = 0;
@@ -813,6 +1207,27 @@ class TunnelService {
         await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: true);
     final ipv6Enabled = await LocalPrefs.instance
         .getBool(PrefKeys.ipv6Enabled, fallback: false);
+    // [НОВОЕ] См. подробный докстринг PrefKeys.excludeAppFromTunnel.
+    // ЧТОБЫ ВЕРНУТЬ СТАРОЕ ПОВЕДЕНИЕ ЦЕЛИКОМ — поменяй здесь fallback на
+    // false. Больше нигде ничего править не нужно: при false список
+    // исключений ниже остаётся пустым и конфиг получается ровно такой же,
+    // какой собирался до этой правки, байт в байт.
+    final excludeAppFromTunnel = await LocalPrefs.instance
+        .getBool(PrefKeys.excludeAppFromTunnel, fallback: true);
+    // Имя пакета нужно только в VPN-режиме и только в режиме исключений:
+    // при splitTunnelMode == 'include' через туннель идут ТОЛЬКО явно
+    // выбранные пользователем приложения, а нашего в том списке нет — оно
+    // и так уже вне туннеля, добавлять нечего.
+    final String? selfPackage =
+        (!proxyOnly && excludeAppFromTunnel && splitTunnelMode != 'include')
+            ? await _resolveSelfPackageName()
+            : null;
+    // Set, а не List: если пользователь сам отметил наше приложение на
+    // экране исключений, дубликат в exclude_package не нужен.
+    final excludedPackages = <String>{
+      if (splitTunnelMode != 'include') ...selectedPackages,
+      if (selfPackage != null) selfPackage,
+    }.toList();
 
     // Если сейчас активна служебная "блокирующая" сессия Kill Switch (см.
     // _engageHardKillSwitch), её нужно снять перед обычным подключением —
@@ -871,6 +1286,9 @@ class TunnelService {
           dpiBypass: dpiBypass,
           selectedPackages: selectedPackages,
           splitTunnelMode: splitTunnelMode,
+          // [НОВОЕ] Пустой список = поведение в точности как раньше.
+          extraExcludedPackages:
+              selfPackage != null ? <String>[selfPackage] : const <String>[],
           proxyOnly: proxyOnly,
           dnsProvider: dnsProvider,
           customDns: customDns,
@@ -891,12 +1309,24 @@ class TunnelService {
               // попадёт ли UID в VPN-сеть Android. Раньше плагину
               // perAppProxy не передавался, поэтому VpnService захватывал
               // все UID-ы, включая отмеченные в экране исключений.
-              perAppProxy: !proxyOnly && selectedPackages.isNotEmpty
+              // [ИЗМЕНЕНО] Раньше список брался из `selectedPackages` для
+              // обоих режимов. Теперь в режиме исключений передаётся
+              // `excludedPackages` — это тот же самый список плюс, если
+              // включена настройка, пакет самого приложения. В режиме
+              // 'include' не изменилось ничего: там по-прежнему ровно то,
+              // что выбрал пользователь. Когда обоих списков нет, как и
+              // раньше передаётся null.
+              perAppProxy: !proxyOnly &&
+                      (splitTunnelMode == 'include'
+                          ? selectedPackages.isNotEmpty
+                          : excludedPackages.isNotEmpty)
                   ? PerAppProxyOptions(
                       mode: splitTunnelMode == 'include'
                           ? PerAppProxyMode.include
                           : PerAppProxyMode.exclude,
-                      packages: selectedPackages,
+                      packages: splitTunnelMode == 'include'
+                          ? selectedPackages
+                          : excludedPackages,
                     )
                   : null,
               notification: NotificationConfig(
@@ -986,6 +1416,11 @@ class TunnelService {
 
         _lastConnectionString = connectionString;
         _lastPreferredHostName = preferredHostName;
+        // [НОВОЕ] Сохраняем маршрут сессии на диск — см. докстринг
+        // `_persistSessionRoute()`. Ровно здесь, а не раньше: сохранять
+        // имеет смысл только то подключение, которое реально поднялось и
+        // прошло проверку связности.
+        _persistSessionRoute();
         _userInitiatedDisconnect = false;
         killSwitchBlocking.value = false;
         return connectedName;
@@ -1229,6 +1664,13 @@ class TunnelService {
     // 'exclude' — selectedPackages идут в обход VPN (старое поведение).
     // 'include' — ТОЛЬКО selectedPackages идут через VPN.
     String splitTunnelMode = 'exclude',
+    // [НОВОЕ] Пакеты, которые нужно исключить из туннеля ДОПОЛНИТЕЛЬНО к
+    // выбранным пользователем на экране split-tunnel. Сегодня сюда попадает
+    // ровно одно значение — пакет самого приложения (см.
+    // PrefKeys.excludeAppFromTunnel). Значение по умолчанию — пустой
+    // список, то есть все прочие вызывающие (например realCheckProfile
+    // ниже) получают в точности прежнее поведение.
+    List<String> extraExcludedPackages = const <String>[],
     bool bypassLan = false,
     bool muxEnabled = true,
     String muxProtocol = 'smux',
@@ -1490,10 +1932,18 @@ class TunnelService {
         // докстринг параметра splitTunnelMode выше. sing-box не позволяет
         // задать include_package и exclude_package одновременно, поэтому
         // всегда ровно одно из двух полей, в зависимости от режима.
+        // [ИЗМЕНЕНО] Режим 'include' не тронут вообще: через туннель идут
+        // строго те приложения, которые выбрал пользователь.
         if (selectedPackages.isNotEmpty && splitTunnelMode == 'include')
           'include_package': selectedPackages,
-        if (selectedPackages.isNotEmpty && splitTunnelMode != 'include')
-          'exclude_package': selectedPackages,
+        // [ИЗМЕНЕНО] В режиме исключений к пользовательскому списку
+        // добавляется extraExcludedPackages (пакет самого приложения).
+        // Когда extraExcludedPackages пуст — выражение даёт ровно тот же
+        // список, что и раньше, и при пустом selectedPackages поле, как и
+        // прежде, вообще не попадает в конфиг.
+        if (splitTunnelMode != 'include' && _excludeList(selectedPackages, extraExcludedPackages).isNotEmpty)
+          'exclude_package':
+              _excludeList(selectedPackages, extraExcludedPackages),
       });
     }
 
@@ -1539,6 +1989,14 @@ class TunnelService {
     };
 
     return jsonEncode(config);
+  }
+
+  /// Объединяет пользовательские исключения split-tunnel с служебными
+  /// (пакет самого приложения) без дубликатов и с сохранением порядка.
+  static List<String> _excludeList(
+      List<String> userSelected, List<String> extra) {
+    if (extra.isEmpty) return userSelected;
+    return <String>{...userSelected, ...extra}.toList();
   }
 
   static const _adBlockDomains = [
@@ -1759,6 +2217,16 @@ class TunnelService {
     });
 
     listener = () {
+      // [ИСПРАВЛЕНО] Проверки `isCompleted` здесь не было (в отличие от
+      // такого же по устройству `_settleAfterDisconnect()` ниже, где она
+      // есть). Слушатель снимается только в `finally`, ПОСЛЕ того как
+      // `await completer.future` вернёт управление, — то есть между
+      // завершением Future и снятием слушателя есть окно, в которое вполне
+      // может прилететь ещё одно изменение статуса. Второй вызов
+      // `complete()` на уже завершённой Future бросает "Bad state: Future
+      // already completed" прямо из слушателя ValueNotifier, где его никто
+      // не ловит — необработанное исключение в обработчике события.
+      if (completer.isCompleted) return;
       if (status.value?.state == TunnelConnState.connected) {
         completer.complete(true);
       } else if (status.value?.state == TunnelConnState.disconnected) {
@@ -1867,7 +2335,25 @@ class TunnelService {
   }
 
   Future<void> disconnect() async {
-    if (!_initialized) return;
+    // [ИСПРАВЛЕНО] Раньше здесь стояло `if (!_initialized) return;` — тихий
+    // выход, при котором кнопка "Отключить" не делала РОВНО НИЧЕГО и даже
+    // не меняла статус на экране. Попасть в это состояние легко: если при
+    // холодном старте `_ensureInitialized()` отвалился (нативный канал ещё
+    // не готов, плагин не ответил), `_initialized` остаётся false, а
+    // foreground VpnService в это время продолжает работать — пользователь
+    // видит в шторке значок VPN и не может его выключить из приложения.
+    // Теперь сначала честно пробуем инициализироваться, а дальше идём общим
+    // путём: `_disconnectNative()` ниже и так обёрнут в try/catch с
+    // таймаутом, а `finally` в любом случае опубликует "отключено" — то
+    // есть хуже, чем было, стать не может, а залипшая кнопка чинится.
+    if (!_initialized) {
+      try {
+        await _ensureInitialized();
+      } catch (_) {
+        // Инициализация не удалась — всё равно доходим до конца метода,
+        // чтобы сбросить состояние в UI.
+      }
+    }
     _userInitiatedDisconnect = true;
     _autoReconnectAttempt = 0;
     killSwitchBlocking.value = false;
@@ -1902,6 +2388,26 @@ class TunnelService {
       // ЗДЕСЬ, а не в начале метода, чтобы не было окна, где туннеля для
       // switchPreferredHost() уже формально "нет", а status ещё "connected".
       _lastConnectionString = null;
+      _lastPreferredHostName = null;
+      _connectStartedAt = null;
+      _persistConnectStart(null);
+      _clearPersistedSessionRoute();
+      // [ИСПРАВЛЕНО] В этой ветке публичный `status` не публиковался
+      // вообще. Событие "disconnected" от служебной блокирующей сессии
+      // намеренно проглатывается guard'ом в `_applyServiceState()` (пока
+      // `_hardKillSwitchEngaged == true`), а к моменту, когда флаг
+      // снимается, событие уже прошло — в результате экран после нажатия
+      // "Отключить" при активной строгой блокировке мог навсегда остаться
+      // в состоянии "ПОДКЛЮЧЕНО". Публикуем то же самое состояние, что и
+      // обычная ветка ниже.
+      status.value = const TunnelStatus(
+        state: TunnelConnState.disconnected,
+        duration: 0,
+        download: 0,
+        upload: 0,
+        downloadTotalBytes: 0,
+        uploadTotalBytes: 0,
+      );
       return;
     }
     try {
@@ -1935,7 +2441,13 @@ class TunnelService {
       // той же точке, что и публичный статус, — оба флага меняются
       // атомарно, окна рассогласования между ними больше нет.
       _lastConnectionString = null;
+      _lastPreferredHostName = null;
       _connectStartedAt = null;
+      // [НОВОЕ] Сессия завершена по воле пользователя — стираем и то, что
+      // сохранено на диск, иначе следующий холодный старт восстановил бы
+      // отметку времени и маршрут уже несуществующей сессии.
+      _persistConnectStart(null);
+      _clearPersistedSessionRoute();
       _restartDurationTicker(false);
       status.value = const TunnelStatus(
         state: TunnelConnState.disconnected,
@@ -2074,6 +2586,13 @@ class TunnelService {
     _stateSub = null;
     _statsSub = null;
     _faultSub = null;
+    // [НОВОЕ] Подписки сняты — значит клиент больше не инициализирован в том
+    // смысле, в каком это понимает `_ensureInitialized()`. Без сброса этих
+    // двух полей повторный вызов `_ensureInitialized()` после `dispose()`
+    // увидел бы `_initialized == true` и не подписался бы заново — туннель
+    // работал бы "вслепую", без единого события состояния.
+    _initialized = false;
+    _initializing = null;
   }
 }
 
