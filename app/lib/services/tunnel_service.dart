@@ -188,6 +188,27 @@ class TunnelService {
   // с тем, которое в этот момент ещё перебирало серверы.
   bool _connectInProgress = false;
 
+  // [НОВОЕ] true на время смены сервера у УЖЕ ПОДНЯТОГО туннеля
+  // (switchPreferredHost). Переключение технически это полный разрыв и
+  // новое подключение, но для пользователя это ОДНА непрерывная сессия:
+  // он не отключался, он остался под защитой, просто трафик пошёл через
+  // другую страну. Флаг говорит остальному коду не обнулять то, что
+  // относится к сессии в целом: счётчик времени, счётчики трафика и
+  // данные для восстановления. Подробности — в докстринге
+  // switchPreferredHost().
+  bool _switchInProgress = false;
+
+  // [НОВОЕ — бесшовная смена сервера] Порядок локаций, в котором они легли
+  // в конфиг ТЕКУЩЕЙ сессии: индекс в этом списке == цифра в теге
+  // outbound'а (`out-0`, `out-1`, ...). Пустой список означает, что сессия
+  // поднята по-старому, одним outbound'ом, и мгновенное переключение
+  // недоступно — тогда switchPreferredHost() идёт прежним путём с разрывом.
+  List<_ParsedVless> _sessionOutboundOrder = const <_ParsedVless>[];
+  // Гасится навсегда (до перезапуска приложения), если ядро отвергло
+  // конфиг с группой-селектором. Тогда больше не пробуем — просто работаем
+  // как раньше.
+  bool _selectorSupported = true;
+
   // [НОВОЕ] Имя пакета этой сборки — нужно, чтобы исключить САМО приложение
   // из туннеля (см. PrefKeys.excludeAppFromTunnel и _resolveSelfPackageName
   // ниже). Спрашивается у системы один раз за запуск и кэшируется.
@@ -436,7 +457,9 @@ class TunnelService {
     // status/duration/трафик обычного туннеля и не должны запускать
     // обычную логику авто-переподключения через _onStatusChanged.
     if (_hardKillSwitchEngaged) return;
-    final mapped = _mapServiceState(state);
+    // var, а не final: при смене сервера промежуточное "отключено"
+    // подменяется на "подключение" — см. ниже.
+    var mapped = _mapServiceState(state);
     final prevDownload = status.value?.download ?? 0;
     final prevUpload = status.value?.upload ?? 0;
 
@@ -459,6 +482,24 @@ class TunnelService {
     // (`_restoringConnectStartedAt == true`), обе ветки ничего не трогают:
     // единственный, кому разрешено менять `_connectStartedAt` в этом окне —
     // сама `syncRuntimeState()`.
+    // [НОВОЕ] Во время смены сервера промежуточное "отключено" наружу не
+    // публикуется: показываем "подключение". Иначе на 2-5 секунд экран
+    // мигает "ОТКЛЮЧЕНО", кнопка превращается в "Подключить", а при
+    // невезении успевает мелькнуть и "Оформить подписку" — при том что
+    // пользователь ничего не отключал и через мгновение снова будет в сети.
+    // ВАЖНО: подменяем ТОЛЬКО когда не идёт сам connect(). Внутри connect()
+    // между попытками разных серверов вызывается `_settleAfterDisconnect()`,
+    // и он ждёт именно `disconnected` в этом же `status`. Подменив состояние
+    // там, мы бы заставили его каждый раз висеть до полного таймаута —
+    // перебор серверов стал бы втрое медленнее. Флаш "ОТКЛЮЧЕНО", который
+    // мы прячем, происходит на фазе гашения старой сессии, а там
+    // `_connectInProgress` ещё false.
+    if (_switchInProgress &&
+        !_connectInProgress &&
+        mapped == TunnelConnState.disconnected) {
+      mapped = TunnelConnState.connecting;
+    }
+
     if (!_restoringConnectStartedAt) {
       if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
         // [ИСПРАВЛЕНО — счётчик времени сессии обнулялся при перезапуске
@@ -493,7 +534,10 @@ class TunnelService {
         // отменяем его (см. _schedulePersistedStartWipe).
         _cancelPersistedStartWipe();
       }
-      if (mapped == TunnelConnState.disconnected) {
+      // Во время смены сервера отметку старта не трогаем вообще — сессия
+      // для пользователя продолжается, счётчик времени не должен прыгать
+      // на ноль (см. _switchInProgress).
+      if (mapped == TunnelConnState.disconnected && !_switchInProgress) {
         // Отметку в ПАМЯТИ сбрасываем сразу — от неё зависит то, что видит
         // пользователь. Запись на диске переживает короткую паузу: см.
         // _schedulePersistedStartWipe().
@@ -1118,14 +1162,100 @@ class TunnelService {
   ///
   /// [ВАЖНО] `disconnect()` обнуляет `_lastConnectionString` — поэтому
   /// сохраняем его в локальную переменную ДО вызова disconnect().
+  /// Смена страны у уже поднятого туннеля.
+  ///
+  /// [ПЕРЕРАБОТАНО — "чтобы клиент не замечал переключения сервера"]
+  /// Технически это по-прежнему полный разрыв и новое подключение: держать
+  /// две сессии ядра одновременно `flutter_singbox_client` не умеет, и
+  /// обойти это из Dart нельзя. Но всё, что пользователь видел как
+  /// "меня отключили", убрано:
+  ///
+  ///  * счётчик времени сессии больше не прыгает на 00:00:00 — часы идут
+  ///    непрерывно, потому что для пользователя сессия и не прерывалась;
+  ///  * счётчики принято/отдано не обнуляются и продолжают расти;
+  ///  * на экране не мелькает "ОТКЛЮЧЕНО" с кнопкой "Подключить" —
+  ///    промежуточное состояние показывается как "подключение"
+  ///    (см. _applyServiceState);
+  ///  * строка подписки и предпочтение НЕ стираются в disconnect(), так
+  ///    что Kill Switch всё это время остаётся с данными для аварийного
+  ///    переподключения.
+  ///
+  /// И главное — ОТКАТ. Раньше при неудаче нового сервера (а
+  /// авто-балансировка выбирает его по замерам, которые к моменту
+  /// переключения могли устареть) пользователь просто оставался БЕЗ VPN:
+  /// старая сессия уже погашена, новая не поднялась. Теперь при провале мы
+  /// возвращаемся на ту страну, на которой всё работало, и только потом
+  /// сообщаем об ошибке.
   Future<String> switchPreferredHost(String hostName) async {
     final connectionString = _lastConnectionString;
     if (connectionString == null || connectionString.isEmpty) {
       throw TunnelException(
           'Нет активного туннеля, который можно переключить.');
     }
-    await disconnect();
-    return connect(connectionString, preferredHostName: hostName);
+    // [НОВОЕ — переключение БЕЗ РАЗРЫВА] Если текущая сессия поднята с
+    // группой-селектором и нужная локация лежит в ней отдельным
+    // outbound'ом — просто говорим ядру переключить активный outbound
+    // внутри группы. Туннель при этом не останавливается: TUN остаётся
+    // поднятым, сервис не перезапускается, уведомление не моргает, уже
+    // открытые соединения доживают на прежнем сервере
+    // (`interrupt_exist_connections: false`), а новые идут через новый.
+    // Для пользователя переключение мгновенное и незаметное.
+    final order = _sessionOutboundOrder;
+    if (order.isNotEmpty && isConnected) {
+      final target = _matchProfile(order, hostName);
+      if (target != null) {
+        final index = order.indexWhere((e) => identical(e, target));
+        if (index >= 0) {
+          try {
+            await _client
+                .selectOutbound('proxy', 'out-$index')
+                .timeout(_nativeCallTimeout);
+            _lastPreferredHostName = hostName;
+            connectedServerName.value = hostName;
+            _connectedHost = target.host;
+            _connectedPort = target.port;
+            _persistSessionRoute();
+            return hostName;
+          } catch (e) {
+            // Мгновенное переключение не удалось (ядро не ответило, группы
+            // в этой сессии почему-то нет). Не считаем это отказом всей
+            // операции — просто уходим ниже, на обычный путь с разрывом,
+            // который работал до этого.
+            lastError.value = null;
+          }
+        }
+      }
+    }
+
+    final previousHostName = _lastPreferredHostName;
+    _switchInProgress = true;
+    try {
+      await disconnect();
+      return await connect(connectionString, preferredHostName: hostName);
+    } catch (_) {
+      // Новая страна не поднялась — возвращаем ту, на которой пользователь
+      // только что сидел, чтобы он не остался в открытой сети.
+      try {
+        await connect(connectionString, preferredHostName: previousHostName);
+      } catch (_) {
+        // Не поднялась и прежняя: сеть могла отвалиться целиком. Здесь уже
+        // ничего не поделать — сообщаем исходную ошибку вызывающему, а
+        // дальше в дело вступает обычное авто-переподключение
+        // (_onStatusChanged), для которого мы намеренно сохранили
+        // _lastConnectionString выше.
+        //
+        // [ИСПРАВЛЕНО] Но чтобы оно вообще сработало, нужно снять флаг
+        // "пользователь сам отключился": его выставил наш же disconnect()
+        // в начале переключения, а `connect()` снимает только при успехе.
+        // Пользователь ничего не отключал — он остался без VPN из-за
+        // неудачной смены сервера, и это ровно тот случай, ради которого
+        // Kill Switch и существует.
+        _userInitiatedDisconnect = false;
+      }
+      rethrow;
+    } finally {
+      _switchInProgress = false;
+    }
   }
 
   _ParsedVless? _matchProfile(List<_ParsedVless> profiles, String? hostName) {
@@ -1208,13 +1338,19 @@ class TunnelService {
     // сохранённую на диске. Без этого восстановление, добавленное в
     // `_applyServiceState()`, подставило бы сюда время старта ПРЕДЫДУЩЕЙ
     // сессии, и счётчик на экране показал бы заведомо завышенное время.
-    _connectStartedAt = null;
-    _cancelPersistedStartWipe();
-    _persistConnectStart(null);
-    _downloadTotalBytes = 0;
-    _uploadTotalBytes = 0;
-    _displayDownloadBytes = 0;
-    _displayUploadBytes = 0;
+    // [ИЗМЕНЕНО] При смене сервера у работающего туннеля ничего этого не
+    // делаем: для пользователя сессия не прерывалась, и обнулять её часы и
+    // накопленный трафик — значит показать разрыв там, где его по смыслу
+    // нет. При обычном подключении поведение прежнее.
+    if (!_switchInProgress) {
+      _connectStartedAt = null;
+      _cancelPersistedStartWipe();
+      _persistConnectStart(null);
+      _downloadTotalBytes = 0;
+      _uploadTotalBytes = 0;
+      _displayDownloadBytes = 0;
+      _displayUploadBytes = 0;
+    }
     _lastTrafficAt = null;
     _lastNativeRxBytes = null;
     _lastNativeTxBytes = null;
@@ -1339,7 +1475,15 @@ class TunnelService {
     Object? lastFailure;
     for (final profile in ordered) {
       try {
-        final config = _buildSingBoxConfig(
+        // [НОВОЕ] Все остальные локации подписки идут в тот же конфиг
+        // отдельными outbound'ами под группой-селектором — это то, что
+        // позволяет менять страну потом без разрыва (см. построение
+        // `outbounds` в _buildSingBoxConfig и switchPreferredHost).
+        // Порядок здесь и порядок тегов out-N обязаны совпадать.
+        final alternates = (_selectorSupported && !proxyOnly)
+            ? ordered.where((e) => !identical(e, profile)).toList()
+            : const <_ParsedVless>[];
+        var config = _buildSingBoxConfig(
           profile,
           dnsProtection: dnsProtection,
           blockAds: blockAds,
@@ -1357,8 +1501,41 @@ class TunnelService {
           muxProtocol: muxProtocol,
           fakeIpDns: fakeIpDns,
           ipv6Enabled: ipv6Enabled,
+          alternates: alternates,
         );
-        await _client.checkConfig(config);
+        // [НОВОЕ] Страховка: если сборка ядра почему-то не переваривает
+        // группу-селектор, конфиг отвергается ЗДЕСЬ, до попытки поднять
+        // туннель. В этом случае молча пересобираем конфиг в точности так,
+        // как он собирался раньше (один outbound), и больше селектор в этом
+        // запуске не предлагаем. Худший исход новой функции — что всё
+        // останется как было; сломать подключение она не может.
+        var sessionOrder = <_ParsedVless>[profile, ...alternates];
+        try {
+          await _client.checkConfig(config);
+        } catch (e) {
+          if (alternates.isEmpty) rethrow;
+          _selectorSupported = false;
+          sessionOrder = const <_ParsedVless>[];
+          config = _buildSingBoxConfig(
+            profile,
+            dnsProtection: dnsProtection,
+            blockAds: blockAds,
+            dpiBypass: dpiBypass,
+            selectedPackages: selectedPackages,
+            splitTunnelMode: splitTunnelMode,
+            extraExcludedPackages:
+                selfPackage != null ? <String>[selfPackage] : const <String>[],
+            proxyOnly: proxyOnly,
+            dnsProvider: dnsProvider,
+            customDns: customDns,
+            bypassLan: bypassLan,
+            muxEnabled: muxEnabled,
+            muxProtocol: muxProtocol,
+            fakeIpDns: fakeIpDns,
+            ipv6Enabled: ipv6Enabled,
+          );
+          await _client.checkConfig(config);
+        }
 
         Future<void> startSession() => _client.connect(SessionOptions(
               config: config,
@@ -1474,6 +1651,7 @@ class TunnelService {
         localProxyAddress.value =
             proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
 
+        _sessionOutboundOrder = sessionOrder;
         _lastConnectionString = connectionString;
         _lastPreferredHostName = preferredHostName;
         // [НОВОЕ] Сохраняем маршрут сессии на диск — см. докстринг
@@ -1735,78 +1913,91 @@ class TunnelService {
     String muxProtocol = 'smux',
     bool fakeIpDns = true,
     bool ipv6Enabled = false,
+    // [НОВОЕ] Остальные локации подписки. Пустой список (значение по
+    // умолчанию) означает прежнее поведение: один outbound, никакой группы.
+    // См. подробный разбор у построения `outbounds` ниже.
+    List<_ParsedVless> alternates = const <_ParsedVless>[],
   }) {
-    final outbound = <String, dynamic>{
-      'type': 'vless',
-      'tag': 'proxy',
-      'server': p.host,
-      'server_port': p.port,
-      'uuid': p.uuid,
-      if (p.flow != null && p.flow!.isNotEmpty) 'flow': p.flow,
-      // [НОВОЕ] Mux — см. PrefKeys.muxEnabled. Несовместим с flow
-      // (xtls-rprx-vision и подобные потоки сами управляют TCP-соединением
-      // на уровне TLS и не могут быть завёрнуты в дополнительный
-      // мультиплексор) — поэтому включается, только если flow не задан,
-      // ровно как это ограничение работает и в самом sing-box/Hiddify.
-      if (muxEnabled && (p.flow == null || p.flow!.isEmpty))
-        'multiplex': {
-          'enabled': true,
-          'protocol': muxProtocol,
-          'max_streams': 8,
-        },
-    };
-
-    if (p.security == 'reality' || p.security == 'tls') {
-      outbound['tls'] = {
-        'enabled': true,
-        'server_name': p.sni ?? p.host,
-        if (p.alpn != null && p.alpn!.isNotEmpty) 'alpn': p.alpn!.split(','),
-        'utls': {
-          'enabled': true,
-          'fingerprint': (p.fp == null || p.fp!.isEmpty) ? 'chrome' : p.fp
-        },
-        if (p.security == 'reality')
-          'reality': {
+    // [НОВОЕ] Сборка ОДНОГО proxy-outbound вынесена в функцию, чтобы тот же
+    // самый код мог собрать несколько штук — по одному на каждую локацию
+    // подписки. Раньше outbound был ровно один, поэтому смена страны
+    // требовала нового конфига и, значит, перезапуска ядра — то есть
+    // разрыва туннеля. Параметр намеренно назван `p`: он перекрывает
+    // внешний `p`, и ни одна строка внутри блока не меняется.
+    Map<String, dynamic> buildProxyOutbound(_ParsedVless p, String outboundTag) {
+      final outbound = <String, dynamic>{
+        'type': 'vless',
+        'tag': outboundTag,
+        'server': p.host,
+        'server_port': p.port,
+        'uuid': p.uuid,
+        if (p.flow != null && p.flow!.isNotEmpty) 'flow': p.flow,
+        // [НОВОЕ] Mux — см. PrefKeys.muxEnabled. Несовместим с flow
+        // (xtls-rprx-vision и подобные потоки сами управляют TCP-соединением
+        // на уровне TLS и не могут быть завёрнуты в дополнительный
+        // мультиплексор) — поэтому включается, только если flow не задан,
+        // ровно как это ограничение работает и в самом sing-box/Hiddify.
+        if (muxEnabled && (p.flow == null || p.flow!.isEmpty))
+          'multiplex': {
             'enabled': true,
-            'public_key': p.pbk,
-            if (p.sid != null && p.sid!.isNotEmpty) 'short_id': p.sid,
+            'protocol': muxProtocol,
+            'max_streams': 8,
           },
       };
-    }
 
-    // Маскировка/транспорт (ws, grpc, http) — обязателен для ключей, где
-    // сервер ожидает не голый TCP, а конкретный транспортный "конверт".
-    // Без этого блока такие ключи (например, экспортированные с
-    // http-заголовками из другого клиента) не подключаются: сервер отвергает handshake.
-    final transportType = p.transportType ?? 'tcp';
-    if (transportType == 'ws') {
-      outbound['transport'] = {
-        'type': 'ws',
-        'path': (p.transportPath == null || p.transportPath!.isEmpty)
-            ? '/'
-            : p.transportPath,
-        if (p.transportHost != null && p.transportHost!.isNotEmpty)
-          'headers': {'Host': p.transportHost},
-      };
-    } else if (transportType == 'grpc') {
-      outbound['transport'] = {
-        'type': 'grpc',
-        'service_name': (p.transportPath == null || p.transportPath!.isEmpty)
-            ? ''
-            : p.transportPath,
-      };
-    } else if (transportType == 'http') {
-      outbound['transport'] = {
-        'type': 'http',
-        if (p.transportHost != null && p.transportHost!.isNotEmpty)
-          'host': [p.transportHost],
-        'path': (p.transportPath == null || p.transportPath!.isEmpty)
-            ? '/'
-            : p.transportPath,
-      };
+      if (p.security == 'reality' || p.security == 'tls') {
+        outbound['tls'] = {
+          'enabled': true,
+          'server_name': p.sni ?? p.host,
+          if (p.alpn != null && p.alpn!.isNotEmpty) 'alpn': p.alpn!.split(','),
+          'utls': {
+            'enabled': true,
+            'fingerprint': (p.fp == null || p.fp!.isEmpty) ? 'chrome' : p.fp
+          },
+          if (p.security == 'reality')
+            'reality': {
+              'enabled': true,
+              'public_key': p.pbk,
+              if (p.sid != null && p.sid!.isNotEmpty) 'short_id': p.sid,
+            },
+        };
+      }
+
+      // Маскировка/транспорт (ws, grpc, http) — обязателен для ключей, где
+      // сервер ожидает не голый TCP, а конкретный транспортный "конверт".
+      // Без этого блока такие ключи (например, экспортированные с
+      // http-заголовками из другого клиента) не подключаются: сервер отвергает handshake.
+      final transportType = p.transportType ?? 'tcp';
+      if (transportType == 'ws') {
+        outbound['transport'] = {
+          'type': 'ws',
+          'path': (p.transportPath == null || p.transportPath!.isEmpty)
+              ? '/'
+              : p.transportPath,
+          if (p.transportHost != null && p.transportHost!.isNotEmpty)
+            'headers': {'Host': p.transportHost},
+        };
+      } else if (transportType == 'grpc') {
+        outbound['transport'] = {
+          'type': 'grpc',
+          'service_name': (p.transportPath == null || p.transportPath!.isEmpty)
+              ? ''
+              : p.transportPath,
+        };
+      } else if (transportType == 'http') {
+        outbound['transport'] = {
+          'type': 'http',
+          if (p.transportHost != null && p.transportHost!.isNotEmpty)
+            'host': [p.transportHost],
+          'path': (p.transportPath == null || p.transportPath!.isEmpty)
+              ? '/'
+              : p.transportPath,
+        };
+      }
+      // transportType == 'tcp' (или неизвестный) — без блока "transport",
+      // как и раньше: sing-box по умолчанию использует голый TCP.
+      return outbound;
     }
-    // transportType == 'tcp' (или неизвестный) — без блока "transport",
-    // как и раньше: sing-box по умолчанию использует голый TCP.
 
     // DNS должен быть доступен ещё до первого DNS-ответа через туннель.
     // Поэтому для встроенных провайдеров используем DoT с фиксированным IP
@@ -1912,10 +2103,49 @@ class TunnelService {
         },
     ];
 
-    final outbounds = <Map<String, dynamic>>[
-      outbound,
-      {'type': 'direct', 'tag': 'direct'},
-    ];
+    // [НОВОЕ — бесшовная смена сервера] Когда переданы альтернативные
+    // локации, в конфиг кладётся по outbound'у на каждую (`out-0`,
+    // `out-1`, ...) плюс группа-`selector` с тегом `proxy`. Тег `proxy`
+    // остаётся тем же, на который уже ссылаются `route.final`, правило
+    // tls_fragment и `detour` у DNS — то есть весь остальной конфиг
+    // не знает, что под ним появился выбор, и не меняется ни на строку.
+    //
+    // Что это даёт: ядро sing-box умеет ПЕРЕКЛЮЧАТЬ активный outbound
+    // внутри такой группы на лету, не останавливая себя и не трогая TUN.
+    // Плагин это уже поддерживает — `SingboxClient.selectOutbound()`
+    // (см. switchPreferredHost). Разрыва при смене страны не происходит
+    // вообще: ни секунды без сети, ни перезапуска сервиса, ни моргания
+    // уведомления.
+    //
+    // `interrupt_exist_connections: false` — существующие соединения
+    // доживают на прежнем сервере, а на новый уходят только новые. Именно
+    // это и означает "клиент не заметил переключения": скачивание или
+    // видео, запущенные до смены, не обрываются.
+    //
+    // Пустой `alternates` (все прочие вызывающие, включая realCheckProfile)
+    // даёт РОВНО прежний конфиг: один outbound с тегом `proxy`, без всякой
+    // группы.
+    final useSelector = !proxyOnly && alternates.isNotEmpty;
+    final outbounds = <Map<String, dynamic>>[];
+    if (!useSelector) {
+      outbounds.add(buildProxyOutbound(p, 'proxy'));
+    } else {
+      final memberTags = <String>['out-0'];
+      outbounds.add(buildProxyOutbound(p, 'out-0'));
+      for (var i = 0; i < alternates.length; i++) {
+        final tag = 'out-${i + 1}';
+        memberTags.add(tag);
+        outbounds.add(buildProxyOutbound(alternates[i], tag));
+      }
+      outbounds.add(<String, dynamic>{
+        'type': 'selector',
+        'tag': 'proxy',
+        'outbounds': memberTags,
+        'default': 'out-0',
+        'interrupt_exist_connections': false,
+      });
+    }
+    outbounds.add({'type': 'direct', 'tag': 'direct'});
 
     final inbounds = <Map<String, dynamic>>[];
     if (proxyOnly) {
@@ -2502,16 +2732,45 @@ class TunnelService {
       // "ПОДКЛЮЧЕНО". Теперь `_lastConnectionString` обнуляется РОВНО в
       // той же точке, что и публичный статус, — оба флага меняются
       // атомарно, окна рассогласования между ними больше нет.
-      _lastConnectionString = null;
-      _lastPreferredHostName = null;
-      _connectStartedAt = null;
-      // [НОВОЕ] Сессия завершена по воле пользователя — стираем и то, что
-      // сохранено на диск, иначе следующий холодный старт восстановил бы
-      // отметку времени и маршрут уже несуществующей сессии. Здесь без
-      // паузы: намерение пользователя однозначно.
-      _cancelPersistedStartWipe();
-      _persistConnectStart(null);
-      _clearPersistedSessionRoute();
+      // [ИЗМЕНЕНО] При смене сервера (switchPreferredHost) этот disconnect —
+      // техническая середина операции, а не её конец: строка подписки
+      // нужна следующим же действием, чтобы подняться на другой стране, а
+      // при неудаче — чтобы вернуться на прежнюю. Обнулив её здесь, мы бы
+      // сами лишили себя возможности откатиться, а Kill Switch остался бы
+      // без данных для переподключения (см. _onStatusChanged: он молча
+      // выходит при пустом _lastConnectionString).
+      if (!_switchInProgress) {
+        _sessionOutboundOrder = const <_ParsedVless>[];
+        _lastConnectionString = null;
+        _lastPreferredHostName = null;
+        _connectStartedAt = null;
+        // Сессия завершена по воле пользователя — стираем и то, что
+        // сохранено на диск, иначе следующий холодный старт восстановил бы
+        // отметку времени и маршрут уже несуществующей сессии. Здесь без
+        // паузы: намерение пользователя однозначно.
+        _cancelPersistedStartWipe();
+        _persistConnectStart(null);
+        _clearPersistedSessionRoute();
+      }
+      // [ИСПРАВЛЕНО] Этот `status.value` пишется НАПРЯМУЮ, минуя
+      // `_applyServiceState()`, — то есть подмена состояния при смене
+      // сервера, сделанная там, сюда не распространялась, и экран всё
+      // равно на пару секунд показывал "ОТКЛЮЧЕНО" с кнопкой
+      // "Подключить". При смене сервера публикуем "подключение" и
+      // сохраняем накопленные счётчики: сессия для пользователя идёт
+      // дальше.
+      if (_switchInProgress) {
+        final carried = status.value;
+        status.value = TunnelStatus(
+          state: TunnelConnState.connecting,
+          duration: carried?.duration ?? 0,
+          download: 0,
+          upload: 0,
+          downloadTotalBytes: _downloadTotalBytes,
+          uploadTotalBytes: _uploadTotalBytes,
+        );
+        return;
+      }
       _restartDurationTicker(false);
       status.value = const TunnelStatus(
         state: TunnelConnState.disconnected,
