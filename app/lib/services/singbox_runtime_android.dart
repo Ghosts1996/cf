@@ -41,4 +41,8 @@ class AndroidSingboxRuntime implements SingboxRuntimeClient {
 
   @override
   Future<bool> requestVPNPermission() => _client.requestVPNPermission();
+
+  @override
+  Future<void> selectOutbound(String groupTag, String outboundTag) =>
+      _client.selectOutbound(groupTag, outboundTag);
 }
