@@ -153,6 +153,19 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   @override
   Future<bool> requestVPNPermission() async => true;
 
+  /// [НОВОЕ] Не поддерживается на Windows: здесь ядро запускается отдельным
+  /// процессом sing-box.exe без командного канала libbox, через который
+  /// идёт переключение outbound'а на лету (на Android его держит нативный
+  /// плагин). Бросаем осознанно — вызывающий (TunnelService.
+  /// switchPreferredHost) поймает и переключит сервер обычным способом,
+  /// через переподключение. Молча ничего не делать нельзя: приложение
+  /// отрапортовало бы о смене сервера, которой не было.
+  @override
+  Future<void> selectOutbound(String groupTag, String outboundTag) async {
+    throw UnsupportedError(
+        'Переключение outbound на лету доступно только на Android.');
+  }
+
   void _setState(String s) {
     _state = s;
     _stateCtrl.add(s);
