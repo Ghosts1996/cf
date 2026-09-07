@@ -129,9 +129,15 @@ class _ServersScreenState extends State<ServersScreen> {
   // расход батареи — гонять её по кругу без остановки нельзя.
   DateTime? _lastRealCheckAt;
   static const _realCheckCooldown = Duration(minutes: 10);
+  // Насколько долго результату реальной проверки можно доверять при
+  // автоматическом переключении живого туннеля (см. _autoBalanceScore).
+  static const _realCheckMaxAge = Duration(minutes: 30);
   // Автопроверка при открытии экрана запускается один раз за сессию экрана:
   // дальше её перезапускает только отключение VPN или кнопка "Проверить".
   bool _autoRealCheckScheduled = false;
+  // true, когда числа в _livePing получены от самого ядра через работающий
+  // туннель (та же метрика, что показывает Hiddify), а не TCP-стуком.
+  bool _pingFromTunnel = false;
   // host_name локации, которая проверяется прямо сейчас — для индикатора
   // на конкретной карточке.
   String? _realCheckingId;
@@ -447,10 +453,80 @@ class _ServersScreenState extends State<ServersScreen> {
   /// одинаковые "15-16 мс · отлично", хотя реально работали не все. Теперь
   /// подсчёт "сколько локаций делят один и тот же адрес" считается ПО ВСЕМ
   /// эндпоинтам сразу — и реальным, и запасным, — а не только по запасным.
+  /// [НОВОЕ — "пинг должен показывать 70-180, как в Hiddify"]
+  ///
+  /// Число, которое экран показывал раньше, измеряло СОВСЕМ НЕ ТО, что
+  /// показывает Hiddify, — отсюда и разница в разы:
+  ///
+  ///  * "Реальная проверка" (realCheckProfile) меряет время ПОЛНОГО цикла:
+  ///    поднять сессию sing-box с нуля, дождаться готовности туннеля,
+  ///    сделать пробный запрос, погасить сессию. Запуск ядра и
+  ///    Reality-рукопожатие занимают секунды сами по себе — это честное
+  ///    число, но это "сколько ждать подключения", а не задержка канала.
+  ///  * TCP-стук меряет только установку TCP до порта и до Reality-узла
+  ///    успешен всегда, даже если VLESS за ним лежит.
+  ///  * Hiddify показывает URLTest ядра: HTTP-запрос через УЖЕ поднятый
+  ///    outbound. Чистое время туда-обратно, ничего лишнего.
+  ///
+  /// Теперь, когда VPN включён, берётся ровно та же метрика, что у
+  /// Hiddify: ядро само прогоняет проверку по всем outbound'ам группы
+  /// `proxy` (см. TunnelService.measureLatenciesThroughTunnel). Туннель при
+  /// этом не прерывается. Результаты кладутся в тот же `_livePing`, что и
+  /// раньше, — поэтому и подписи под локациями, и авто-балансировка
+  /// начинают работать с правильными числами без единой правки в них.
+  Future<void> _measureThroughTunnel() async {
+    if (!_tunnel.isConnected) return;
+    final measured = await _tunnel.measureLatenciesThroughTunnel();
+    if (!mounted || measured.isEmpty) return;
+
+    // [ИСПРАВЛЕНО — без этого замер не показал бы НИЧЕГО]
+    // Ядро возвращает результаты под remark'ами из VLESS-ссылки
+    // ("VPNonLine | 🇬🇧 Англия"), а весь этот экран, включая `_livePing`,
+    // работает с host_name из /hosts ("🇬🇧 Англия") — панель 3x-ui
+    // дописывает в remark название сервиса. Разложив ответ по его
+    // собственным ключам, я бы получил карту, из которой ни один ключ
+    // никогда не совпал бы с именем локации в списке: числа посчитаны,
+    // а на экране пусто. Сопоставляем по вхождению — той же логикой,
+    // которой TunnelService._matchProfile ищет профиль по имени локации.
+    final byHostName = <String, int>{};
+    for (final host in (_hosts ?? const <dynamic>[])) {
+      final hostName = (host as Map<String, dynamic>)['host_name'] as String?;
+      if (hostName == null || hostName.isEmpty) continue;
+      final needle = hostName.toLowerCase().trim();
+      for (final entry in measured.entries) {
+        final remark = entry.key.toLowerCase();
+        if (remark == needle || remark.contains(needle)) {
+          byHostName[hostName] = entry.value;
+          break;
+        }
+      }
+    }
+    if (byHostName.isEmpty) return;
+
+    setState(() {
+      _pingFromTunnel = true;
+      byHostName.forEach((hostName, delayMs) => _livePing[hostName] = delayMs);
+      // Локации, до которых ядро не достучалось, в ответ не попадают —
+      // помечаем их честно "недоступен", а не оставляем старое число.
+      for (final hostName in _livePing.keys.toList()) {
+        if (!byHostName.containsKey(hostName)) _livePing[hostName] = -1;
+      }
+    });
+  }
+
   void _measureAllPings(List<dynamic> hosts) {
     if (!_realEndpointsComplete(hosts)) {
       unawaited(_loadActiveConnectionString());
     }
+
+    // [НОВОЕ] При поднятом туннеле стучаться TCP-сокетами бессмысленно: они
+    // всё равно пойдут внутрь туннеля и измерят не то. Спрашиваем у ядра —
+    // см. докстринг _measureThroughTunnel выше.
+    if (_tunnel.isConnected) {
+      unawaited(_measureThroughTunnel());
+      return;
+    }
+    _pingFromTunnel = false;
 
     final endpoints = <String,
         ({String? host, int? port, String? security, String? sni})>{};
@@ -734,6 +810,56 @@ class _ServersScreenState extends State<ServersScreen> {
   ///
   /// Если туннель сейчас не поднят — ведём себя как раньше: просто
   /// обновляем предпочтение, которое подхватится при следующем подключении.
+  /// Оценка локации для авто-балансировки. `null` означает "этой локации в
+  /// сравнении не место" — данных нет либо им нельзя доверять.
+  ///
+  /// [ИСПРАВЛЕНО — авто-балансировка не работала ВООБЩЕ]
+  ///
+  /// Здесь стояло `if (_realEndpoints[id]?.security == 'reality') continue;`
+  /// — Reality-локации исключались из сравнения. Рассуждение было верным
+  /// (низкий TCP-пинг до Reality-узла ничего не доказывает: сервер под
+  /// Reality отвечает сертификатом сайта-приманки даже со сломанным
+  /// инбаундом), а следствие — катастрофическим: ВСЕ локации в этой
+  /// подписке — Reality. Значит цикл отсеивал их все до единой, `bestId`
+  /// всегда оставался null, и метод выходил на первой же строке после
+  /// цикла. Тумблер "Авто-балансировка" пользователь включал, а он не делал
+  /// ровно ничего и никогда — ни при поднятом туннеле, ни при выключенном.
+  ///
+  /// Теперь у нас есть источник, которому доверять МОЖНО: результаты
+  /// реальной VLESS-проверки (`_realCheckResults`), которая с недавних пор
+  /// идёт автоматически, пока VPN выключен. Это настоящее рукопожатие тем
+  /// же ядром — оно и доказывает, что сервер жив, и даёт честную задержку.
+  /// Порядок предпочтения:
+  ///
+  ///  1. Есть свежий результат реальной проверки — берём его. `не работает`
+  ///     означает исключение локации из сравнения, а не "нет данных".
+  ///  2. Результата нет, но локация НЕ Reality — берём TCP-замер, как и
+  ///     задумывалось изначально.
+  ///  3. Reality без реальной проверки — по-прежнему пропускаем: тут
+  ///     старое рассуждение остаётся в силе.
+  int? _autoBalanceScore(String id) {
+    final realCheck = _realCheckResults[id];
+    if (realCheck != null && _isRealCheckFresh) {
+      if (!realCheck.ok) return null; // подтверждённо мёртвая локация
+      final latency = realCheck.latencyMs;
+      if (latency != null && latency > 0) return latency;
+      return null;
+    }
+    if (_realEndpoints[id]?.security == 'reality') return null;
+    final ping = _livePing[id];
+    if (ping == null || ping < 0) return null;
+    return ping;
+  }
+
+  /// Результаты реальной проверки не вечны: сервер мог лечь через час после
+  /// того, как проверка признала его рабочим. Переключать по ним живой
+  /// туннель имеет смысл, только пока они относительно свежие.
+  bool get _isRealCheckFresh {
+    final last = _lastRealCheckAt;
+    if (last == null) return false;
+    return DateTime.now().difference(last) < _realCheckMaxAge;
+  }
+
   void _maybeApplyAutoBalance() {
     if (!_autoBalance || _hosts == null || _hosts!.isEmpty) return;
     String? bestId;
@@ -742,21 +868,10 @@ class _ServersScreenState extends State<ServersScreen> {
       final host = s as Map<String, dynamic>;
       final id = host['host_name'] as String? ?? '';
       if (id.isEmpty) continue;
-      final ping = _livePing[id];
-      if (ping == null || ping < 0)
-        continue; // ещё не измерен / недоступен / нет данных
-      // [НОВОЕ] Reality-профили не участвуют в автовыборе "лучшего"
-      // сервера по пингу — см. пометку "VLESS не проверен" в build() выше:
-      // низкий TCP-пинг до Reality-узла не гарантирует, что сам VLESS-сервис
-      // за ним поднят, поэтому опираться на него при автоматическом
-      // переключении УЖЕ РАБОЧЕГО туннеля нельзя — можно случайно
-      // переключиться на красиво "быстрый", но фактически мёртвый сервер.
-      // Ручной выбор пользователем по-прежнему работает для любых локаций —
-      // там подстраховывает переподключение с перебором серверов в
-      // TunnelService.connect().
-      if (_realEndpoints[id]?.security == 'reality') continue;
-      if (bestPing == null || ping < bestPing) {
-        bestPing = ping;
+      final score = _autoBalanceScore(id);
+      if (score == null) continue;
+      if (bestPing == null || score < bestPing) {
+        bestPing = score;
         bestId = id;
       }
     }
@@ -778,14 +893,22 @@ class _ServersScreenState extends State<ServersScreen> {
 
     // Туннель поднят. Сравниваем реальный текущий сервер с лучшим найденным.
     if (bestId == connectedName) return; // уже и так на лучшем сервере
-    if (_switching || _tunnel.isBusy) return; // уже идёт подключение/отключение
-    if (connectedName == null || !_livePing.containsKey(connectedName)) {
+    if (_switching || _realChecking || _tunnel.isBusy) {
+      return; // уже идёт подключение, отключение или реальная проверка
+    }
+    if (connectedName == null) {
       // Не наш известный хост (например, вставленный вручную ключ с
       // произвольным remark'ом) — не трогаем чужое соединение.
       return;
     }
-    final currentPing = _livePing[connectedName];
-    if (currentPing == null || currentPing < 0) return;
+    // [ИСПРАВЛЕНО] Текущий сервер обязан оцениваться ТОЙ ЖЕ мерой, что и
+    // кандидаты. Раньше кандидаты брались из `_livePing`, а порог считался
+    // тоже по `_livePing` — но стоит смешать две разные шкалы (реальная
+    // VLESS-задержка против TCP-оценки), и сравнение "текущий минус лучший"
+    // превращается в бессмыслицу: можно оторвать рабочее соединение,
+    // сравнив килограммы с метрами.
+    final currentPing = _autoBalanceScore(connectedName);
+    if (currentPing == null) return;
     if (bestPing == null || (currentPing - bestPing) < _switchThresholdMs) {
       return; // разница в пределах шума — не стоит рвать рабочее соединение
     }
@@ -1263,7 +1386,17 @@ class _ServersScreenState extends State<ServersScreen> {
                   pingLabel = tr('проверяю по-настоящему...');
                   pingColor = AppColors.textDim;
                 } else {
-                  final realCheck = _realCheckResults[id];
+                  // [ИЗМЕНЕНО] Когда есть свежий замер через работающий
+                  // туннель, показываем ЕГО, а не результат прошлой
+                  // "реальной проверки": та мерила время запуска сессии, а
+                  // не задержку канала, и её число рядом с числом Hiddify
+                  // выглядело как ошибка приложения.
+                  final livePingNow = _livePing[id];
+                  final realCheck = (_pingFromTunnel &&
+                          livePingNow != null &&
+                          livePingNow > 0)
+                      ? null
+                      : _realCheckResults[id];
                   if (realCheck != null) {
                     if (realCheck.ok) {
                       pingLabel =
