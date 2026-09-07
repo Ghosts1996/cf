@@ -65,6 +65,18 @@ abstract class SingboxRuntimeClient {
   /// бы к тому, что пользователь нажал "сменить сервер", ничего не
   /// произошло, и приложение отрапортовало бы об успехе.
   Future<void> selectOutbound(String groupTag, String outboundTag);
+
+  /// [НОВОЕ — замер задержки ПРИ ВКЛЮЧЁННОМ VPN] Просит работающее ядро
+  /// прогнать проверку задержки по всем участникам группы. Ядро делает это
+  /// само, своими же outbound'ами, не останавливая туннель: это настоящее
+  /// VLESS-рукопожатие до каждого сервера, а не TCP-стук в порт. Результаты
+  /// приходят не сюда, а отдельно — в [outboundGroupStream].
+  Future<void> urlTest(String groupTag);
+
+  /// Состояние групп outbound'ов: какой участник выбран сейчас и какая у
+  /// каждого измеренная задержка (`urlTestDelayMs`). Обновляется само после
+  /// [urlTest] и при смене выбранного участника.
+  Stream<dynamic> get outboundGroupStream;
 }
 
 SingboxRuntimeClient createSingboxRuntime() {
