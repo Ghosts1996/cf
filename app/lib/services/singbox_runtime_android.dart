@@ -45,4 +45,10 @@ class AndroidSingboxRuntime implements SingboxRuntimeClient {
   @override
   Future<void> selectOutbound(String groupTag, String outboundTag) =>
       _client.selectOutbound(groupTag, outboundTag);
+
+  @override
+  Future<void> urlTest(String groupTag) => _client.urlTest(groupTag);
+
+  @override
+  Stream<dynamic> get outboundGroupStream => _client.outboundGroupStream;
 }
