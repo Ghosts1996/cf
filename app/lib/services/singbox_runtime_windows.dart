@@ -166,6 +166,19 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
         'Переключение outbound на лету доступно только на Android.');
   }
 
+  /// Не поддерживается по той же причине, что и selectOutbound: командного
+  /// канала libbox у отдельного процесса sing-box.exe нет.
+  @override
+  Future<void> urlTest(String groupTag) async {
+    throw UnsupportedError(
+        'Замер задержки через ядро доступен только на Android.');
+  }
+
+  /// Пустой поток, а не заглушка с фейковыми данными: вызывающий увидит,
+  /// что групп нет, и просто не будет предлагать этот способ замера.
+  @override
+  Stream<dynamic> get outboundGroupStream => const Stream<dynamic>.empty();
+
   void _setState(String s) {
     _state = s;
     _stateCtrl.add(s);
