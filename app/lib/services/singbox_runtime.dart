@@ -48,6 +48,23 @@ abstract class SingboxRuntimeClient {
   Future<void> disconnect();
 
   Future<bool> requestVPNPermission();
+
+  /// [НОВОЕ — бесшовная смена сервера] Переключает активный outbound внутри
+  /// группы-`selector` У РАБОТАЮЩЕГО ядра, не останавливая туннель.
+  ///
+  /// Ровно тот метод, ради которого в конфиг добавляется группа `proxy`
+  /// (см. TunnelService._buildSingBoxConfig). На Android форвардится в
+  /// `SingboxClient.selectOutbound` — тот уходит по MethodChannel в
+  /// FlutterSingboxClientPlugin.kt и дальше в libbox CommandClient, который
+  /// плагин держит открытым всё время работы сервиса. Ни VpnService, ни TUN
+  /// при этом не трогаются.
+  ///
+  /// Реализация ОБЯЗАНА бросать исключение там, где это не поддерживается,
+  /// а не молча ничего не делать: вызывающий (switchPreferredHost) ловит
+  /// ошибку и уходит на обычный путь с переподключением. Тихий no-op привёл
+  /// бы к тому, что пользователь нажал "сменить сервер", ничего не
+  /// произошло, и приложение отрапортовало бы об успехе.
+  Future<void> selectOutbound(String groupTag, String outboundTag);
 }
 
 SingboxRuntimeClient createSingboxRuntime() {
