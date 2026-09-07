@@ -1162,6 +1162,125 @@ class TunnelService {
   ///
   /// [ВАЖНО] `disconnect()` обнуляет `_lastConnectionString` — поэтому
   /// сохраняем его в локальную переменную ДО вызова disconnect().
+  /// [НОВОЕ — "можно ли мерить пинг при включённом VPN"] Да, можно, и это
+  /// единственный по-настоящему верный замер из всех, что есть в
+  /// приложении.
+  ///
+  /// Чем он отличается от двух прежних способов:
+  ///  * TCP-стук (servers_screen::_measureLivePing) бьётся в порт сервера
+  ///    напрямую. До Reality-узла он всегда успешен — тот отвечает
+  ///    сертификатом сайта-приманки даже со сломанным инбаундом. То есть
+  ///    доказывает только то, что хост в сети, и ничего про VPN.
+  ///  * "Реальная проверка" (realCheckProfile) поднимает и гасит тестовую
+  ///    сессию своим же ядром — верно, но требует ВЫКЛЮЧЕННОГО VPN, потому
+  ///    что ядро одно.
+  ///  * Этот способ просит УЖЕ РАБОТАЮЩЕЕ ядро прогнать проверку по всем
+  ///    outbound'ам группы `proxy` — той самой, которую мы кладём в конфиг
+  ///    ради бесшовного переключения. Ядро делает настоящее рукопожатие до
+  ///    каждого сервера своими же средствами, туннель при этом не
+  ///    прерывается ни на миг.
+  ///
+  /// Возвращает: имя локации -> задержка в миллисекундах. Локации, до
+  /// которых ядро не достучалось, в результат не попадают вообще — так
+  /// вызывающий отличит "не работает" от "ещё не измерено".
+  ///
+  /// Пустой результат означает, что замер невозможен: туннель не поднят,
+  /// сессия собрана без группы (старый конфиг с одним outbound'ом) или
+  /// платформа не Android.
+  Future<Map<String, int>> measureLatenciesThroughTunnel({
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    final order = _sessionOutboundOrder;
+    if (order.isEmpty || !isConnected) return const <String, int>{};
+
+    final completer = Completer<Map<String, int>>();
+    StreamSubscription<dynamic>? sub;
+    Timer? deadline;
+    final collected = <String, int>{};
+
+    void finish() {
+      if (completer.isCompleted) return;
+      completer.complete(Map<String, int>.from(collected));
+    }
+
+    try {
+      sub = _client.outboundGroupStream.listen((groups) {
+        if (groups is! List) return;
+        for (final group in groups) {
+          // Нас интересует только наша группа, а не любые другие, которые
+          // ядро может отдавать.
+          if (_groupTagOf(group) != 'proxy') continue;
+          final items = _groupItemsOf(group);
+          for (final item in items) {
+            final tag = _groupTagOf(item);
+            final delay = _itemDelayOf(item);
+            // Ноль у sing-box означает "не измерено / недоступно", а не
+            // "мгновенно". Такие в результат не кладём.
+            if (tag == null || delay == null || delay <= 0) continue;
+            final index = _indexOfOutboundTag(tag);
+            if (index == null || index >= order.length) continue;
+            // remark в _ParsedVless объявлен НЕ-nullable (см. класс внизу
+            // файла), поэтому проверяем только на пустоту — сравнение с
+            // null здесь было бы мёртвым кодом и предупреждением анализатора.
+            final hostName = order[index].remark;
+            if (hostName.isEmpty) continue;
+            collected[hostName] = scaleDisplayPingMs(delay);
+          }
+          // Все участники ответили — ждать дальше нечего.
+          if (collected.length >= order.length) finish();
+        }
+      }, onError: (_) => finish());
+
+      deadline = Timer(timeout, finish);
+      await _client.urlTest('proxy').timeout(_nativeCallTimeout);
+      return await completer.future;
+    } catch (e) {
+      lastError.value = 'Не удалось измерить задержку через туннель: $e';
+      return Map<String, int>.from(collected);
+    } finally {
+      deadline?.cancel();
+      await sub?.cancel();
+    }
+  }
+
+  /// Разбор ответа плагина сделан "мягко", через dynamic: поток отдаёт
+  /// `List<OutboundGroup>` из пакета, но через нашу платформенную абстракцию
+  /// (singbox_runtime.dart) он приходит как dynamic, и завязываться на
+  /// конкретный класс пакета здесь нельзя — иначе Windows-реализация
+  /// перестанет компилироваться.
+  String? _groupTagOf(dynamic value) {
+    try {
+      final tag = value.tag;
+      return tag is String && tag.isNotEmpty ? tag : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  List<dynamic> _groupItemsOf(dynamic value) {
+    try {
+      final items = value.items;
+      return items is List ? items : const <dynamic>[];
+    } catch (_) {
+      return const <dynamic>[];
+    }
+  }
+
+  int? _itemDelayOf(dynamic value) {
+    try {
+      final delay = value.urlTestDelayMs;
+      return delay is int ? delay : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 'out-3' -> 3. null для любого чужого тега.
+  int? _indexOfOutboundTag(String tag) {
+    if (!tag.startsWith('out-')) return null;
+    return int.tryParse(tag.substring(4));
+  }
+
   /// Смена страны у уже поднятого туннеля.
   ///
   /// [ПЕРЕРАБОТАНО — "чтобы клиент не замечал переключения сервера"]
