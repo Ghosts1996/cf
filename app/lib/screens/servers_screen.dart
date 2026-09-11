@@ -180,6 +180,11 @@ class _ServersScreenState extends State<ServersScreen> {
   /// без этого реальный пинг текущего сервера появился/пропал бы только на
   /// следующем тике `_pingRefreshTimer` (раз в 25 секунд), а не сразу после
   /// нажатия "Подключить"/"Отключить" на главном экране.
+  void _onTunnelLatencyChanged() {
+    if (!mounted) return;
+    unawaited(_measureThroughTunnel());
+  }
+
   void _onTunnelStatusChangedForPing() {
     if (!mounted) return;
     setState(() {}); // обновить, какая карточка сейчас считается "текущей"
@@ -476,7 +481,12 @@ class _ServersScreenState extends State<ServersScreen> {
   /// начинают работать с правильными числами без единой правки в них.
   Future<void> _measureThroughTunnel() async {
     if (!_tunnel.isConnected) return;
-    final measured = await _tunnel.measureLatenciesThroughTunnel();
+    // [ИЗМЕНЕНО] Экран больше НЕ запускает прогон сам. Единственный
+    // замерщик живёт в TunnelService (см. там `latencyByRemark`): один
+    // таймер, пропуск циклов под нагрузкой, медиана трёх измерений. Раньше
+    // этот экран и главный запускали по прогону каждый — два теста
+    // одновременно по одной группе, и оба мешали друг другу.
+    final measured = _tunnel.latencyByRemark.value;
     if (!mounted || measured.isEmpty) return;
 
     // [ИСПРАВЛЕНО — без этого замер не показал бы НИЧЕГО]
@@ -1006,6 +1016,8 @@ class _ServersScreenState extends State<ServersScreen> {
     // пинг текущего сервера сразу при подключении/отключении, а не только
     // раз в 25 секунд по таймеру.
     _tunnel.status.addListener(_onTunnelStatusChangedForPing);
+    // Новая порция замеров от единого замерщика — перерисовать подписи.
+    _tunnel.latencyByRemark.addListener(_onTunnelLatencyChanged);
     _tunnel.connectedServerName.addListener(_onTunnelStatusChangedForPing);
     unawaited(_measureConnectedTunnelPing());
   }
@@ -1014,6 +1026,7 @@ class _ServersScreenState extends State<ServersScreen> {
   void dispose() {
     _pingRefreshTimer?.cancel();
     _tunnel.status.removeListener(_onTunnelStatusChangedForPing);
+    _tunnel.latencyByRemark.removeListener(_onTunnelLatencyChanged);
     _tunnel.connectedServerName.removeListener(_onTunnelStatusChangedForPing);
     super.dispose();
   }
