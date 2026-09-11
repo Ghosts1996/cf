@@ -129,6 +129,7 @@ class _ConnectScreenState extends State<ConnectScreen>
   void initState() {
     super.initState();
     _tunnel.status.addListener(_onTunnelStatus);
+    _tunnel.latencyByRemark.addListener(_onTunnelLatency);
     // [ИСПРАВЛЕНО v5] Раньше этот экран вообще не слушал SelectedServer —
     // ServerPill всегда показывал захардкоженные 'DE'/'Германия ·
     // Frankfurt', а выбор сервера на ServersScreen никак не влиял на то,
@@ -282,6 +283,7 @@ class _ConnectScreenState extends State<ConnectScreen>
   @override
   void dispose() {
     _tunnel.status.removeListener(_onTunnelStatus);
+    _tunnel.latencyByRemark.removeListener(_onTunnelLatency);
     SelectedServer.hostName.removeListener(_onTunnelStatus);
     SelectedServer.displayName.removeListener(_onTunnelStatus);
     _tunnel.connectedServerName.removeListener(_onTunnelStatus);
@@ -292,6 +294,13 @@ class _ConnectScreenState extends State<ConnectScreen>
     _connectivitySub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _onTunnelLatency() {
+    if (!mounted || !_tunnel.isConnected) return;
+    setState(() {
+      _latencyMs = _tunnel.latencyForHostName(_tunnel.connectedServerName.value);
+    });
   }
 
   void _onTunnelStatus() {
@@ -608,7 +617,16 @@ class _ConnectScreenState extends State<ConnectScreen>
     if (mounted) setState(() => _latencyChecking = true);
     try {
       if (_tunnel.isConnected) {
-        final ms = await _tunnel.connectedDelayMs();
+        // [ИЗМЕНЕНО — "на главном экране одно число, на серверах другое"]
+        // Раньше здесь был собственный пробник через локальный прокси
+        // (`connectedDelayMs`) — третий независимый замер поверх двух
+        // других, со своим методом и своей шкалой. Отсюда "сервер не
+        // отвечает" и "215 мс · медленно" на главном при 70 мс у той же
+        // локации в Hiddify. Теперь главный экран показывает ТО ЖЕ число,
+        // что и список серверов: сглаженный замер единого замерщика в
+        // TunnelService для текущей локации. Если прогона ещё не было —
+        // честно ждём его, а не меряем что-то своё.
+        final ms = _tunnel.latencyForHostName(_tunnel.connectedServerName.value);
         if (mounted) setState(() => _latencyMs = ms);
         return;
       }
