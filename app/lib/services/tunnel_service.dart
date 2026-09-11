@@ -215,6 +215,49 @@ class TunnelService {
   static const _fallbackSelfPackage = 'su.vpnonline.vpnonline_app';
   Future<String?>? _selfPackageFuture;
 
+  // ══════════════════════════════════════════════════════════════════
+  // [НОВОЕ] ЕДИНЫЙ ЗАМЕРЩИК ЗАДЕРЖКИ ПРИ ПОДНЯТОМ ТУННЕЛЕ
+  // ══════════════════════════════════════════════════════════════════
+  //
+  // Почему число на экране "сбивалось" (189 → 246 → 194 → 5520 → 207 мс
+  // у одной и той же локации за несколько минут, при 70-90 у Hiddify по
+  // тому же ключу в ту же минуту):
+  //
+  //  1. Замер запускали ДВА экрана независимо друг от друга: список
+  //     серверов — по своему таймеру, главный экран — своим пробником
+  //     через локальный прокси. Два прогона теста одновременно по одной и
+  //     той же группе outbound'ов, каждый добавляет нагрузку и очередь
+  //     второму.
+  //  2. Пробный запрос идёт по тому же соединению, что и реальный трафик
+  //     пользователя: при включённом Mux (а он включён по умолчанию, см.
+  //     PrefKeys.muxEnabled) ВСЕ потоки outbound'а, включая пробник, лежат
+  //     в одном TCP-соединении. Пока качается видео или голосовое в
+  //     Telegram, пробник стоит в очереди за данными — и честно
+  //     показывает 5520 мс. Это не задержка сервера, это глубина очереди.
+  //  3. Каждое единичное значение сразу попадало на экран: один выброс —
+  //     и автобалансировка могла дёрнуть туннель на другую страну.
+  //
+  // Что сделано: один таймер на весь сервис, один прогон за раз, пауза
+  // между прогонами; цикл пропускается, если в этот момент идёт заметный
+  // трафик (тогда результат заведомо про очередь, а не про сеть);
+  // публикуется медиана трёх последних замеров, а не последний.
+  // Оба экрана только ЧИТАЮТ `latencyByRemark` и ничего не запускают сами.
+
+  /// Задержка до каждой локации подписки, ключ — remark из VLESS-ссылки.
+  /// Значение уже сглажено (медиана трёх последних измерений). Локации,
+  /// до которых ядро не достучалось в последнем прогоне, здесь отсутствуют.
+  final ValueNotifier<Map<String, int>> latencyByRemark =
+      ValueNotifier(const <String, int>{});
+
+  Timer? _latencyProbeTimer;
+  bool _latencyProbeRunning = false;
+  final Map<String, List<int>> _latencySamples = {};
+  static const Duration _latencyProbeInterval = Duration(seconds: 25);
+  static const int _latencySampleWindow = 3;
+  // Выше этой скорости (байт/с в любую сторону) прогон пропускается —
+  // пробник встанет в очередь за реальными данными и измерит не сеть.
+  static const int _latencyProbeBusyBps = 300 * 1024;
+
   // Отложенное стирание сохранённого момента старта сессии — см.
   // _schedulePersistedStartWipe(). null, когда стирание не запланировано.
   Timer? _persistedStartWipeTimer;
@@ -812,6 +855,7 @@ class TunnelService {
   void _restartDurationTicker(bool shouldRun) {
     _durationTicker?.cancel();
     _durationTicker = null;
+    _restartLatencyProbe(shouldRun);
     if (!shouldRun) {
       _lastNativeRxBytes = null;
       _lastNativeTxBytes = null;
@@ -1162,6 +1206,72 @@ class TunnelService {
   ///
   /// [ВАЖНО] `disconnect()` обнуляет `_lastConnectionString` — поэтому
   /// сохраняем его в локальную переменную ДО вызова disconnect().
+  void _restartLatencyProbe(bool shouldRun) {
+    _latencyProbeTimer?.cancel();
+    _latencyProbeTimer = null;
+    if (!shouldRun) {
+      _latencySamples.clear();
+      if (latencyByRemark.value.isNotEmpty) {
+        latencyByRemark.value = const <String, int>{};
+      }
+      return;
+    }
+    if (_sessionOutboundOrder.isEmpty) return; // старый конфиг без группы
+    // Первый прогон — с небольшой задержкой: сразу после подключения
+    // ядро ещё поднимает соединения, и первое измерение всегда завышено.
+    _latencyProbeTimer = Timer(const Duration(seconds: 3), () {
+      unawaited(_runLatencyProbe());
+      _latencyProbeTimer =
+          Timer.periodic(_latencyProbeInterval, (_) => unawaited(_runLatencyProbe()));
+    });
+  }
+
+  Future<void> _runLatencyProbe() async {
+    if (_latencyProbeRunning || !isConnected) return;
+    final current = status.value;
+    if (current != null &&
+        (current.download > _latencyProbeBusyBps ||
+            current.upload > _latencyProbeBusyBps)) {
+      return; // идёт трафик — измерим в следующий раз, а не очередь
+    }
+    _latencyProbeRunning = true;
+    try {
+      final raw = await measureLatenciesThroughTunnel();
+      if (raw.isEmpty) return;
+      final smoothed = <String, int>{};
+      for (final entry in raw.entries) {
+        final samples = _latencySamples.putIfAbsent(entry.key, () => <int>[]);
+        samples.add(entry.value);
+        if (samples.length > _latencySampleWindow) samples.removeAt(0);
+        final sorted = [...samples]..sort();
+        smoothed[entry.key] = sorted[sorted.length ~/ 2]; // медиана
+      }
+      // Локация выпала из прогона — забываем её историю, иначе после
+      // возвращения она унаследует устаревшие значения.
+      _latencySamples.removeWhere((remark, _) => !raw.containsKey(remark));
+      latencyByRemark.value = smoothed;
+    } finally {
+      _latencyProbeRunning = false;
+    }
+  }
+
+  /// Задержка до локации по её имени с экрана (host_name из /hosts).
+  /// Ключи `latencyByRemark` — remark'и подписки ("VPNonLine | 🇩🇪 Германия
+  /// — Франкфурт"), имена на экране — без префикса сервиса; сопоставляем
+  /// по вхождению, как и _matchProfile. Один метод на оба экрана, чтобы
+  /// они не разошлись в логике сопоставления.
+  int? latencyForHostName(String? hostName) {
+    if (hostName == null || hostName.isEmpty) return null;
+    final needle = hostName.toLowerCase().trim();
+    for (final entry in latencyByRemark.value.entries) {
+      final remark = entry.key.toLowerCase();
+      if (remark == needle || remark.contains(needle) || needle.contains(remark)) {
+        return entry.value;
+      }
+    }
+    return null;
+  }
+
   /// [НОВОЕ — "можно ли мерить пинг при включённом VPN"] Да, можно, и это
   /// единственный по-настоящему верный замер из всех, что есть в
   /// приложении.
@@ -1783,6 +1893,9 @@ class TunnelService {
             proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
 
         _sessionOutboundOrder = sessionOrder;
+        // Порядок outbound'ов известен только здесь — тикер, запущенный
+        // событием "connected" чуть раньше, не мог знать, есть ли группа.
+        _restartLatencyProbe(true);
         _lastConnectionString = connectionString;
         _lastPreferredHostName = preferredHostName;
         // [НОВОЕ] Сохраняем маршрут сессии на диск — см. докстринг
@@ -2123,6 +2236,57 @@ class TunnelService {
           'path': (p.transportPath == null || p.transportPath!.isEmpty)
               ? '/'
               : p.transportPath,
+        };
+      } else if (transportType == 'httpupgrade') {
+        // [НОВОЕ] HTTPUpgrade — ближайший к XHTTP транспорт, который это
+        // ядро РЕАЛЬНО умеет (в бинарнике есть и 'v2ray-http-upgrade', и
+        // сам разбор типа 'httpupgrade'). Раньше ключ с `type=httpupgrade`
+        // молча проваливался в ветку "tcp" ниже: блок transport не
+        // добавлялся, и сервер отвергал handshake без внятной причины.
+        outbound['transport'] = {
+          'type': 'httpupgrade',
+          if (p.transportHost != null && p.transportHost!.isNotEmpty)
+            'host': p.transportHost,
+          'path': (p.transportPath == null || p.transportPath!.isEmpty)
+              ? '/'
+              : p.transportPath,
+        };
+      } else if (transportType == 'xhttp') {
+        // [НОВОЕ] XHTTP (в старых панелях — splithttp).
+        //
+        // Ветка срабатывает ТОЛЬКО на ключах с `type=xhttp`. Ни один
+        // существующий ключ (tcp/ws/grpc/http/httpupgrade) сюда не
+        // попадает, поэтому на работающие подключения она не влияет
+        // никак — это и есть требование "не сломать ничего".
+        //
+        // [ЧЕСТНО ПРО СЕГОДНЯШНИЙ ДЕНЬ] Ядро, которое сейчас лежит в
+        // проекте (app/third_party/flutter_singbox_client/android/libs/
+        // libbox.aar, sing-box v1.7.0), этот транспорт НЕ ПОДДЕРЖИВАЕТ: я
+        // разобрал бинарник — строк 'xhttp'/'splithttp' там нет вообще, а
+        // парсер транспорта отвечает "unknown transport type" на всё, кроме
+        // ws / grpc / http / httpupgrade / quic. Значит конфиг с этим
+        // блоком ядро отвергнет на checkConfig, и connect() перейдёт к
+        // следующему серверу, показав ошибку — ровно как с любым другим
+        // неподходящим профилем. Ломается при этом только сам xhttp-ключ,
+        // остальные локации подписки продолжают работать.
+        //
+        // Зачем тогда код: в тот день, когда libbox.aar будет пересобран
+        // на ядре с поддержкой XHTTP, приложение подхватит такие ключи
+        // САМО, без единой правки в Dart. Форма блока — та же, что у
+        // остальных транспортов sing-box: type + host + path (+ mode,
+        // специфичный для XHTTP).
+        outbound['transport'] = {
+          'type': 'xhttp',
+          if (p.transportHost != null && p.transportHost!.isNotEmpty)
+            'host': p.transportHost,
+          'path': (p.transportPath == null || p.transportPath!.isEmpty)
+              ? '/'
+              : p.transportPath,
+          // Режим не подставляем по умолчанию: у XHTTP их четыре
+          // (auto/packet-up/stream-up/stream-one), и выбор за сервером.
+          // Нет в ссылке — пусть ядро решает само.
+          if (p.xhttpMode != null && p.xhttpMode!.isNotEmpty)
+            'mode': p.xhttpMode,
         };
       }
       // transportType == 'tcp' (или неизвестный) — без блока "transport",
@@ -3034,6 +3198,7 @@ class TunnelService {
     _restartDurationTicker(false);
     _cancelPersistedStartWipe();
     _closeDelayProbeClient();
+    latencyByRemark.dispose();
     await _stateSub?.cancel();
     await _statsSub?.cancel();
     await _faultSub?.cancel();
@@ -3107,6 +3272,7 @@ class _ParsedVless {
     this.spx,
     this.alpn,
     this.transportType,
+    this.xhttpMode,
     this.transportHost,
     this.transportPath,
     required this.remark,
@@ -3124,7 +3290,9 @@ class _ParsedVless {
   final String? spx; // SpiderX (путь для Reality)
   final String? alpn; // ALPN, через запятую
   final String?
-      transportType; // tcp | ws | grpc | http (headerType/type в ссылке)
+      transportType; // tcp | ws | grpc | http | httpupgrade | xhttp
+  /// Режим XHTTP из параметра `mode` ссылки. null — не задан.
+  final String? xhttpMode;
   final String? transportHost; // Host-заголовок для ws/http-маскировки
   final String? transportPath; // path для ws / service_name-путь для grpc
   final String remark; // Имя сервера
@@ -3162,6 +3330,15 @@ class _ParsedVless {
       // "http" в поле type у Xray-совместимых ссылок означает HTTP-маскировку поверх tcp,
       // для sing-box это соответствует transport type "http".
       final transportType = rawType.isEmpty ? 'tcp' : rawType;
+      // [НОВОЕ] XHTTP исторически звался splithttp — в старых панелях и
+      // ссылках встречаются оба имени. Приводим к одному, чтобы дальше по
+      // коду была ровно одна ветка, а не две одинаковые.
+      final normalizedTransport =
+          transportType == 'splithttp' ? 'xhttp' : transportType;
+      // Режим XHTTP: auto | packet-up | stream-up | stream-one. В ссылке
+      // лежит в параметре `mode`. Пустое значение оставляем пустым — ядро
+      // подставит своё умолчание само, а выдумывать за него нельзя.
+      final xhttpMode = (q['mode'] ?? '').trim();
 
       // [ИСПРАВЛЕНО] Если security=reality, а поле pbk (публичный ключ)
       // отсутствует или пустое — раньше это тихо уходило в нативный
@@ -3189,7 +3366,8 @@ class _ParsedVless {
         flow: q['flow'],
         spx: q['spx'],
         alpn: q['alpn'],
-        transportType: transportType,
+        transportType: normalizedTransport,
+        xhttpMode: xhttpMode.isEmpty ? null : xhttpMode,
         transportHost: q['host'],
         transportPath: q['path'] ?? q['serviceName'],
         remark: remark,
