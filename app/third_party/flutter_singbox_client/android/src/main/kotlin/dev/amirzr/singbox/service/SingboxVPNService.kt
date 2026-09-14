@@ -29,6 +29,12 @@ class SingboxVPNService : VpnService(), BoxPlatformInterface {
     companion object {
         private const val TAG = "SingboxVPNService"
 
+        // Published to the system as the VPN's resolvers. Their traffic is
+        // intercepted by sing-box (`hijack-dns`) and never reaches these
+        // addresses; they only have to look like a valid resolver to Android.
+        private const val VPN_DNS_V4 = "1.1.1.1"
+        private const val VPN_DNS_V6 = "2606:4700:4700::1111"
+
         @Volatile
         var instance: SingboxVPNService? = null
             private set
@@ -153,16 +159,32 @@ class SingboxVPNService : VpnService(), BoxPlatformInterface {
         val inet4 = options.inet4Address
         while (inet4.hasNext()) { val a = inet4.next(); runCatching { builder.addAddress(a.address(), a.prefix()) } }
         val inet6 = options.inet6Address
-        while (inet6.hasNext()) { val a = inet6.next(); runCatching { builder.addAddress(a.address(), a.prefix()) } }
+        // Итератор libbox одноразовый: пройденный здесь, ниже он уже пуст,
+        // поэтому наличие IPv6 запоминаем флагом.
+        var hasInet6 = false
+        while (inet6.hasNext()) {
+            val a = inet6.next()
+            hasInet6 = true
+            runCatching { builder.addAddress(a.address(), a.prefix()) }
+        }
 
         if (options.autoRoute) {
-            // Do not publish libbox's synthetic TUN address as an Android DNS
-            // server. It has no daemon listening on port 853, yet Android's
-            // resolver validates it as DNS-over-TLS and blocks all hostname
-            // resolution after the validation fails. Leaving the DNS list
-            // unset keeps the system resolver's working underlying DNS; its
-            // port-53 traffic is transparently handled by sing-box's explicit
-            // `hijack-dns` route rule in the app configuration.
+            // A VPN that publishes no DNS server at all is a dead end on the
+            // ROMs that do not fall back to the underlying network's resolvers:
+            // apps get no resolver, every hostname fails, and the tunnel looks
+            // "connected" while nothing loads.
+            //
+            // libbox's own synthetic TUN address is not used here on purpose:
+            // nothing listens on its port 853, and Android's Private DNS
+            // probe validates the VPN resolver as DNS-over-TLS first — the
+            // failed probe then blocks resolution outright. A real public
+            // resolver address has no such problem: the probe succeeds, and
+            // the queries themselves never leave the device anyway, because
+            // the route rule `hijack-dns` picks them up inside sing-box and
+            // answers them from the configured DNS block.
+            val dnsServers = mutableListOf(VPN_DNS_V4)
+            if (hasInet6) dnsServers.add(VPN_DNS_V6)
+            dnsServers.forEach { runCatching { builder.addDnsServer(it) } }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val r4 = options.inet4RouteAddress
