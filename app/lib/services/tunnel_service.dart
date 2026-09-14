@@ -1017,14 +1017,29 @@ class TunnelService {
   /// security и sni, ServersScreen делает поверх TCP настоящее
   /// TLS-рукопожатие для профилей с `security=tls`; для `security=reality`
   /// проверить с клиента нельзя в принципе (см. servers_screen.dart).
-  Future<Map<String, ({String host, int port, String security, String? sni})>>
+  Future<
+          Map<String,
+              ({String host, int port, String security, String? sni, String transport})>>
       listProfileEndpoints(String connectionString) async {
     try {
       final profiles = await _loadProfiles(connectionString);
-      final result = <String, ({String host, int port, String security, String? sni})>{};
+      final result = <String,
+          ({
+            String host,
+            int port,
+            String security,
+            String? sni,
+            String transport
+          })>{};
       for (final p in profiles) {
         if (p.remark.isEmpty) continue;
-        result[p.remark] = (host: p.host, port: p.port, security: p.security, sni: p.sni);
+        result[p.remark] = (
+          host: p.host,
+          port: p.port,
+          security: p.security,
+          sni: p.sni,
+          transport: p.transportType ?? 'tcp',
+        );
       }
       return result;
     } catch (_) {
@@ -1063,7 +1078,6 @@ class TunnelService {
     _latencyProbeRunning = true;
     try {
       final raw = await measureLatenciesThroughTunnel();
-      if (raw.isEmpty) return;
       final smoothed = <String, int>{};
       for (final entry in raw.entries) {
         final samples = _latencySamples.putIfAbsent(entry.key, () => <int>[]);
@@ -1083,8 +1097,12 @@ class TunnelService {
       // соединению, то есть меряет чистый круговой путь — ровно то число,
       // которое показывает Hiddify.
       final currentName = connectedServerName.value;
-      if (currentName != null && smoothed.containsKey(currentName)) {
+      if (currentName != null && currentName.isNotEmpty) {
         final warm = await connectedDelayMs();
+        // Именно безусловно, а не «уточнить, если URLTest что-то дал»: URLTest
+        // ядра для группы-селектора может не вернуть ничего или вернуть код
+        // отказа, и тогда на главном экране висело «сервер не отвечает на
+        // проверку задержки» при работающем туннеле.
         if (warm != null && warm > 0) smoothed[currentName] = warm;
       }
       latencyByRemark.value = smoothed;
@@ -2045,6 +2063,16 @@ class TunnelService {
       return const RealCheckResult(
           ok: false, error: 'Локация не найдена в подписке.');
     }
+    // Транспорт, которого ядро не знает, отсекаем здесь: иначе проверка
+    // упиралась бы в отказ ядра на этапе разбора конфига и сообщала
+    // «конфигурация отклонена» вместо внятной причины.
+    if (!await _isProfileSupported(profile)) {
+      return RealCheckResult(
+        ok: false,
+        error: 'Транспорт ${profile.transportType ?? "?"} не поддерживается '
+            'установленным ядром',
+      );
+    }
 
     // proxyOnly обязательно true: только он добавляет в конфиг локальный
     // inbound на 127.0.0.1:$_proxyPort, без которого
@@ -2756,6 +2784,15 @@ class TunnelService {
           'enabled': true,
           if (fakeIpDns) 'store_fakeip': true,
         },
+        // Счётчики «принято/отдано» ядро ведёт внутри Clash API: без этого
+        // блока оно вообще не считает трафик и отдаёт нули, отчего на главном
+        // экране при живом туннеле вечно висело «0 MB».
+        //
+        // `external_controller` намеренно пустой: тогда ядро заводит счётчики,
+        // но не открывает управляющий порт. Открытый порт здесь не нужен, а
+        // при перезапуске сессии он ещё и занят предыдущей — ядро падало бы
+        // на старте.
+        'clash_api': {'external_controller': ''},
       },
     };
 

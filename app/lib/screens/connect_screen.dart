@@ -168,7 +168,7 @@ class _ConnectScreenState extends State<ConnectScreen>
     final justJoinedWifi = onWifi && !previous;
     if (!justJoinedWifi) return;
     final smartWifi =
-        await LocalPrefs.instance.getBool(PrefKeys.smartWifi, fallback: true);
+        await LocalPrefs.instance.getBool(PrefKeys.smartWifi, fallback: false);
     if (!smartWifi || !mounted) return;
     // Как и при автоподключении на старте: пока реальное состояние туннеля
     // неизвестно, поднимать соединение вслепую нельзя.
