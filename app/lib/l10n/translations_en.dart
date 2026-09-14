@@ -229,6 +229,8 @@ const Map<String, String> translationsEn = {
   'Пополнить': 'Top up',
 
   // ── keys_screen.dart ────────────────────────────────────────────────────
+  'Ядро не поддерживает транспорт этих локаций — подключиться к ним не получится:':
+      'The core does not support the transport of these locations — you will not be able to connect to them:',
   'Похоже на неверную ссылку — жду vless://... или http(s)://ссылку на подписку':
       'That looks like an invalid link — expected a vless://... link or an http(s):// subscription link',
   'Ручной ключ удалён': 'Manual key removed',

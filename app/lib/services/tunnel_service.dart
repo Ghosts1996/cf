@@ -2657,10 +2657,18 @@ class TunnelService {
     try {
       final profiles =
           await _loadProfiles(connectionString, forceRefresh: true);
+      String nameOf(_ParsedVless p) => p.remark.isNotEmpty ? p.remark : p.host;
+      // Локации с транспортом, которого ядро не знает, в список рабочих не
+      // попадают: подключиться к ним всё равно не получится (см.
+      // _isTransportSupported), и показывать их зелёной галочкой было бы
+      // обманом.
       return SubscriptionCheckResult(
         ok: true,
-        serverNames: profiles
-            .map((p) => p.remark.isNotEmpty ? p.remark : p.host)
+        serverNames:
+            profiles.where(_isTransportSupported).map(nameOf).toList(),
+        unsupportedServerNames: profiles
+            .where((p) => !_isTransportSupported(p))
+            .map((p) => '${nameOf(p)} (${p.transportType})')
             .toList(),
       );
     } on TunnelException catch (e) {
@@ -2749,13 +2757,20 @@ class TunnelService {
   }
 }
 
-/// Результат `TunnelService.checkSubscription()`. `serverNames` заполнен
-/// только когда `ok == true`.
+/// Результат `TunnelService.checkSubscription()`. Списки заполнены только
+/// когда `ok == true`: `serverNames` — локации, к которым ядро реально может
+/// подключиться, `unsupportedServerNames` — те, чей транспорт оно не знает
+/// (сегодня это XHTTP), с указанием транспорта в скобках.
 class SubscriptionCheckResult {
-  SubscriptionCheckResult(
-      {required this.ok, this.serverNames = const [], this.error});
+  SubscriptionCheckResult({
+    required this.ok,
+    this.serverNames = const [],
+    this.unsupportedServerNames = const [],
+    this.error,
+  });
   final bool ok;
   final List<String> serverNames;
+  final List<String> unsupportedServerNames;
   final String? error;
   int get serverCount => serverNames.length;
 }

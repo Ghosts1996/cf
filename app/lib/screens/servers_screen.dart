@@ -972,9 +972,14 @@ class _ServersScreenState extends State<ServersScreen> {
     final trimmed = name.trim();
     if (trimmed.isEmpty) return '??';
     final firstWord = trimmed.split(RegExp(r'\s+')).first;
-    return firstWord.length >= 2
-        ? firstWord.substring(0, 2).toUpperCase()
-        : firstWord.toUpperCase();
+    // Имена локаций начинаются с эмодзи-флага, а каждая его половина занимает
+    // в UTF-16 две кодовые единицы: substring(0, 2) разрезал флаг пополам и
+    // выводил одинокий региональный индикатор вместо "DE". Считаем по рунам,
+    // а сам флаг показываем целиком — он читается лучше любых двух букв.
+    final runes = firstWord.runes.toList();
+    if (runes.isEmpty) return '??';
+    final code = String.fromCharCodes(runes.take(2));
+    return runes.first > 0xFFFF ? code : code.toUpperCase();
   }
 
   @override

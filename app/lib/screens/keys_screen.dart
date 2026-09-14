@@ -101,18 +101,39 @@ class _KeysScreenState extends State<KeysScreen> {
             width: double.maxFinite,
             child: ListView(
               shrinkWrap: true,
-              children: result.serverNames
-                  .map((name) => Padding(
+              children: [
+                ...result.serverNames.map((name) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.check_circle_rounded, size: 16, color: AppColors.success),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(name, style: const TextStyle(fontSize: 13))),
+                        ],
+                      ),
+                    )),
+                // Локации, чей транспорт ядро не поддерживает, показываем
+                // отдельно: они есть в подписке, но подключение к ним не
+                // поднимется, и молчать об этом хуже, чем показать причину.
+                if (result.unsupportedServerNames.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    tr('Ядро не поддерживает транспорт этих локаций — подключиться к ним не получится:'),
+                    style: const TextStyle(fontSize: 12, color: AppColors.textDim),
+                  ),
+                  const SizedBox(height: 6),
+                  ...result.unsupportedServerNames.map((name) => Padding(
                         padding: const EdgeInsets.symmetric(vertical: 4),
                         child: Row(
                           children: [
-                            const Icon(Icons.check_circle_rounded, size: 16, color: AppColors.success),
+                            const Icon(Icons.error_outline_rounded, size: 16, color: AppColors.danger),
                             const SizedBox(width: 8),
                             Expanded(child: Text(name, style: const TextStyle(fontSize: 13))),
                           ],
                         ),
-                      ))
-                  .toList(),
+                      )),
+                ],
+              ],
             ),
           ),
           actions: [
