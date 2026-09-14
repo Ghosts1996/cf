@@ -19,7 +19,7 @@ on:
   # push, который меняет сам этот файл в ветке с XHTTP. Чтобы пересобрать
   # ядро, достаточно тронуть комментарий ниже и запушить.
   #
-  # Пересборка № 2
+  # Пересборка № 3
   push:
     branches: [ claude/xhttp-support ]
     paths: [ '.github/workflows/build-xhttp-core.yml' ]
@@ -57,14 +57,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Часть зависимостей ядра подключена подмодулями (psiphon-tls,
+      # wireguard-go, tailscale), и go.mod ссылается на них через replace на
+      # локальные пути. Без подмодулей сборка падает на чтении их go.mod.
+      # В .gitmodules адреса записаны через SSH — в CI ключа нет, поэтому
+      # переписываем их на https.
       - name: Clone core
         run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
           git clone https://github.com/hiddify/hiddify-sing-box.git core
           cd core
           git checkout "${{ inputs.core_ref || '8d94f445c72dfb704f2ed4d2984dcefc79362e66' }}"
+          git submodule update --init --recursive --depth 1
           echo "CORE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           grep -q 'V2RayTransportTypeXHTTP' constant/v2ray.go \
             || { echo "::error::в этой ревизии ядра нет XHTTP"; exit 1; }
+          for m in psiphon-tls wireguard-go tailscale psiphon-quic-go; do
+            test -f "replace/$m/go.mod" || { echo "::error::подмодуль replace/$m не выкачался"; exit 1; }
+          done
 
       # Версию Go берём из go.mod самого ядра: там она опережает стабильную в
       # образе раннера, а сборка с более старой падает на этапе разбора модуля.
