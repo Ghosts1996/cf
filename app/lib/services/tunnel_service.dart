@@ -948,7 +948,8 @@ class TunnelService {
   /// Блокировка описана через `action`-правила, а не через outbound'ы `block`
   /// и `dns` — те объявлены устаревшими в sing-box 1.11 и удаляются в 1.13,
   /// то есть на более новом ядре строгий Kill Switch просто перестал бы
-  /// подниматься.
+  /// подниматься. Оба варианта проверены на собранных ядрах: этот принимают
+  /// и 1.12, и форк на 1.13, причём без предупреждений.
   String _buildBlockAllConfig() {
     final config = <String, dynamic>{
       'log': {'level': 'warn'},
@@ -968,8 +969,9 @@ class TunnelService {
           'stack': 'mixed',
           'auto_route': true,
           'endpoint_independent_nat': true,
-          // hijack-dns требует явный IPv4-адрес интерфейса — без него ядро
-          // не стартует, как и в основном конфиге.
+          // hijack-dns на Android требует явный IPv4-адрес интерфейса — без
+          // него ядро откажется стартовать ("need one more IPv4 address for
+          // DNS hijacking"), как и в основном конфиге.
           'address': ['172.19.0.1/28'],
         },
       ],
@@ -1458,6 +1460,142 @@ class TunnelService {
     return type.isEmpty || _supportedTransports.contains(type);
   }
 
+  // Что ядро умеет сверх базового списка, спрашиваем у него самого: отдаём на
+  // checkConfig минимальный конфиг с нужным транспортом — ядро разбирает
+  // схему, ничего не запуская. Так одна и та же сборка приложения работает и
+  // со штатным ядром (XHTTP отсеивается, как и раньше), и с ядром на форке
+  // hiddify-sing-box (XHTTP используется), без флагов сборки и версий в коде.
+  final Map<String, bool> _transportSupport = {};
+  bool? _probeConfigUsable;
+
+  /// Умеет ли установленное ядро транспорт [type]. Результат кэшируется на
+  /// время жизни процесса: ядро внутри одной сессии не меняется.
+  Future<bool> _coreSupportsTransport(String type) async {
+    final normalized = _normalizeTransportType(type);
+    if (_supportedTransports.contains(normalized)) return true;
+    final cached = _transportSupport[normalized];
+    if (cached != null) return cached;
+
+    try {
+      await _ensureInitialized();
+      // Контрольный прогон: убеждаемся, что сама форма пробного конфига ядру
+      // нравится. Иначе отказ по постороннему поводу (не та схема, не тот
+      // набор обязательных полей) мы приняли бы за "транспорт не поддержан".
+      _probeConfigUsable ??= await _checkProbeConfig('ws');
+      if (_probeConfigUsable != true) {
+        _transportSupport[normalized] = false;
+        return false;
+      }
+      final supported = await _checkProbeConfig(normalized);
+      _transportSupport[normalized] = supported;
+      return supported;
+    } catch (_) {
+      // Ядро не ответило — не выдаём желаемое за действительное: считаем, что
+      // транспорта нет, и профиль просто не попадёт в конфиг.
+      _transportSupport[normalized] = false;
+      return false;
+    }
+  }
+
+  /// Умеет ли ядро фрагментировать собственное TLS-рукопожатие к серверу
+  /// (`tls_fragment` на диалере outbound'а). Это есть в форке
+  /// hiddify-sing-box и нет в апстриме, поэтому спрашиваем у ядра так же, как
+  /// про транспорты, — пробным конфигом.
+  bool? _tlsFragmentSupport;
+
+  Future<bool> _coreSupportsTlsFragment() async {
+    final cached = _tlsFragmentSupport;
+    if (cached != null) return cached;
+    try {
+      await _ensureInitialized();
+      final supported = await _checkConfigQuietly(jsonEncode({
+        'log': {'level': 'error'},
+        'outbounds': [
+          {
+            'type': 'vless',
+            'tag': 'probe',
+            'server': '127.0.0.1',
+            'server_port': 443,
+            'uuid': '00000000-0000-0000-0000-000000000000',
+            'tls_fragment': _tlsFragmentOptions,
+          }
+        ],
+      }));
+      _tlsFragmentSupport = supported;
+      return supported;
+    } catch (_) {
+      _tlsFragmentSupport = false;
+      return false;
+    }
+  }
+
+  /// Параметры фрагментации — те же, что по умолчанию у Hiddify: рвать
+  /// ClientHello на куски по 10-100 байт с паузой 50-200 мс между ними.
+  /// Именно ClientHello видит DPI, когда решает, пропускать ли соединение.
+  static const Map<String, dynamic> _tlsFragmentOptions = {
+    'enabled': true,
+    'size': '10-100',
+    'sleep': '50-200',
+    'method': 'tlsHello',
+  };
+
+  Future<bool> _checkConfigQuietly(String config) async {
+    try {
+      await _client.checkConfig(config).timeout(_nativeCallTimeout);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> _checkProbeConfig(String type) async {
+    try {
+      await _client
+          .checkConfig(_buildTransportProbeConfig(type))
+          .timeout(_nativeCallTimeout);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Минимальный конфиг ровно с одним vless-outbound'ом нужного транспорта:
+  /// ни tun-инбаунда, ни DNS, ни маршрутов — чтобы отказ мог означать только
+  /// одно, неизвестный транспорт.
+  String _buildTransportProbeConfig(String type) {
+    return jsonEncode({
+      'log': {'level': 'error'},
+      'outbounds': [
+        {
+          'type': 'vless',
+          'tag': 'probe',
+          'server': '127.0.0.1',
+          'server_port': 443,
+          'uuid': '00000000-0000-0000-0000-000000000000',
+          'transport': {
+            'type': type,
+            'path': '/',
+            // XHTTP требует mode даже на проверке конфига: без него ядро с
+            // поддержкой транспорта ответит "xhttp: mode is not set", и мы
+            // ошибочно решили бы, что транспорта нет.
+            if (type == 'xhttp') 'mode': 'auto',
+          },
+        },
+        {'type': 'direct', 'tag': 'direct'},
+      ],
+      'route': {'final': 'probe'},
+    });
+  }
+
+  /// Пройдёт ли профиль в конфиг: базовый список транспортов плюс то, что
+  /// ядро подтвердило само (см. [_coreSupportsTransport]).
+  Future<bool> _isProfileSupported(_ParsedVless p) async {
+    if (_isTransportSupported(p)) return true;
+    final type = (p.transportType ?? '').trim();
+    if (type.isEmpty) return true;
+    return _coreSupportsTransport(type);
+  }
+
   _ParsedVless? _matchProfile(List<_ParsedVless> profiles, String? hostName) {
     if (hostName == null || hostName.isEmpty) return null;
     final needle = hostName.trim().toLowerCase();
@@ -1589,6 +1727,11 @@ class TunnelService {
         await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: false);
     final ipv6Enabled = await LocalPrefs.instance
         .getBool(PrefKeys.ipv6Enabled, fallback: false);
+    // Спрашиваем у ядра один раз за запуск: умеет ли оно рвать собственное
+    // рукопожатие. На штатном ядре — нет, и «Обход DPI» остаётся прежним
+    // правилом маршрутизации.
+    final tlsFragmentSupported =
+        dpiBypass ? await _coreSupportsTlsFragment() : false;
     // См. PrefKeys.excludeAppFromTunnel. При fallback false список исключений
     // ниже остаётся пустым и конфиг собирается ровно такой же, как без этой
     // настройки.
@@ -1645,7 +1788,10 @@ class TunnelService {
     // конфиг проверяется целиком, поэтому одна такая запись в подписке
     // отправила бы в отказ и группу-селектор со всеми остальными серверами
     // (см. _isTransportSupported). Отсеиваем её до сборки конфига.
-    final usable = ordered.where(_isTransportSupported).toList();
+    final usable = <_ParsedVless>[];
+    for (final profile in ordered) {
+      if (await _isProfileSupported(profile)) usable.add(profile);
+    }
     final skippedCount = ordered.length - usable.length;
     // Состав подписки — в журнал. Без этого при разборе «не работает» неясно
     // главное: какие транспорты раздаёт панель, что из этого ядро умеет и к
@@ -1657,9 +1803,10 @@ class TunnelService {
         '${skippedCount > 0 ? '; пропущено ядром: $skippedCount' : ''}'));
     if (usable.isEmpty) {
       throw TunnelException(
-        'В подписке нет серверов с транспортом, который поддерживает ядро '
-        'sing-box: все ${ordered.length} используют XHTTP или другой '
-        'неизвестный ядру транспорт.',
+        'В подписке нет серверов с транспортом, который поддерживает ядро: '
+        'все ${ordered.length} используют XHTTP или другой неизвестный ядру '
+        'транспорт. Чтобы такие ключи заработали, нужно ядро с их поддержкой '
+        '(см. app/XHTTP_CORE.md) или инбаунд на панели с ws/httpupgrade.',
       );
     }
 
@@ -1690,6 +1837,7 @@ class TunnelService {
           muxProtocol: muxProtocol,
           fakeIpDns: fakeIpDns,
           ipv6Enabled: ipv6Enabled,
+          tlsFragmentSupported: tlsFragmentSupported,
           alternates: alternates,
         );
         // Если сборка ядра не переваривает группу-селектор, конфиг отвергается
@@ -1719,6 +1867,7 @@ class TunnelService {
             muxProtocol: muxProtocol,
             fakeIpDns: fakeIpDns,
             ipv6Enabled: ipv6Enabled,
+            tlsFragmentSupported: tlsFragmentSupported,
           );
           await _client.checkConfig(config);
         }
@@ -2069,6 +2218,129 @@ class TunnelService {
     return masked;
   }
 
+  /// Блок `transport` для XHTTP.
+  ///
+  /// Схема повторяет hiddify-sing-box (`option.V2RayXHTTPOptions`), а он, в
+  /// свою очередь, повторяет Xray: поля идут в camelCase (`xPaddingBytes`,
+  /// `scMaxEachPostBytes`, `downloadSettings`), а не в snake_case, как в
+  /// остальном конфиге sing-box. Значения из параметра `extra` ссылки
+  /// переносятся как есть — ядро само отбросит то, чего не знает; host и path
+  /// берутся из ссылки, только если в extra их нет.
+  static Map<String, dynamic> _buildXhttpTransport(_ParsedVless p) {
+    final transport = <String, dynamic>{'type': 'xhttp'};
+    final extra = p.xhttpExtra;
+    if (extra != null) {
+      for (final entry in extra.entries) {
+        if (entry.key == 'downloadSettings' || entry.value == null) continue;
+        transport[entry.key] = entry.value;
+      }
+    }
+
+    // Режимов у XHTTP четыре: auto, packet-up, stream-up, stream-one. Поле
+    // обязательное — без него ядро отвергает конфиг ("xhttp: mode is not
+    // set"), поэтому при отсутствии в ссылке ставим auto, как это делает
+    // Hiddify (ray2sing: getOneOfN(decoded, "auto", "mode")).
+    final mode = (p.xhttpMode ?? (extra?['mode'] as String?) ?? '').trim();
+    transport['mode'] = mode.isNotEmpty ? mode : 'auto';
+
+    final host = (transport['host'] as String?)?.trim() ?? '';
+    if (host.isEmpty) {
+      if (p.transportHost != null && p.transportHost!.isNotEmpty) {
+        transport['host'] = p.transportHost;
+      } else {
+        transport.remove('host');
+      }
+    }
+
+    final path = (transport['path'] as String?)?.trim() ?? '';
+    if (path.isEmpty) {
+      transport['path'] =
+          (p.transportPath == null || p.transportPath!.isEmpty) ? '/' : p.transportPath;
+    }
+
+    final download = extra?['downloadSettings'];
+    if (download is Map<String, dynamic>) {
+      final converted = _buildXhttpDownload(download, transport);
+      if (converted != null) transport['downloadSettings'] = converted;
+    }
+    return transport;
+  }
+
+  /// `downloadSettings` в XHTTP описывает отдельный канал для скачивания:
+  /// свой адрес, порт и TLS. Xray хранит его в собственном формате
+  /// (`address`/`port`/`security`/`tlsSettings`/`realitySettings`), а ядру
+  /// нужны `server`/`server_port` и блок `tls` как у обычного outbound'а —
+  /// переводим одно в другое, остальные поля XHTTP переносим как есть.
+  static Map<String, dynamic>? _buildXhttpDownload(
+      Map<String, dynamic> download, Map<String, dynamic> upload) {
+    const converted = {
+      'address',
+      'port',
+      'security',
+      'tlsSettings',
+      'realitySettings',
+      'network',
+      'downloadSettings',
+    };
+    final result = <String, dynamic>{};
+    for (final entry in download.entries) {
+      if (converted.contains(entry.key) || entry.value == null) continue;
+      result[entry.key] = entry.value;
+    }
+    if (((result['path'] as String?) ?? '').trim().isEmpty) {
+      final uploadPath = upload['path'];
+      if (uploadPath is String && uploadPath.isNotEmpty) result['path'] = uploadPath;
+    }
+
+    final server = (download['address'] as String?)?.trim();
+    if (server != null && server.isNotEmpty) result['server'] = server;
+    final port = (download['port'] as num?)?.toInt();
+    if (port != null && port > 0) result['server_port'] = port;
+
+    final security = (download['security'] as String?)?.toLowerCase();
+    final reality = download['realitySettings'];
+    final tlsSettings = download['tlsSettings'];
+    if (security == 'reality' && reality is Map<String, dynamic>) {
+      final publicKey = reality['publicKey'] ?? reality['public_key'];
+      // reality без публичного ключа ядро не примет — тот же случай, что и в
+      // _ParsedVless.tryParse: лучше отдать канал без TLS-блока, чем конфиг,
+      // который не пройдёт проверку.
+      if (publicKey is String && publicKey.isNotEmpty) {
+        final shortId = reality['shortId'] ?? reality['short_id'];
+        final serverName = reality['serverName'] ?? reality['server_name'];
+        final fingerprint = reality['fingerprint'];
+        result['tls'] = <String, dynamic>{
+          'enabled': true,
+          if (serverName is String && serverName.isNotEmpty)
+            'server_name': serverName,
+          'utls': {
+            'enabled': true,
+            'fingerprint':
+                (fingerprint is String && fingerprint.isNotEmpty) ? fingerprint : 'chrome',
+          },
+          'reality': {
+            'enabled': true,
+            'public_key': publicKey,
+            if (shortId is String && shortId.isNotEmpty) 'short_id': shortId,
+          },
+        };
+      }
+    } else if (security == 'tls' && tlsSettings is Map<String, dynamic>) {
+      final serverName = tlsSettings['serverName'] ?? tlsSettings['server_name'];
+      final alpn = tlsSettings['alpn'];
+      final fingerprint = tlsSettings['fingerprint'];
+      result['tls'] = <String, dynamic>{
+        'enabled': true,
+        if (serverName is String && serverName.isNotEmpty) 'server_name': serverName,
+        if (alpn is List && alpn.isNotEmpty) 'alpn': alpn,
+        if (tlsSettings['allowInsecure'] == true) 'insecure': true,
+        if (fingerprint is String && fingerprint.isNotEmpty)
+          'utls': {'enabled': true, 'fingerprint': fingerprint},
+      };
+    }
+    return result.isEmpty ? null : result;
+  }
+
   String _buildSingBoxConfig(
     _ParsedVless p, {
     required bool dnsProtection,
@@ -2090,6 +2362,9 @@ class TunnelService {
     String muxProtocol = 'h2mux',
     bool fakeIpDns = false,
     bool ipv6Enabled = false,
+    // Умеет ли ядро фрагментировать собственное рукопожатие (см.
+    // _coreSupportsTlsFragment). От этого зависит, чем включается «Обход DPI».
+    bool tlsFragmentSupported = false,
     // Остальные локации подписки. Пустой список означает один outbound и
     // никакой группы — см. построение `outbounds` ниже.
     List<_ParsedVless> alternates = const <_ParsedVless>[],
@@ -2113,6 +2388,14 @@ class TunnelService {
         // Hiddify подставляет xudp всегда, когда в ссылке нет packetEncoding
         // (ray2sing/vless.go).
         'packet_encoding': p.packetEncoding ?? 'xudp',
+        // «Обход DPI» в том виде, в каком он вообще что-то значит: рвётся на
+        // куски наше собственное TLS-рукопожатие к VLESS-серверу — то самое,
+        // по которому DPI решает, пропускать соединение или нет. Правило
+        // маршрутизации с tls_fragment, которое стояло здесь раньше, рвало
+        // рукопожатия уже внутри туннеля: для обхода блокировки бесполезно,
+        // потому что снаружи видно только внешнее соединение.
+        if (dpiBypass && tlsFragmentSupported)
+          'tls_fragment': _tlsFragmentOptions,
         // Mux (PrefKeys.muxEnabled) по умолчанию выключен — как и в Hiddify.
         // Мультиплексор sing-box (smux/yamux/h2mux) понимает только сервер на
         // sing-box; Xray за ним не следует, и обёрнутое соединение рвётся
@@ -2213,29 +2496,11 @@ class TunnelService {
           'path': _splitEarlyData(p.transportPath).path,
         };
       } else if (transportType == 'xhttp') {
-        // XHTTP (в старых панелях — splithttp).
-        //
-        // Ядро, которое лежит в проекте (libbox.aar), этот транспорт не
-        // поддерживает: XHTTP — транспорт Xray-core, в sing-box его нет, а
-        // парсер отвечает "unknown transport type" на всё, кроме
-        // ws / grpc / http / httpupgrade / quic. Поэтому такие профили
-        // отсеиваются раньше, в _connectInternal (см. _isTransportSupported),
-        // и сюда в обычной работе не доходят — блок остаётся заготовкой на
-        // случай, когда ядро с поддержкой XHTTP появится: форма та же, что у
-        // остальных транспортов sing-box (type + host + path + mode).
-        outbound['transport'] = {
-          'type': 'xhttp',
-          if (p.transportHost != null && p.transportHost!.isNotEmpty)
-            'host': p.transportHost,
-          'path': (p.transportPath == null || p.transportPath!.isEmpty)
-              ? '/'
-              : p.transportPath,
-          // Режим не подставляем по умолчанию: у XHTTP их четыре
-          // (auto/packet-up/stream-up/stream-one), и выбор за сервером.
-          // Нет в ссылке — пусть ядро решает само.
-          if (p.xhttpMode != null && p.xhttpMode!.isNotEmpty)
-            'mode': p.xhttpMode,
-        };
+        // XHTTP (в старых панелях — splithttp). Апстримный sing-box этого
+        // транспорта не знает, его понимает только форк, на котором работает
+        // Hiddify (hiddify-sing-box). Профиль доходит сюда, только если ядро
+        // подтвердило поддержку — см. _coreSupportsTransport().
+        outbound['transport'] = _buildXhttpTransport(p);
       }
       // transportType == 'tcp' (или неизвестный) — без блока "transport",
       // как и раньше: sing-box по умолчанию использует голый TCP.
@@ -2323,10 +2588,12 @@ class TunnelService {
       if (bypassLan)
         {'ip_is_private': true, 'action': 'route', 'outbound': 'direct'},
       if (blockAds) {'domain_suffix': _adBlockDomains, 'action': 'reject'},
-      // В sing-box 1.14 `tls_fragment` — булева опция route-action. Объект
-      // `{enabled: true}` не соответствует схеме ядра и отклоняется на
-      // checkConfig() с INVALID_CONFIG.
-      if (dpiBypass)
+      // Запасной вариант для ядра без фрагментации на outbound'е: правило
+      // маршрутизации с булевым tls_fragment. Оно рвёт рукопожатия внутри
+      // туннеля, а не наше собственное, и от блокировки по ClientHello не
+      // спасает — но и вреда не делает, а на части сетей помогает сайтам,
+      // которые режет уже сам провайдер за пределами туннеля.
+      if (dpiBypass && !tlsFragmentSupported)
         {
           'network': 'tcp',
           'action': 'route',
@@ -2513,6 +2780,7 @@ class TunnelService {
     bool fakeIpDns = false,
     bool bypassLan = false,
     bool ipv6Enabled = false,
+    bool tlsFragmentSupported = false,
     bool dnsProtection = true,
     String dnsProvider = 'cloudflare',
     String? customDns,
@@ -2547,6 +2815,7 @@ class TunnelService {
       muxProtocol: muxProtocol,
       fakeIpDns: fakeIpDns,
       ipv6Enabled: ipv6Enabled,
+      tlsFragmentSupported: tlsFragmentSupported,
       alternates: alternates,
     );
   }
@@ -3045,17 +3314,21 @@ class TunnelService {
           await _loadProfiles(connectionString, forceRefresh: true);
       String nameOf(_ParsedVless p) => p.remark.isNotEmpty ? p.remark : p.host;
       // Локации с транспортом, которого ядро не знает, в список рабочих не
-      // попадают: подключиться к ним всё равно не получится (см.
-      // _isTransportSupported), и показывать их зелёной галочкой было бы
-      // обманом.
+      // попадают: подключиться к ним всё равно не получится, и показывать их
+      // зелёной галочкой было бы обманом.
+      final supported = <String>[];
+      final unsupported = <String>[];
+      for (final p in profiles) {
+        if (await _isProfileSupported(p)) {
+          supported.add(nameOf(p));
+        } else {
+          unsupported.add('${nameOf(p)} (${p.transportType})');
+        }
+      }
       return SubscriptionCheckResult(
         ok: true,
-        serverNames:
-            profiles.where(_isTransportSupported).map(nameOf).toList(),
-        unsupportedServerNames: profiles
-            .where((p) => !_isTransportSupported(p))
-            .map((p) => '${nameOf(p)} (${p.transportType})')
-            .toList(),
+        serverNames: supported,
+        unsupportedServerNames: unsupported,
       );
     } on TunnelException catch (e) {
       return SubscriptionCheckResult(ok: false, error: e.message);
@@ -3209,6 +3482,7 @@ class _ParsedVless {
     this.alpn,
     this.transportType,
     this.xhttpMode,
+    this.xhttpExtra,
     this.transportHost,
     this.transportPath,
     this.packetEncoding,
@@ -3231,6 +3505,12 @@ class _ParsedVless {
       transportType; // tcp | ws | grpc | http | httpupgrade | xhttp
   /// Режим XHTTP из параметра `mode` ссылки. null — не задан.
   final String? xhttpMode;
+
+  /// Содержимое параметра `extra` из XHTTP-ссылки — тот же JSON, что Xray
+  /// кладёт в `streamSettings.xhttpSettings.extra`: заголовки, параметры
+  /// паддинга и режима, а также `downloadSettings` для раздельного канала
+  /// скачивания. null, если параметра нет или он не разобрался.
+  final Map<String, dynamic>? xhttpExtra;
   final String? transportHost; // Host-заголовок для ws/http-маскировки
   final String? transportPath; // path для ws / service_name-путь для grpc
 
@@ -3290,6 +3570,19 @@ class _ParsedVless {
       // параметре `mode`. Пустое значение оставляем пустым — ядро подставит своё
       // умолчание само.
       final xhttpMode = (q['mode'] ?? '').trim();
+      // `extra` — JSON-объект в формате Xray. В ссылке он обычно
+      // percent-encoded, Uri.queryParameters это уже раскодировал.
+      Map<String, dynamic>? xhttpExtra;
+      final rawExtra = q['extra'];
+      if (rawExtra != null && rawExtra.trim().isNotEmpty) {
+        try {
+          final decoded = jsonDecode(rawExtra);
+          if (decoded is Map<String, dynamic>) xhttpExtra = decoded;
+        } catch (_) {
+          // Битый JSON в extra не повод терять весь профиль: подключимся по
+          // host/path из самой ссылки.
+        }
+      }
 
       // security=reality без поля pbk (публичный ключ) в конфиг отдавать нельзя:
       // получив reality-блок без ключа, нативное ядро падает на уровне Kotlin/JNI,
@@ -3315,6 +3608,7 @@ class _ParsedVless {
         alpn: q['alpn'],
         transportType: normalizedTransport,
         xhttpMode: xhttpMode.isEmpty ? null : xhttpMode,
+        xhttpExtra: xhttpExtra,
         transportHost: q['host'],
         transportPath: q['path'] ?? q['serviceName'],
         packetEncoding: (q['packetEncoding'] ?? q['packetencoding'])?.trim(),
