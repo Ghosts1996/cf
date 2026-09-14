@@ -1074,6 +1074,11 @@ class TunnelService {
       // возвращения она унаследует устаревшие значения.
       _latencySamples.removeWhere((remark, _) => !raw.containsKey(remark));
       latencyByRemark.value = smoothed;
+      // Результат замера в журнал: если ядро не достучалось ни до одной
+      // локации, это первое, что стоит увидеть при разборе.
+      unawaited(AppLogService.instance.log(
+          'Задержка через туннель: '
+          '${smoothed.entries.map((e) => '${e.key} — ${e.value} мс').join('; ')}'));
     } finally {
       _latencyProbeRunning = false;
     }
@@ -1181,8 +1186,12 @@ class TunnelService {
           for (final item in items) {
             final tag = _groupTagOf(item);
             final delay = _itemDelayOf(item);
-            // Ноль у sing-box означает "не измерено / недоступно", а не "мгновенно".
+            // Ноль у sing-box означает "не измерено", а 65535 (0xFFFF) —
+            // "проверка не прошла": именно это число libbox отдаёт за
+            // недоступный outbound. Показанное как есть, оно превращалось на
+            // экране в "65535 мс · медленно" у полностью мёртвого сервера.
             if (tag == null || delay == null || delay <= 0) continue;
+            if (delay >= _urlTestFailedDelayMs) continue;
             final index = _indexOfOutboundTag(tag);
             if (index == null || index >= order.length) continue;
             // Ключ — remark из VLESS-ссылки ("VPNonLine | 🇩🇪 Германия — Франкфурт").
@@ -1626,6 +1635,14 @@ class TunnelService {
     // (см. _isTransportSupported). Отсеиваем её до сборки конфига.
     final usable = ordered.where(_isTransportSupported).toList();
     final skippedCount = ordered.length - usable.length;
+    // Состав подписки — в журнал. Без этого при разборе «не работает» неясно
+    // главное: какие транспорты раздаёт панель, что из этого ядро умеет и к
+    // чему приложение в итоге подключается.
+    unawaited(AppLogService.instance.log(
+        'Подписка: ${ordered.length} локаций '
+        '[${ordered.map((p) => '${p.remark.isEmpty ? p.host : p.remark}:'
+            '${p.transportType ?? 'tcp'}/${p.security}').join(', ')}]'
+        '${skippedCount > 0 ? '; пропущено ядром: $skippedCount' : ''}'));
     if (usable.isEmpty) {
       throw TunnelException(
         'В подписке нет серверов с транспортом, который поддерживает ядро '
@@ -1694,6 +1711,13 @@ class TunnelService {
           await _client.checkConfig(config);
         }
 
+        // Конфиг, который реально уходит в ядро, пишем в журнал приложения с
+        // замазанными секретами. Это единственный способ понять со стороны
+        // пользователя, чем собранный нами конфиг отличается от рабочего в
+        // другом клиенте: логи ядра говорят, что соединение не встало, но не
+        // говорят, с какими параметрами его пытались поднять.
+        unawaited(AppLogService.instance.log('Конфиг ядра: ${_maskSecrets(config)}'));
+
         Future<void> startSession() => _client.connect(SessionOptions(
               config: config,
               networkMode: proxyOnly ? NetworkMode.proxy : NetworkMode.vpn,
@@ -1758,21 +1782,35 @@ class TunnelService {
         // ядро подвисло на резолве в IPv6. Android показывает "подключено", а
         // трафик остаётся на нуле.
         //
-        // Поэтому после подъёма интерфейса делаем короткий HTTP HEAD-запрос,
-        // который обязан пройти через туннель: в VPN-режиме обычный (весь трафик
-        // процесса и так идёт через TUN благодаря auto_route), в proxy-режиме —
-        // принудительно через локальный прокси на 127.0.0.1:$_proxyPort, иначе
-        // проверка молча тестировала бы обычный интернет в обход прокси.
+        // Поэтому после подъёма интерфейса делаем короткий HTTP HEAD-запрос
+        // через локальный инбаунд ядра — он обязан пройти тем же VLESS-каналом
+        // (см. _verifyInternetReachable).
         //
-        // Не прошёл — тот же случай, что любая другая ошибка подключения:
-        // отключаемся и идём к следующему серверу в списке.
+        // Не прошёл — идём к следующему серверу в списке. Кроме последнего:
+        // если не подтвердилась ни одна локация, причина может быть и не в
+        // сервере (оба проверочных адреса заблокированы на его стороне,
+        // например). Оставлять пользователя без связи из-за собственной
+        // проверки нельзя — принимаем последнюю поднявшуюся сессию и честно
+        // пишем в журнал, что связь не подтверждена.
         final internetReachable =
             await _verifyInternetReachable(proxyOnly: proxyOnly);
-        if (!internetReachable) {
+        final isLastCandidate = identical(profile, usable.last);
+        if (!internetReachable && !isLastCandidate) {
           await _settleAfterDisconnect();
           lastFailure =
               'Туннель поднялся, но интернет через него не идёт (сервер "${profile.remark}" не отвечает) — пробуем следующий';
+          unawaited(AppLogService.instance.log(
+              'Локация "${profile.remark}": туннель поднят, но проверка связи не прошла',
+              level: AppLogLevel.warning));
           continue;
+        }
+        if (!internetReachable) {
+          lastError.value =
+              'Туннель поднят, но проверка связи через него не прошла — '
+              'если сайты не открываются, смени локацию.';
+          unawaited(AppLogService.instance.log(
+              'Ни одна локация не подтвердила связь; оставлена последняя — "${profile.remark}"',
+              level: AppLogLevel.error));
         }
 
         final connectedName = profile.remark.isNotEmpty
@@ -1994,6 +2032,28 @@ class TunnelService {
   }
 
   static const _proxyPort = 2080;
+
+  /// Значение задержки, которым libbox помечает провалившуюся проверку
+  /// outbound'а (0xFFFF). Всё, что не меньше, — не замер, а отказ.
+  static const int _urlTestFailedDelayMs = 65535;
+
+  /// Прячет в тексте конфига то, что даёт доступ к серверу: uuid ключа,
+  /// публичный ключ и short id Reality. Всё остальное — адреса, порты,
+  /// транспорт, флаги TLS — остаётся, иначе журнал бесполезен для разбора.
+  static String _maskSecrets(String config) {
+    var masked = config;
+    for (final field in ['uuid', 'public_key', 'short_id', 'password']) {
+      masked = masked.replaceAllMapped(
+        RegExp('"$field"\\s*:\\s*"([^"]*)"'),
+        (m) {
+          final value = m.group(1) ?? '';
+          final tail = value.length > 4 ? value.substring(value.length - 4) : '';
+          return '"$field":"…$tail"';
+        },
+      );
+    }
+    return masked;
+  }
 
   String _buildSingBoxConfig(
     _ParsedVless p, {
@@ -2728,62 +2788,50 @@ class TunnelService {
   /// Проверяет, что пакеты действительно доходят до интернета через только
   /// что поднятый туннель. Возвращает true, только если удалённый сервер
   /// реально ответил за отведённое время.
+  /// Действительно ли через поднятый туннель ходит трафик.
+  ///
+  /// Запрос идёт не «куда-нибудь наружу», а в локальный `mixed`-инбаунд ядра
+  /// (127.0.0.1:$_proxyPort), который поднимается всегда — и в VPN-режиме
+  /// тоже, см. _buildSingBoxConfig. Это соединение процесса с самим собой по
+  /// петле: оно не подчиняется системной маршрутизации, не попадает в TUN и
+  /// потому не спотыкается о правило Android «трафик самого VPN-приложения в
+  /// свой же туннель не заворачивается». Наружу оно выходит тем же
+  /// VLESS-соединением, что и весь остальной трафик, — то есть проверяет
+  /// ровно то, что нужно.
+  ///
+  /// Раньше в VPN-режиме проверки не было вовсе: код ждал 1.2 секунды и верил
+  /// событию «интерфейс поднят». Интерфейс поднимается и при полностью
+  /// нерабочем сервере, поэтому приложение показывало «ПОДКЛЮЧЕНО» с нулевым
+  /// трафиком и никогда не переходило к следующей локации подписки.
+  ///
+  /// Проверяем двумя адресами подряд: первый может быть заблокирован на
+  /// стороне сервера, и один отказ не повод браковать рабочую локацию.
   Future<bool> _verifyInternetReachable({required bool proxyOnly}) async {
-    // generate_204 — лёгкий эндпоинт проверки связности (тем же принципом
-    // пользуется сам Android для captive portal): любой полученный ответ, а не
-    // таймаут, означает, что соединение прошло туда и обратно.
-    //
-    // Запрос идёт по обычному HTTP, а не HTTPS. Все такие эндпоинты
-    // (connectivitycheck.gstatic.com, msftconnecttest) рассчитаны на HTTP, а
-    // лишнее TLS-рукопожатие поверх уже зашифрованного VLESS/Reality-туннеля
-    // добавляет к замеру целый круговой RTT. На безопасность это не влияет:
-    // туннель шифрует всё, что через него идёт, независимо от схемы этого
-    // служебного запроса.
-    final probeUri = Uri.parse('http://cp.cloudflare.com/generate_204');
+    // Оба эндпоинта рассчитаны на обычный HTTP: лишнее TLS-рукопожатие поверх
+    // уже зашифрованного VLESS добавило бы к проверке целый круговой RTT. На
+    // безопасность это не влияет — туннель шифрует всё, что через него идёт.
+    const probes = [
+      'http://cp.cloudflare.com/generate_204',
+      'http://connectivitycheck.gstatic.com/generate_204',
+    ];
+    // В VPN-режиме окно шире: там к моменту проверки ядро ещё поднимает
+    // маршруты и первые соединения идут медленнее.
+    final timeout = Duration(seconds: proxyOnly ? 8 : 12);
 
-    // На Windows sing-box.exe — отдельный процесс, и WindowsSingboxRuntime
-    // считает сессию поднятой, как только отвечает служебный Clash API: это
-    // подтверждает, что процесс жив, но не что TUN-адаптер создан и хендшейк
-    // до сервера прошёл. Ветка ниже (подождать и поверить статусу) рассчитана
-    // на Android, где self-probe недостоверен по причине, описанной там же; на
-    // Windows этой причины нет, поэтому идём тем же путём, что и в
-    // proxy-режиме — реальным HTTP-запросом через 127.0.0.1:$_proxyPort. Этот
-    // инбаунд поднят всегда (см. _buildSingBoxConfig) и выходит наружу тем же
-    // VLESS-туннелем, что и системный трафик.
-    if (proxyOnly || Platform.isWindows) {
-      // В proxy-режиме запрос явно направлен через локальный SOCKS/HTTP-порт:
-      // это loopback-соединение процесса с самим собой, оно не подчиняется
-      // системной маршрутизации VPN и потому реально проходит через только что
-      // поднятый туннель.
+    for (final probe in probes) {
       final client = IOClient(
           HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
       try {
         final response =
-            await client.head(probeUri).timeout(const Duration(seconds: 8));
-        return response.statusCode > 0;
+            await client.head(Uri.parse(probe)).timeout(timeout);
+        if (response.statusCode > 0) return true;
       } catch (_) {
-        return false;
+        // Пробуем следующий адрес.
       } finally {
         client.close();
       }
     }
-
-    // В VPN-режиме самопроверочный запрос из процесса приложения бесполезен:
-    // системный VpnService обязан исключать трафик самого VPN-приложения из
-    // своего TUN (иначе отправленный в TUN пакет попал бы в него же и
-    // зациклился — иначе приложение не смогло бы открыть сокет до самого
-    // VLESS-сервера). Значит такой HTTP-запрос идёт мимо туннеля, обычным
-    // прямым путём: в лучшем случае он дублирует обычный доступ в интернет и
-    // маскирует проблему, в худшем — ложно проваливается на каждом сервере
-    // подряд, если прямой путь телефона к cp.cloudflare.com ограничен ровно
-    // тем, что и должен обходить VPN.
-    //
-    // Поэтому доверяем событию serviceStateStream о поднятом интерфейсе (оно
-    // уже подтверждено в _waitForConnected) и ждём короткое окно — этого
-    // достаточно, чтобы отсеять интерфейсы, которые поднимаются и тут же
-    // падают обратно.
-    await Future.delayed(const Duration(milliseconds: 1200));
-    return status.value?.state == TunnelConnState.connected;
+    return false;
   }
 
   Future<void> disconnect() async {
