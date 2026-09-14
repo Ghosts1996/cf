@@ -76,7 +76,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _prefs.getBool(PrefKeys.autoConnect, fallback: false),
       _prefs.getBool(PrefKeys.smartWifi, fallback: true),
       _prefs.getBool(PrefKeys.killSwitch, fallback: false),
-      _prefs.getBool(PrefKeys.dpiBypass, fallback: true),
+      _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
       _prefs.getBool(PrefKeys.ipv6Enabled, fallback: false),
     ]);

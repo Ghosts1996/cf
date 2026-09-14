@@ -20,6 +20,9 @@ class AndroidSingboxRuntime implements SingboxRuntimeClient {
   Stream<dynamic> get faultStream => _client.faultStream;
 
   @override
+  Stream<dynamic> get coreLogStream => _client.coreLogStream;
+
+  @override
   Future<dynamic> getServiceState() => _client.getServiceState();
 
   @override

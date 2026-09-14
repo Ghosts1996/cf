@@ -72,8 +72,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
       _prefs.getBool(PrefKeys.blockAds, fallback: true),
       _prefs.getInt(PrefKeys.reconnectAttempts, fallback: 3),
       _prefs.getBool(PrefKeys.bypassLan, fallback: false),
-      _prefs.getBool(PrefKeys.muxEnabled, fallback: true),
-      _prefs.getBool(PrefKeys.fakeIpDns, fallback: true),
+      _prefs.getBool(PrefKeys.muxEnabled, fallback: false),
+      _prefs.getBool(PrefKeys.fakeIpDns, fallback: false),
     ]);
     final savedMuxProtocol = await _prefs.getString(PrefKeys.muxProtocol);
     final savedLogRetentionDays = await AppLogService.instance.getRetentionDays();
