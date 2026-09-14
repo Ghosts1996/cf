@@ -179,7 +179,7 @@ class _KeysScreenState extends State<KeysScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '${tr('Не удалось загрузить ключи:')} \$e';
+        _error = '${tr('Не удалось загрузить ключи:')} $e';
         _loading = false;
       });
     }

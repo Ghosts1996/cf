@@ -911,11 +911,13 @@ class TunnelService {
     _autoReconnectAttempt = 0;
   }
 
-  /// Минимальный конфиг sing-box без внешнего outbound'а — только TUN-
-  /// инбаунд, чей единственный маршрут (`route.final`) — `block`. Валидный
-  /// sing-box-конфиг обязан содержать хотя бы один outbound, поэтому
-  /// добавлены `block` и `dns-out` (стандартные встроенные типы) — оба
-  /// ничего никуда не пересылают.
+  /// Минимальный конфиг sing-box без внешнего outbound'а: TUN-инбаунд, весь
+  /// трафик которого отбрасывается правилом `reject`.
+  ///
+  /// Блокировка описана через `action`-правила, а не через outbound'ы `block`
+  /// и `dns` — те объявлены устаревшими в sing-box 1.11 и удаляются в 1.13,
+  /// то есть на более новом ядре строгий Kill Switch просто перестал бы
+  /// подниматься.
   String _buildBlockAllConfig() {
     final config = <String, dynamic>{
       'log': {'level': 'warn'},
@@ -935,17 +937,23 @@ class TunnelService {
           'stack': 'mixed',
           'auto_route': true,
           'endpoint_independent_nat': true,
+          // hijack-dns требует явный IPv4-адрес интерфейса — без него ядро
+          // не стартует, как и в основном конфиге.
+          'address': ['172.19.0.1/28'],
         },
       ],
+      // Валидный конфиг обязан содержать хотя бы один outbound: direct нужен
+      // как цель `route.final`, но до него ничего не доходит — правило ниже
+      // отбрасывает весь трафик TUN-интерфейса.
       'outbounds': [
-        {'type': 'block', 'tag': 'block'},
-        {'type': 'dns', 'tag': 'dns-out'},
+        {'type': 'direct', 'tag': 'direct'},
       ],
       'route': {
         'auto_detect_interface': true,
-        'final': 'block',
+        'final': 'direct',
         'rules': [
-          {'protocol': 'dns', 'outbound': 'dns-out'},
+          {'protocol': 'dns', 'action': 'hijack-dns'},
+          {'inbound': ['tun-in'], 'action': 'reject'},
         ],
       },
     };
@@ -1270,12 +1278,24 @@ class TunnelService {
     'quic',
   };
 
-  /// Приводит написание транспорта к одному виду: splithttp — прежнее имя
-  /// XHTTP, встречается и в старых панелях, и в старых ссылках.
+  /// Приводит написание транспорта к одному виду:
+  ///  - `splithttp` — прежнее имя XHTTP, встречается в старых панелях;
+  ///  - `raw` — как называет голый TCP новый Xray, в sing-box это `tcp`;
+  ///  - `h2` — прежнее имя HTTP/2-транспорта, в sing-box это `http`.
   static String _normalizeTransportType(String raw) {
     final type = raw.trim().toLowerCase();
-    if (type.isEmpty) return 'tcp';
-    return type == 'splithttp' ? 'xhttp' : type;
+    switch (type) {
+      case '':
+      case 'raw':
+      case 'none':
+        return 'tcp';
+      case 'splithttp':
+        return 'xhttp';
+      case 'h2':
+        return 'http';
+      default:
+        return type;
+    }
   }
 
   static bool _isTransportSupported(_ParsedVless p) {
@@ -2032,6 +2052,9 @@ class TunnelService {
           'inet4_range': '198.18.0.0/15',
           'inet6_range': 'fc00::/18',
         },
+      // Системный резолвер — им ядро разрешает адрес самого VLESS-сервера,
+      // когда тот задан доменом (см. route.default_domain_resolver ниже).
+      {'type': 'local', 'tag': 'local-dns'},
     ];
     final dnsRules = <Map<String, dynamic>>[
       if (fakeIpDns)
@@ -2051,7 +2074,8 @@ class TunnelService {
       // Под условием bypassLan: выключив "Обход локальной сети", пользователь
       // заворачивает в туннель и LAN-трафик — например, чтобы достучаться до
       // ресурсов в сети самого VPN-сервера.
-      if (bypassLan) {'ip_is_private': true, 'outbound': 'direct'},
+      if (bypassLan)
+        {'ip_is_private': true, 'action': 'route', 'outbound': 'direct'},
       // 'sniff' обязан идти перед доменной блокировкой рекламы. В TUN-режиме на
       // вход попадают голые IP-пакеты без домена, и единственный источник поля
       // "domain" для правила ниже — сниффинг SNI из TLS ClientHello. Стоя раньше
@@ -2202,11 +2226,75 @@ class TunnelService {
       'route': {
         'auto_detect_interface': true,
         'final': 'proxy',
+        // Чем резолвить домены, к которым подключается само ядро — прежде
+        // всего адрес VLESS-сервера. Без этого поля резолв идёт общим путём,
+        // то есть через remote-dns с `detour: proxy`: чтобы поднять туннель,
+        // нужно зарезолвить домен, а резолвер ходит через тот же ещё не
+        // поднятый туннель. На сервере, заданном IP, это незаметно, а на
+        // домене подключение висит до таймаута. Плюс без этого поля sing-box
+        // 1.12 пишет предупреждение, а в 1.14 оно станет ошибкой.
+        'default_domain_resolver': 'local-dns',
         'rules': routeRules,
       },
     };
 
     return jsonEncode(config);
+  }
+
+  /// Конфиг служебной блокирующей сессии строгого Kill Switch — для тестов:
+  /// если ядро его не примет, режим просто не включится, и заметить это без
+  /// реального устройства нечем.
+  @visibleForTesting
+  String buildBlockAllConfigForTest() => _buildBlockAllConfig();
+
+  /// Собирает конфиг по готовой `vless://`-ссылке — для тестов и отладки:
+  /// сам сборщик приватный и принимает уже разобранный профиль.
+  @visibleForTesting
+  String buildConfigFromUri(
+    String vlessUri, {
+    bool proxyOnly = false,
+    bool muxEnabled = false,
+    bool blockAds = false,
+    bool dpiBypass = false,
+    bool fakeIpDns = false,
+    bool bypassLan = false,
+    bool ipv6Enabled = false,
+    bool dnsProtection = true,
+    String dnsProvider = 'cloudflare',
+    String? customDns,
+    String muxProtocol = 'smux',
+    String splitTunnelMode = 'exclude',
+    List<String> selectedPackages = const <String>[],
+    List<String> extraExcludedPackages = const <String>[],
+    List<String> alternateUris = const <String>[],
+  }) {
+    final profile = _ParsedVless.tryParse(vlessUri);
+    if (profile == null) {
+      throw TunnelException('Ссылка не распознана: $vlessUri');
+    }
+    final alternates = <_ParsedVless>[];
+    for (final uri in alternateUris) {
+      final parsed = _ParsedVless.tryParse(uri);
+      if (parsed != null) alternates.add(parsed);
+    }
+    return _buildSingBoxConfig(
+      profile,
+      dnsProtection: dnsProtection,
+      blockAds: blockAds,
+      dpiBypass: dpiBypass,
+      selectedPackages: selectedPackages,
+      splitTunnelMode: splitTunnelMode,
+      extraExcludedPackages: extraExcludedPackages,
+      proxyOnly: proxyOnly,
+      dnsProvider: dnsProvider,
+      customDns: customDns,
+      bypassLan: bypassLan,
+      muxEnabled: muxEnabled,
+      muxProtocol: muxProtocol,
+      fakeIpDns: fakeIpDns,
+      ipv6Enabled: ipv6Enabled,
+      alternates: alternates,
+    );
   }
 
   /// Объединяет пользовательские исключения split-tunnel с служебными
@@ -2869,16 +2957,19 @@ class _ParsedVless {
         }
       }
 
-      // Xray-совместимые клиенты экспортируют тип транспорта либо как "type", либо как "headerType".
-      final rawType = (q['type'] ?? q['headerType'] ?? 'tcp').toLowerCase();
-      // "http" в поле type у Xray-совместимых ссылок означает HTTP-маскировку поверх tcp,
-      // для sing-box это соответствует transport type "http".
-      final transportType = rawType.isEmpty ? 'tcp' : rawType;
-      // XHTTP исторически звался splithttp, в старых панелях и ссылках
-      // встречаются оба имени. Приводим к одному, чтобы дальше по коду была одна
-      // ветка вместо двух одинаковых.
-      final normalizedTransport =
-          TunnelService._normalizeTransportType(transportType);
+      // Сеть Xray-совместимые клиенты кладут в `type` (в ссылках, пришедших из
+      // vmess-конфигов, — в `net`), а вид маскировки поверх голого TCP — в
+      // `headerType`.
+      final rawType = (q['type'] ?? q['net'] ?? 'tcp');
+      var normalizedTransport = TunnelService._normalizeTransportType(rawType);
+      final headerType =
+          (q['headerType'] ?? q['headertype'] ?? '').trim().toLowerCase();
+      // `type=tcp&headerType=http` — это HTTP-маскировка поверх TCP; в
+      // sing-box ей соответствует транспорт `http`. Без этой ветки блок
+      // transport не добавлялся вовсе, и сервер отвергал рукопожатие.
+      if (normalizedTransport == 'tcp' && headerType == 'http') {
+        normalizedTransport = 'http';
+      }
       // Режим XHTTP: auto | packet-up | stream-up | stream-one, в ссылке лежит в
       // параметре `mode`. Пустое значение оставляем пустым — ядро подставит своё
       // умолчание само.

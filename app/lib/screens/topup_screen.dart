@@ -42,9 +42,24 @@ class _TopUpScreenState extends State<TopUpScreen> {
   bool get _isIosBuild => !kIsWeb && Platform.isIOS;
 
   Future<void> _openExternal(String url) async {
+    // canLaunchUrl на Android 11+ отвечает false и для схем, которые на
+    // деле открываются (видимость пакетов), поэтому его отрицательный ответ
+    // — не повод не пробовать. Молча ничего не делать нельзя: пользователь
+    // жмёт кнопку и не понимает, почему ничего не произошло.
     final uri = Uri.parse(url);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    try {
+      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!opened && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${tr('Не удалось открыть ссылку:')} $url')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${tr('Не удалось открыть ссылку:')} $url')),
+        );
+      }
     }
   }
 
@@ -61,8 +76,7 @@ class _TopUpScreenState extends State<TopUpScreen> {
     try {
       final payUrl = await _api.billingTopup(amount: amount, method: _method);
       final uri = Uri.parse(payUrl);
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (await launchUrl(uri, mode: LaunchMode.externalApplication)) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(tr('Открыта страница оплаты — после оплаты баланс обновится автоматически'))),
@@ -73,9 +87,11 @@ class _TopUpScreenState extends State<TopUpScreen> {
         setState(() => _error = tr('Не удалось открыть страницу оплаты'));
       }
     } on ApiException catch (e) {
-      setState(() => _error = e.message);
+      // Экран мог закрыться, пока шёл запрос: без проверки следующий setState
+      // упал бы с "setState() called after dispose()".
+      if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      setState(() => _error = '${tr('Не удалось создать платёж:')} $e');
+      if (mounted) setState(() => _error = '${tr('Не удалось создать платёж:')} $e');
     } finally {
       if (mounted) setState(() => _submitting = false);
     }

@@ -198,6 +198,7 @@ const Map<String, String> translationsEn = {
       'The apps checked below bypass the VPN — for example a bank app or local services. This list is the real apps on this device.',
 
   // ── support_screen.dart ─────────────────────────────────────────────────
+  'Не удалось открыть ссылку:': 'Could not open the link:',
   'Сайт': 'Website',
   'Бот Telegram': 'Telegram bot',
   'Бот MAX': 'MAX bot',
