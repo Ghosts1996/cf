@@ -19,7 +19,7 @@ on:
   # push, который меняет сам этот файл в ветке с XHTTP. Чтобы пересобрать
   # ядро, достаточно тронуть комментарий ниже и запушить.
   #
-  # Пересборка № 3
+  # Пересборка № 4
   push:
     branches: [ claude/xhttp-support ]
     paths: [ '.github/workflows/build-xhttp-core.yml' ]
@@ -103,16 +103,22 @@ jobs:
           go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.12
 
       # Флаги и теги — те же, что в cmd/internal/build_libbox самого ядра
-      # (вариант libbox.aar, androidapi 23). Отличие одно: список архитектур
-      # задаётся входным параметром. По умолчанию собираются только arm64 и
-      # arm — на них работают все телефоны, а каждая лишняя архитектура
-      # добавляет к .aar примерно четверть его размера, и с четырьмя файл
-      # упирается в лимит GitHub на размер файла в репозитории.
+      # (вариант libbox.aar, androidapi 23), с двумя отличиями.
+      #
+      # Первое: список архитектур задаётся входным параметром. По умолчанию
+      # собираются только arm64 и arm — на них работают все телефоны, а каждая
+      # лишняя архитектура добавляет к .aar примерно четверть его размера, и с
+      # четырьмя файл упирается в лимит GitHub на размер файла в репозитории.
+      #
+      # Второе: выброшен with_tailscale со свитой ts_omit_*. На ветке extended
+      # подмодуль replace/tailscale отстал от кода ядра, и сборка с этим тегом
+      # падает на `undefined: netns.SetControlFunc`. Приложению tailscale не
+      # нужен: у нас VLESS, а не mesh-сеть.
       - name: Build libbox.aar
         working-directory: core
         run: |
           export PATH="$PATH:$(go env GOPATH)/bin"
-          TAGS='with_gvisor,with_quic,with_wireguard,with_utls,with_naive_outbound,with_clash_api,badlinkname,tfogo_checklinkname0,with_tailscale,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird'
+          TAGS='with_gvisor,with_quic,with_wireguard,with_utls,with_naive_outbound,with_clash_api,badlinkname,tfogo_checklinkname0'
           gomobile bind -v \
             -o libbox.aar \
             -target "${{ inputs.abis || 'android/arm64,android/arm' }}" \
