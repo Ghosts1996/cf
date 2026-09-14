@@ -151,4 +151,40 @@ void main() {
       expect(proxyOf(config).containsKey('tls_fragment'), isFalse);
     });
   });
+
+  group('замер задержки', () {
+    const reality = 'vless://11111111-1111-1111-1111-111111111111@a.example.com:443'
+        '?type=tcp&security=reality&pbk=PUBKEY&sid=aa&sni=yahoo.com'
+        '&fp=chrome&flow=xtls-rprx-vision#PING';
+
+    Map<String, dynamic> experimentalOf(String config) =>
+        (jsonDecode(config) as Map<String, dynamic>)['experimental']
+            as Map<String, dynamic>;
+
+    Map<String, dynamic> latencyGroupOf(String config) =>
+        ((jsonDecode(config) as Map<String, dynamic>)['outbounds'] as List)
+            .cast<Map<String, dynamic>>()
+            .firstWhere((o) => o['tag'] == 'latency');
+
+    test('на ядре с поддержкой включается единая задержка', () {
+      final config = TunnelService.instance
+          .buildConfigFromUri(reality, unifiedDelaySupported: true);
+      final unified =
+          experimentalOf(config)['unified_delay'] as Map<String, dynamic>;
+      expect(unified['enabled'], true);
+    });
+
+    test('на штатном ядре поля нет — оно отвергло бы конфиг целиком', () {
+      final config = TunnelService.instance
+          .buildConfigFromUri(reality, unifiedDelaySupported: false);
+      expect(experimentalOf(config).containsKey('unified_delay'), isFalse);
+    });
+
+    test('группа latency меряет по тому же адресу, что и Hiddify', () {
+      final config = TunnelService.instance.buildConfigFromUri(reality);
+      final group = latencyGroupOf(config);
+      expect(group['type'], 'urltest');
+      expect(group['url'], 'http://cp.cloudflare.com/');
+    });
+  });
 }

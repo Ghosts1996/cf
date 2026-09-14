@@ -115,42 +115,15 @@ class _ServersScreenState extends State<ServersScreen> {
   // Автопроверка при открытии экрана запускается один раз за сессию экрана:
   // дальше её перезапускает только отключение VPN или кнопка "Проверить".
   bool _autoRealCheckScheduled = false;
-  // true, когда числа в _livePing получены от самого ядра через работающий
-  // туннель, а не TCP-стуком.
-  bool _pingFromTunnel = false;
-  // host_name локации, которая проверяется прямо сейчас — для индикатора
-  // на конкретной карточке.
-  String? _realCheckingId;
 
-  // Пинг сервера, на котором туннель поднят прямо сейчас.
+  // Отдельного замера «пинг текущего сервера» на этом экране больше нет.
   //
-  // `_livePing` — это TCP/TLS-пинг мимо туннеля, и для security=reality он
-  // помечен как "сеть (VLESS не проверен)". Заменить его настоящим замером
-  // через VLESS для всех локаций сразу, оставаясь подключённым, нельзя:
-  // flutter_singbox_client держит только одну активную сессию ядра (та же
-  // причина, по которой "Реальная проверка" требует сначала отключиться).
-  // Но для текущей локации честный замер через реальный VLESS-канал уже
-  // есть — TunnelService.connectedDelayMs(), то же число, что на главном
-  // экране. Его и показываем вместо TCP-оценки.
-  int? _connectedTunnelPing;
-  bool _measuringConnectedTunnelPing = false;
-
-  Future<void> _measureConnectedTunnelPing() async {
-    if (!_tunnel.isConnected) {
-      if (mounted && _connectedTunnelPing != null) {
-        setState(() => _connectedTunnelPing = null);
-      }
-      return;
-    }
-    if (_measuringConnectedTunnelPing) return;
-    _measuringConnectedTunnelPing = true;
-    try {
-      final ms = await _tunnel.connectedDelayMs();
-      if (mounted) setState(() => _connectedTunnelPing = ms);
-    } finally {
-      _measuringConnectedTunnelPing = false;
-    }
-  }
+  // Раньше здесь жил TunnelService.connectedDelayMs() — собственный HTTP-запрос
+  // через локальный инбаунд. Он честный, но на каждый запрос платит полное
+  // VLESS/Reality-рукопожатие и потому завышен втрое: там, где ядро меряет
+  // 85 мс, он показывал 300-500. Теперь все числа на экране приходят из одного
+  // источника — группы `latency` самого ядра (TunnelService.latencyByRemark),
+  // и текущий сервер ничем не отличается от остальных.
 
   /// Реагирует на подключение/отключение туннеля, пока этот экран открыт —
   /// без этого реальный пинг текущего сервера появился/пропал бы только на
@@ -164,7 +137,7 @@ class _ServersScreenState extends State<ServersScreen> {
   void _onTunnelStatusChangedForPing() {
     if (!mounted) return;
     setState(() {}); // обновить, какая карточка сейчас считается "текущей"
-    unawaited(_measureConnectedTunnelPing());
+    unawaited(_measureThroughTunnel());
     // VPN только что выключили — можно перепроверить локации по-настоящему,
     // пока туннель был поднят, это было невозможно. Пауза внутри
     // `_realCheckCooldown` не даст запускать проверку на каждое промежуточное
@@ -362,7 +335,6 @@ class _ServersScreenState extends State<ServersScreen> {
     if (byHostName.isEmpty) return;
 
     setState(() {
-      _pingFromTunnel = true;
       byHostName.forEach((hostName, delayMs) => _livePing[hostName] = delayMs);
       // Локации, до которых ядро не достучалось, в ответ не попадают — помечаем
       // их "недоступен", а не оставляем старое число.
@@ -383,7 +355,6 @@ class _ServersScreenState extends State<ServersScreen> {
       unawaited(_measureThroughTunnel());
       return;
     }
-    _pingFromTunnel = false;
 
     final endpoints = <String,
         ({String? host, int? port, String? security, String? sni})>{};
@@ -553,26 +524,47 @@ class _ServersScreenState extends State<ServersScreen> {
     return null;
   }
 
-  /// Настоящая проверка всех локаций списка: по очереди вызывает
-  /// TunnelService.realCheckProfile() — реальное VLESS/Reality-рукопожатие
-  /// через временную сессию sing-box. Именно это отличает "работает" от
+  /// Настоящая проверка всех локаций: реальное VLESS/Reality-рукопожатие тем
+  /// же ядром, что поднимает боевой туннель. Именно это отличает "работает" от
   /// "отвечает на TCP" и честно показывает мёртвую Reality-локацию.
   ///
-  /// Строго последовательно, один сервер за раз: realCheckProfile использует
-  /// тот же единственный нативный клиент, что и боевое подключение.
-  /// Полностью блокируется, если туннель поднят или занят — временная сессия
-  /// не может работать одновременно с боевым VPN, не разрывая его. Общий флаг
-  /// `_switching` не даёт авто-балансировке и ручному тапу по серверу тронуть
-  /// тот же клиент во время проверки.
+  /// Два пути, и оба не требуют от пользователя ничего выключать:
+  ///  * VPN поднят — просим ядро прогнать URLTest по группе `latency` прямо на
+  ///    живой сессии (TunnelService.refreshLatencyNow). Туннель не рвётся;
+  ///  * VPN выключен — один подъём временной proxy-сессии со всеми локациями
+  ///    подписки сразу (TunnelService.realCheckAllProfiles).
+  ///
+  /// Общий флаг `_switching` не даёт авто-балансировке и ручному тапу по
+  /// серверу тронуть тот же нативный клиент во время проверки.
   Future<void> _realCheckAll({bool silent = false}) async {
     if (_realChecking || _switching || _hosts == null || _hosts!.isEmpty) {
       return;
     }
-    if (_tunnel.isConnected || _tunnel.isBusy) {
+
+    // Туннель поднят — рвать его ради проверки больше не нужно. Ядро умеет
+    // мерить задержку по всем локациям сессии прямо на живом соединении: это
+    // та же группа `latency`, которой пользуется фоновый замер, только
+    // запускаем её немедленно.
+    if (_tunnel.isConnected) {
+      setState(() => _realChecking = true);
+      try {
+        await _tunnel.refreshLatencyNow();
+        await _measureThroughTunnel();
+      } finally {
+        if (mounted) {
+          setState(() {
+            _realChecking = false;
+            _lastRealCheckAt = DateTime.now();
+          });
+        }
+      }
+      return;
+    }
+
+    if (_tunnel.isBusy) {
       if (mounted && !silent) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              tr('Сначала отключитесь от VPN — реальная проверка на время поднимает и гасит тестовое соединение тем же движком.')),
+          content: Text(tr('Дождитесь окончания подключения — ядро сейчас занято.')),
         ));
       }
       return;
@@ -593,28 +585,56 @@ class _ServersScreenState extends State<ServersScreen> {
       _switching = true; // тот же общий замок, что и у переключения туннеля
     });
 
-    for (final s in _hosts!) {
-      if (!mounted) break;
-      final host = s as Map<String, dynamic>;
-      final id = host['host_name'] as String? ?? '';
-      if (id.isEmpty) continue;
-      setState(() => _realCheckingId = id);
-      final result = await _tunnel.realCheckProfile(connectionString, id);
-      if (!mounted) break;
-      setState(() => _realCheckResults[id] = result);
-      // Сохраняем после каждой локации, а не в конце цикла: проверка идёт
-      // секундами на локацию, и уход с экрана на середине не должен терять уже
-      // полученные результаты.
+    try {
+      // Все локации за один подъём ядра, а не по одной: см.
+      // TunnelService.realCheckAllProfiles. Прежний обход по очереди давал на
+      // экране время запуска сессии вместо задержки канала («работает ·
+      // 5006 мс» у живого сервера) и успевал получить отказ «сейчас активен
+      // другой туннель» на промежутке между двумя сессиями.
+      final byRemark = await _tunnel.realCheckAllProfiles(connectionString);
+      if (!mounted) return;
+      final mapped = <String, RealCheckResult>{};
+      for (final raw in _hosts!) {
+        final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
+        if (id.isEmpty) continue;
+        mapped[id] = _resultForHostName(byRemark, id) ??
+            const RealCheckResult(
+                ok: false, error: 'Локация не найдена в подписке.');
+      }
+      setState(() {
+        _realCheckResults
+          ..clear()
+          ..addAll(mapped);
+      });
       _saveRealCheckResults();
+    } finally {
+      if (mounted) {
+        _lastRealCheckAt = DateTime.now();
+        setState(() {
+          _realChecking = false;
+          _switching = false;
+        });
+      }
     }
+  }
 
-    if (!mounted) return;
-    _lastRealCheckAt = DateTime.now();
-    setState(() {
-      _realChecking = false;
-      _switching = false;
-      _realCheckingId = null;
-    });
+  /// Результат по имени локации с экрана (`host_name` из /hosts) среди
+  /// результатов, разложенных по remark'ам подписки ("VPNonLine | 🇩🇪 Германия
+  /// — Франкфурт"). Сопоставление по вхождению — той же логикой, что
+  /// TunnelService._matchProfile и latencyForHostName.
+  RealCheckResult? _resultForHostName(
+      Map<String, RealCheckResult> byRemark, String hostName) {
+    final needle = hostName.trim().toLowerCase();
+    if (needle.isEmpty) return null;
+    for (final entry in byRemark.entries) {
+      final remark = entry.key.trim().toLowerCase();
+      if (remark == needle) return entry.value;
+    }
+    for (final entry in byRemark.entries) {
+      final remark = entry.key.trim().toLowerCase();
+      if (remark.contains(needle) || needle.contains(remark)) return entry.value;
+    }
+    return null;
   }
 
   /// Оценка локации для авто-балансировки. `null` означает "этой локации в
@@ -806,7 +826,6 @@ class _ServersScreenState extends State<ServersScreen> {
     _pingRefreshTimer = Timer.periodic(_pingRefreshInterval, (_) {
       if (_hosts == null || _hosts!.isEmpty) return;
       _measureAllPings(_hosts!);
-      unawaited(_measureConnectedTunnelPing());
     });
     // Обновляет реальный пинг текущего сервера сразу при
     // подключении/отключении, а не раз в 25 секунд по таймеру.
@@ -814,7 +833,6 @@ class _ServersScreenState extends State<ServersScreen> {
     // Новая порция замеров от единого замерщика — перерисовать подписи.
     _tunnel.latencyByRemark.addListener(_onTunnelLatencyChanged);
     _tunnel.connectedServerName.addListener(_onTunnelStatusChangedForPing);
-    unawaited(_measureConnectedTunnelPing());
   }
 
   @override
@@ -1040,10 +1058,12 @@ class _ServersScreenState extends State<ServersScreen> {
                                 fontSize: 13, fontWeight: FontWeight.w600)),
                         const SizedBox(height: 2),
                         Text(
-                          _tunnel.isConnected || _tunnel.isBusy
-                              ? tr('сначала отключитесь от VPN')
-                              : (_realChecking
-                                  ? '${tr('проверяю')} ${_realCheckingId ?? "..."}'
+                          _realChecking
+                              ? (_tunnel.isConnected
+                                  ? tr('меряю задержку через работающий VPN...')
+                                  : tr('проверяю все локации одним запуском ядра...'))
+                              : (_tunnel.isConnected
+                                  ? tr('меряет пинг прямо через включённый VPN — отключаться не нужно')
                                   // Показываем, когда проверка отработала в последний раз — иначе неясно,
                                   // насколько свежие подписи под локациями.
                                   : (_lastRealCheckAt != null
@@ -1119,33 +1139,60 @@ class _ServersScreenState extends State<ServersScreen> {
                     (transport == null || transport == 'tcp')
                         ? ''
                         : ' · $transport';
-                // Для сервера, на котором туннель поднят прямо сейчас, берём настоящий
-                // замер через VLESS (см. `_connectedTunnelPing`), а не TCP-оценку.
-                //
-                // Пороги у двух шкал разные, и это не опечатка. TCP/TLS-стук
-                // меряет один обмен пакетами с сервером — там нормой считаются
-                // десятки миллисекунд. URLTest ядра меряет полный HTTP-запрос
-                // через VLESS: рукопожатие, прокси, ответ сайта, — и 150-400 мс
-                // там обычное дело. Ровно те же числа показывает Hiddify.
-                final isCurrentlyConnected =
-                    _tunnel.isConnected && id == _tunnel.connectedServerName.value;
+                // Единая шкала для всех чисел на этом экране, потому что
+                // число теперь всегда одно и то же по смыслу: задержка,
+                // измеренная ядром через настоящий VLESS-канал по
+                // http://cp.cloudflare.com/ с «единой задержкой» — тот же
+                // замер и те же величины, что показывает Hiddify (40-100 мс
+                // до Европы). TCP-оценка осталась только как запасной вариант,
+                // когда ядро ещё ничего не измерило.
+                final connectedId = _tunnel.isConnected
+                    ? _hostIdForConnectedName(_tunnel.connectedServerName.value)
+                    : null;
+                final isCurrentlyConnected = connectedId != null && id == connectedId;
+                // Пинг от ядра: при поднятом туннеле — по живой группе
+                // `latency`, иначе — из последней проверки всех локаций.
+                // Оба числа считаются одинаково, поэтому и сравнивать их между
+                // собой можно.
+                final realCheck = _realCheckResults[id];
+                final corePing = _tunnel.isConnected
+                    ? _tunnel.latencyForHostName(id)
+                    : (realCheck != null && realCheck.ok ? realCheck.latencyMs : null);
+
                 String pingLabel;
                 Color pingColor;
-                if (isCurrentlyConnected) {
-                  final tunnelPing = _connectedTunnelPing;
-                  if (tunnelPing == null) {
-                    pingLabel = tr('измеряю через VLESS...');
-                    pingColor = AppColors.textDim;
-                  } else if (tunnelPing < 150) {
-                    pingLabel = '$tunnelPing ${tr('мс · отлично (через VLESS)')}';
+                if (_realChecking) {
+                  pingLabel = tr('проверяю по-настоящему...');
+                  pingColor = AppColors.textDim;
+                } else if (corePing != null && corePing > 0) {
+                  final suffix = isCurrentlyConnected
+                      ? tr('мс · подключено')
+                      : tr('мс · проверено');
+                  if (corePing < 120) {
+                    pingLabel = '$corePing $suffix';
                     pingColor = AppColors.success;
-                  } else if (tunnelPing < 400) {
-                    pingLabel = '$tunnelPing ${tr('мс · через VLESS')}';
+                  } else if (corePing < 300) {
+                    pingLabel = '$corePing $suffix';
                     pingColor = AppColors.warning;
                   } else {
-                    pingLabel = '$tunnelPing ${tr('мс · медленно (через VLESS)')}';
+                    pingLabel = '$corePing ${tr('мс · медленно')}';
                     pingColor = AppColors.danger;
                   }
+                } else if (_tunnel.isConnected) {
+                  // Туннель поднят, а ядро по этой локации ничего не отдало.
+                  // Отличаем «ещё меряю» от «не отвечает»: если по другим
+                  // локациям числа уже есть, значит замер отработал и молчание
+                  // по этой означает отказ.
+                  final measuredSomething = _tunnel.latencyByRemark.value.isNotEmpty;
+                  pingLabel = measuredSomething
+                      ? tr('не отвечает')
+                      : tr('измеряю через VLESS...');
+                  pingColor =
+                      measuredSomething ? AppColors.danger : AppColors.textDim;
+                } else if (realCheck != null && !realCheck.ok) {
+                  pingLabel =
+                      '${tr('не работает')} (${realCheck.error ?? tr("нет ответа")})';
+                  pingColor = AppColors.danger;
                 } else if (ping == null) {
                   pingLabel = tr('измеряю...');
                   pingColor = AppColors.textDim;
@@ -1156,6 +1203,9 @@ class _ServersScreenState extends State<ServersScreen> {
                   pingLabel = tr('недоступен');
                   pingColor = AppColors.danger;
                 } else if (isRealityOnly) {
+                  // TCP-стук до Reality-узла успешен всегда, даже когда
+                  // VLESS-инбаунд за ним мёртв, — поэтому число показываем как
+                  // приблизительное и не красим зелёным.
                   pingLabel = '~$ping ${tr('мс · сеть (VLESS не проверен)')}';
                   pingColor = AppColors.warning;
                 } else if (ping < 80) {
@@ -1167,39 +1217,6 @@ class _ServersScreenState extends State<ServersScreen> {
                 } else {
                   pingLabel = '$ping ${tr('мс · медленно')}';
                   pingColor = AppColors.danger;
-                }
-                // Результат настоящей проверки достовернее любой оценки по TCP/TLS и
-                // перекрывает надпись выше: это подтверждённый факт — либо поднятая
-                // VLESS-сессия, либо отказ на настоящем VLESS/Reality-рукопожатии.
-                if (_realCheckingId == id) {
-                  pingLabel = tr('проверяю по-настоящему...');
-                  pingColor = AppColors.textDim;
-                } else {
-                  // Свежий замер через работающий туннель показываем вместо результата
-                  // прошлой реальной проверки: та мерила время запуска сессии, а не задержку
-                  // канала.
-                  final livePingNow = _livePing[id];
-                  final realCheck = (_pingFromTunnel &&
-                          livePingNow != null &&
-                          livePingNow > 0)
-                      ? null
-                      : _realCheckResults[id];
-                  if (realCheck != null) {
-                    if (realCheck.ok) {
-                      // Задержку ядро отдаёт не всегда (замер не успел, ядро
-                      // без группы). Печатать её как есть нельзя — на экране
-                      // появлялось «работает · null мс».
-                      final ms = realCheck.latencyMs;
-                      pingLabel = ms == null || ms <= 0
-                          ? tr('работает (проверено)')
-                          : '${tr('работает ·')} $ms ${tr('мс (проверено)')}';
-                      pingColor = AppColors.success;
-                    } else {
-                      pingLabel =
-                          '${tr('не работает')} (${realCheck.error ?? tr("нет ответа")})';
-                      pingColor = AppColors.danger;
-                    }
-                  }
                 }
                 return ServerPill(
                   code: code,

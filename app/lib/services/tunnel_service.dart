@@ -1069,10 +1069,25 @@ class TunnelService {
     });
   }
 
-  Future<void> _runLatencyProbe() async {
+  /// Немедленный замер задержки по всем локациям поднятого туннеля.
+  ///
+  /// Нужен экрану «Серверы»: кнопка «Проверить» при включённом VPN больше не
+  /// отказывается работать, а просит ядро прогнать URLTest прямо сейчас —
+  /// туннель при этом не рвётся. Ограничение «не мерить под нагрузкой» здесь
+  /// снято: пользователь нажал кнопку и ждёт ответа, а не фонового цикла.
+  ///
+  /// Возвращает то, что получилось: имя локации из подписки -> задержка в мс.
+  Future<Map<String, int>> refreshLatencyNow() async {
+    if (!isConnected) return const <String, int>{};
+    await _runLatencyProbe(force: true);
+    return latencyByRemark.value;
+  }
+
+  Future<void> _runLatencyProbe({bool force = false}) async {
     if (_latencyProbeRunning || !isConnected) return;
     final current = status.value;
-    if (current != null &&
+    if (!force &&
+        current != null &&
         (current.download > _latencyProbeBusyBps ||
             current.upload > _latencyProbeBusyBps)) {
       return; // идёт трафик — измерим в следующий раз, а не очередь
@@ -1206,6 +1221,21 @@ class TunnelService {
   }) async {
     final order = _sessionOutboundOrder;
     if (order.isEmpty || !isConnected) return const <String, int>{};
+    return _collectGroupDelays(order, timeout: timeout);
+  }
+
+  /// Сам сбор задержек по группе `latency`: просит ядро прогнать URLTest и
+  /// слушает, что оно отдаёт по каждому участнику.
+  ///
+  /// Вынесено отдельно от [measureLatenciesThroughTunnel], потому что тем же
+  /// кодом меряется и временная сессия «Реальной проверки», где боевого
+  /// туннеля нет и `_sessionOutboundOrder` ещё не заполнен — порядок
+  /// outbound'ов там передаётся снаружи.
+  Future<Map<String, int>> _collectGroupDelays(
+    List<_ParsedVless> order, {
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    if (order.isEmpty) return const <String, int>{};
 
     final completer = Completer<Map<String, int>>();
     StreamSubscription<dynamic>? sub;
@@ -1597,6 +1627,42 @@ class TunnelService {
     }
   }
 
+  /// Умеет ли ядро «единую задержку» (`experimental.unified_delay`).
+  ///
+  /// Это главное, чем ping Hiddify отличается от нашего на тех же серверах.
+  /// Обычный URLTest в sing-box меряет всё сразу: дозвон до сервера,
+  /// VLESS/Reality-рукопожатие и только потом HTTP-запрос — три-четыре
+  /// круговых пути, отсюда и 200-400 мс. С unified_delay ядро после первого
+  /// запроса делает по уже установленному соединению второй и возвращает
+  /// время именно второго (см. common/urltest: `if IsUnifiedDelayFromContext`)
+  /// — то есть один чистый круговой путь, те самые 40-80 мс.
+  ///
+  /// Опция есть в форке hiddify-sing-box и отсутствует в апстриме, поэтому
+  /// спрашиваем ядро пробным конфигом — как про транспорты и tls_fragment.
+  bool? _unifiedDelaySupport;
+
+  Future<bool> _coreSupportsUnifiedDelay() async {
+    final cached = _unifiedDelaySupport;
+    if (cached != null) return cached;
+    try {
+      await _ensureInitialized();
+      final supported = await _checkConfigQuietly(jsonEncode({
+        'log': {'level': 'error'},
+        'outbounds': [
+          {'type': 'direct', 'tag': 'direct'}
+        ],
+        'experimental': {
+          'unified_delay': {'enabled': true},
+        },
+      }));
+      _unifiedDelaySupport = supported;
+      return supported;
+    } catch (_) {
+      _unifiedDelaySupport = false;
+      return false;
+    }
+  }
+
   /// Параметры фрагментации — те же, что по умолчанию у Hiddify: рвать
   /// ClientHello на куски по 10-100 байт с паузой 50-200 мс между ними.
   /// Именно ClientHello видит DPI, когда решает, пропускать ли соединение.
@@ -1800,6 +1866,10 @@ class TunnelService {
     // правилом маршрутизации.
     final tlsFragmentSupported =
         dpiBypass ? await _coreSupportsTlsFragment() : false;
+    // Спрашиваем тем же способом: умеет ли ядро «единую задержку». От ответа
+    // зависит только то, какое число пользователь увидит как пинг, — на сам
+    // туннель опция не влияет.
+    final unifiedDelaySupported = await _coreSupportsUnifiedDelay();
     // См. PrefKeys.excludeAppFromTunnel. При fallback false список исключений
     // ниже остаётся пустым и конфиг собирается ровно такой же, как без этой
     // настройки.
@@ -1906,6 +1976,7 @@ class TunnelService {
           fakeIpDns: fakeIpDns,
           ipv6Enabled: ipv6Enabled,
           tlsFragmentSupported: tlsFragmentSupported,
+          unifiedDelaySupported: unifiedDelaySupported,
           alternates: alternates,
         );
         // Если сборка ядра не переваривает группу-селектор, конфиг отвергается
@@ -1936,6 +2007,7 @@ class TunnelService {
             fakeIpDns: fakeIpDns,
             ipv6Enabled: ipv6Enabled,
             tlsFragmentSupported: tlsFragmentSupported,
+            unifiedDelaySupported: unifiedDelaySupported,
           );
           await _client.checkConfig(config);
         }
@@ -2142,6 +2214,11 @@ class TunnelService {
       selectedPackages: const [],
       proxyOnly: true,
       muxEnabled: false,
+      // Число из этой проверки попадает на карточку локации рядом с числом,
+      // полученным через живой туннель. Считаться они обязаны одинаково,
+      // иначе один и тот же сервер показывал бы 60 мс при включённом VPN и
+      // 300 мс при выключенном.
+      unifiedDelaySupported: await _coreSupportsUnifiedDelay(),
     );
 
     _probeInProgress = true;
@@ -2237,6 +2314,164 @@ class TunnelService {
       await Future.delayed(const Duration(milliseconds: 350));
       // Восстанавливаем обычные подписки на события основного клиента —
       // ровно как делает _ensureInitialized() при первом запуске.
+      _stateSub = _client.serviceStateStream.listen(_applyServiceState);
+      _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
+      _faultSub = _client.faultStream.listen((error) {
+        lastError.value = error.toString();
+      });
+      _probeInProgress = false;
+    }
+  }
+
+  /// Проверка сразу всех локаций подписки за один подъём ядра.
+  ///
+  /// Так это делает Hiddify и так это обязано работать здесь: одна временная
+  /// сессия, в которой все серверы подписки лежат отдельными outbound'ами
+  /// внутри группы `latency`, и один URLTest по всей группе. Ядро опрашивает
+  /// участников параллельно и отдаёт по каждому честное время запроса через
+  /// его собственный VLESS-канал.
+  ///
+  /// Чем это лучше прежнего обхода по одной локации ([realCheckProfile]):
+  ///  * число — это задержка канала, а не время «поднять сессию, сходить
+  ///    HTTP-запросом, погасить сессию». Именно оно и превращалось на экране в
+  ///    «работает · 5006 мс» у полностью живого сервера;
+  ///  * весь список проверяется за секунды, а не за «несколько секунд на
+  ///    локацию», и ядро поднимается один раз, а не N;
+  ///  * пока идёт проверка, нет промежутков между сессиями, в которые
+  ///    следующая локация получала отказ «сейчас активен другой туннель».
+  ///
+  /// Ключи результата — remark'и из подписки. Сопоставление их с именами
+  /// локаций на экране — забота вызывающего.
+  Future<Map<String, RealCheckResult>> realCheckAllProfiles(
+      String connectionString) async {
+    if (isConnected || isBusy || _probeInProgress) {
+      return const <String, RealCheckResult>{};
+    }
+    await _ensureInitialized();
+
+    List<_ParsedVless> profiles;
+    try {
+      profiles = await _loadProfiles(connectionString);
+    } catch (e) {
+      return const <String, RealCheckResult>{};
+    }
+
+    // Локация с транспортом, которого ядро не знает, отправила бы в отказ весь
+    // конфиг целиком — отсеиваем её до сборки, но в результат кладём внятную
+    // причину, а не «нет ответа».
+    final usable = <_ParsedVless>[];
+    final results = <String, RealCheckResult>{};
+    for (final profile in profiles) {
+      if (await _isProfileSupported(profile)) {
+        usable.add(profile);
+      } else if (profile.remark.isNotEmpty) {
+        results[profile.remark] = RealCheckResult(
+          ok: false,
+          error: 'Транспорт ${profile.transportType ?? "?"} не поддерживается '
+              'установленным ядром',
+        );
+      }
+    }
+    if (usable.isEmpty) return results;
+
+    final config = _buildSingBoxConfig(
+      usable.first,
+      dnsProtection: false,
+      blockAds: false,
+      dpiBypass: false,
+      selectedPackages: const [],
+      proxyOnly: true,
+      muxEnabled: false,
+      unifiedDelaySupported: await _coreSupportsUnifiedDelay(),
+      alternates: usable.skip(1).toList(),
+    );
+
+    _probeInProgress = true;
+    await _stateSub?.cancel();
+    await _statsSub?.cancel();
+    await _faultSub?.cancel();
+    await _coreLogSub?.cancel();
+    _stateSub = null;
+    _statsSub = null;
+    _faultSub = null;
+    _coreLogSub = null;
+
+    try {
+      try {
+        await _client.checkConfig(config);
+      } catch (e) {
+        for (final profile in usable) {
+          if (profile.remark.isEmpty) continue;
+          results[profile.remark] =
+              RealCheckResult(ok: false, error: 'Конфигурация отклонена ядром: $e');
+        }
+        return results;
+      }
+
+      final upCompleter = Completer<void>();
+      final probeSub = _client.serviceStateStream.listen((state) {
+        if (!upCompleter.isCompleted &&
+            _mapServiceState(state) == TunnelConnState.connected) {
+          upCompleter.complete();
+        }
+      });
+      var upped = false;
+      try {
+        await _client.connect(SessionOptions(
+          config: config,
+          networkMode: NetworkMode.proxy,
+          notification: const NotificationConfig(
+            title: 'Проверка серверов VPNOnline',
+            showTrafficStats: false,
+            showStopButton: false,
+          ),
+        ));
+        await upCompleter.future.timeout(const Duration(seconds: 10));
+        upped = true;
+      } catch (_) {
+        upped = false;
+      } finally {
+        await probeSub.cancel();
+      }
+
+      if (!upped) {
+        for (final profile in usable) {
+          if (profile.remark.isEmpty) continue;
+          results[profile.remark] = const RealCheckResult(
+              ok: false, error: 'Ядро sing-box не запустилось');
+        }
+        return results;
+      }
+
+      // Два прогона и минимум из них — ровно та же арифметика, что у замера
+      // через боевой туннель, иначе одна и та же локация давала бы разные
+      // числа при включённом и выключенном VPN.
+      final first = await _collectGroupDelays(usable);
+      final second = await _collectGroupDelays(usable);
+      final best = <String, int>{...first};
+      second.forEach((remark, delay) {
+        final known = best[remark];
+        if (known == null || delay < known) best[remark] = delay;
+      });
+
+      for (final profile in usable) {
+        if (profile.remark.isEmpty) continue;
+        final delay = best[profile.remark];
+        results[profile.remark] = delay != null
+            ? RealCheckResult(ok: true, latencyMs: delay)
+            : const RealCheckResult(
+                ok: false, error: 'VLESS-сервис не отвечает на запрос');
+      }
+      unawaited(AppLogService.instance.log(
+          'Проверка всех локаций: '
+          '${results.entries.map((e) => '${e.key} — '
+              '${e.value.ok ? '${e.value.latencyMs} мс' : e.value.error}').join('; ')}'));
+      return results;
+    } finally {
+      try {
+        await _disconnectNative();
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 350));
       _stateSub = _client.serviceStateStream.listen(_applyServiceState);
       _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
       _faultSub = _client.faultStream.listen((error) {
@@ -2459,6 +2694,9 @@ class TunnelService {
     // Умеет ли ядро фрагментировать собственное рукопожатие (см.
     // _coreSupportsTlsFragment). От этого зависит, чем включается «Обход DPI».
     bool tlsFragmentSupported = false,
+    // Умеет ли ядро «единую задержку» (см. _coreSupportsUnifiedDelay). От
+    // этого зависит, какое число показывается пользователю как пинг.
+    bool unifiedDelaySupported = false,
     // Остальные локации подписки. Пустой список означает один outbound и
     // никакой группы — см. построение `outbounds` ниже.
     List<_ParsedVless> alternates = const <_ParsedVless>[],
@@ -2889,6 +3127,14 @@ class TunnelService {
         // при перезапуске сессии он ещё и занят предыдущей — ядро падало бы
         // на старте.
         'clash_api': {'external_controller': ''},
+        // «Единая задержка» — то, из-за чего Hiddify на тех же серверах
+        // показывает 40-80 мс, а не 200-400. Ядро прогоняет проверку дважды по
+        // одному и тому же уже поднятому соединению и отдаёт время второго
+        // запроса: без дозвона до сервера и без VLESS/Reality-рукопожатия,
+        // только чистый круговой путь. Включается там, где опция есть (форк
+        // hiddify-sing-box); на штатном ядре поля в конфиге просто нет, и
+        // задержка считается по-старому — см. _coreSupportsUnifiedDelay.
+        if (unifiedDelaySupported) 'unified_delay': {'enabled': true},
       },
     };
 
@@ -2914,6 +3160,7 @@ class TunnelService {
     bool bypassLan = false,
     bool ipv6Enabled = false,
     bool tlsFragmentSupported = false,
+    bool unifiedDelaySupported = false,
     bool dnsProtection = true,
     String dnsProvider = 'cloudflare',
     String? customDns,
@@ -2949,6 +3196,7 @@ class TunnelService {
       fakeIpDns: fakeIpDns,
       ipv6Enabled: ipv6Enabled,
       tlsFragmentSupported: tlsFragmentSupported,
+      unifiedDelaySupported: unifiedDelaySupported,
       alternates: alternates,
     );
   }
