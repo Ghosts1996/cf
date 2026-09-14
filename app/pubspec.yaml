@@ -31,7 +31,10 @@ dependencies:
   # Без платформенной настройки (App Group + Network Extension на iOS/macOS
   # через Xcode, sing-box.exe на Windows — см. app/NATIVE_SETUP.md) одно лишь
   # добавление пакета VPN не включит.
-  # Штатное ядро проекта. Ветка с ядром на форке Hiddify
+  # Ядро то же самое, что в ccurecc_singbox_dns — файл libbox.aar не менялся.
+  # Ветка ccurecc_singbox_dns_vpndns отличается от неё одним файлом Kotlin:
+  # VpnService снова публикует DNS-резолвер (см. коммит в той ветке). Ветка с
+  # ядром на форке Hiddify
   # (ccurecc_singbox_xhttp) собрана и лежит рядом, но по умолчанию не
   # используется: она собрана только под arm64 и arm и без части протоколов,
   # отчего APK худеет на треть, а поведение ядра отличается от проверенного.
@@ -41,7 +44,7 @@ dependencies:
   flutter_singbox_client:
     git:
       url: https://github.com/Ghosts1996/cf.git
-      ref: ccurecc_singbox_dns
+      ref: ccurecc_singbox_dns_vpndns
       path: app/third_party/flutter_singbox_client
   # Список установленных приложений для экрана split-tunnel. API 2.0.0+ —
   # именованные аргументы (excludeSystemApps/excludeNonLaunchableApps).
