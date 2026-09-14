@@ -19,7 +19,7 @@ on:
   # push, который меняет сам этот файл в ветке с XHTTP. Чтобы пересобрать
   # ядро, достаточно тронуть комментарий ниже и запушить.
   #
-  # Пересборка № 5
+  # Пересборка № 6
   push:
     branches: [ claude/xhttp-support ]
     paths: [ '.github/workflows/build-xhttp-core.yml' ]
@@ -34,7 +34,7 @@ on:
       abis:
         description: 'Архитектуры для gomobile bind'
         required: true
-        default: 'android/arm64,android/arm'
+        default: 'android/arm64,android/arm,android/amd64,android/386'
       plugin_branch:
         description: 'Ветка плагина, куда положить собранное ядро'
         required: true
@@ -106,9 +106,11 @@ jobs:
       # (вариант libbox.aar, androidapi 23), с двумя отличиями.
       #
       # Первое: список архитектур задаётся входным параметром. По умолчанию
-      # собираются только arm64 и arm — на них работают все телефоны, а каждая
-      # лишняя архитектура добавляет к .aar примерно четверть его размера, и с
-      # четырьмя файл упирается в лимит GitHub на размер файла в репозитории.
+      # собираются все четыре, как и в штатном ядре проекта, — чтобы ядро с
+      # XHTTP было равноценной заменой, а не урезанной. Если из-за новых
+      # протоколов .aar перестанет влезать в лимит GitHub на размер файла,
+      # лишние архитектуры (android/386 и следом android/amd64 — это только
+      # эмуляторы) убираются этим же параметром.
       #
       # Второе: выброшены теги протоколов, которых в приложении нет.
       # with_tailscale со свитой ts_omit_* — на ветке extended подмодуль
@@ -125,7 +127,7 @@ jobs:
           TAGS='with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0'
           gomobile bind -v \
             -o libbox.aar \
-            -target "${{ inputs.abis || 'android/arm64,android/arm' }}" \
+            -target "${{ inputs.abis || 'android/arm64,android/arm,android/amd64,android/386' }}" \
             -androidapi 23 \
             -javapkg=io.nekohasekai \
             -libname=box \
@@ -173,7 +175,7 @@ jobs:
           git commit -m "Ядро sing-box с поддержкой XHTTP
 
           Собрано из hiddify/hiddify-sing-box @ ${CORE_SHA}
-          архитектуры: ${{ inputs.abis || 'android/arm64,android/arm' }}
+          архитектуры: ${{ inputs.abis || 'android/arm64,android/arm,android/amd64,android/386' }}
 
           Ветка отличается от ccurecc_singbox_dns ровно одним файлом —
           android/libs/libbox.aar. Исходники плагина те же."

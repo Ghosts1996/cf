@@ -1075,6 +1075,18 @@ class TunnelService {
       // Локация выпала из прогона — забываем её историю, иначе после
       // возвращения она унаследует устаревшие значения.
       _latencySamples.removeWhere((remark, _) => !raw.containsKey(remark));
+
+      // Для сервера, на котором туннель стоит прямо сейчас, число уточняем
+      // своим замером. URLTest ядра ходит по HTTPS-адресу и каждый раз платит
+      // за TLS-рукопожатие поверх туннеля — это завышает показания в разы.
+      // Свой замер идёт обычным HTTP по уже прогретому keep-alive
+      // соединению, то есть меряет чистый круговой путь — ровно то число,
+      // которое показывает Hiddify.
+      final currentName = connectedServerName.value;
+      if (currentName != null && smoothed.containsKey(currentName)) {
+        final warm = await connectedDelayMs();
+        if (warm != null && warm > 0) smoothed[currentName] = warm;
+      }
       latencyByRemark.value = smoothed;
       // Результат замера в журнал: если ядро не достучалось ни до одной
       // локации, это первое, что стоит увидеть при разборе.
@@ -2059,15 +2071,17 @@ class TunnelService {
             ok: false, error: 'Таймаут запуска ядра sing-box');
       }
 
-      // Секундомер стартует ровно здесь — см. комментарий выше.
-      final sw = Stopwatch()..start();
-      final reachable = await _verifyInternetReachable(proxyOnly: true);
-      sw.stop();
-      if (!reachable) {
+      // Сначала выясняем, проходит ли трафик вообще: адреса перебираются, и
+      // первый из них может стоить целого таймаута. Это не замер задержки —
+      // время здесь не учитывается.
+      final probe = await _reachableProbeUrl(proxyOnly: true);
+      if (probe == null) {
         return const RealCheckResult(
             ok: false, error: 'VLESS-сервис не отвечает на запрос');
       }
-      return RealCheckResult(ok: true, latencyMs: sw.elapsedMilliseconds);
+      // И только потом — задержка, на прогретом соединении.
+      final latency = await _measureWarmDelayMs(probe);
+      return RealCheckResult(ok: true, latencyMs: latency);
     } finally {
       try {
         await _disconnectNative();
@@ -2984,50 +2998,104 @@ class TunnelService {
   /// Проверяет, что пакеты действительно доходят до интернета через только
   /// что поднятый туннель. Возвращает true, только если удалённый сервер
   /// реально ответил за отведённое время.
-  /// Действительно ли через поднятый туннель ходит трафик.
-  ///
-  /// Запрос идёт не «куда-нибудь наружу», а в локальный `mixed`-инбаунд ядра
-  /// (127.0.0.1:$_proxyPort), который поднимается всегда — и в VPN-режиме
+  /// Служебные адреса для проверки связи. Обычный HTTP, а не HTTPS: лишнее
+  /// TLS-рукопожатие поверх уже зашифрованного VLESS добавило бы к замеру
+  /// целый круговой RTT. На безопасность это не влияет — туннель шифрует всё,
+  /// что через него идёт. Тот же первый адрес использует Hiddify.
+  static const _probeUrls = [
+    'http://cp.cloudflare.com/generate_204',
+    'http://connectivitycheck.gstatic.com/generate_204',
+  ];
+
+  /// Клиент, все запросы которого идут в локальный `mixed`-инбаунд ядра
+  /// (127.0.0.1:$_proxyPort). Инбаунд поднимается всегда — и в VPN-режиме
   /// тоже, см. _buildSingBoxConfig. Это соединение процесса с самим собой по
   /// петле: оно не подчиняется системной маршрутизации, не попадает в TUN и
   /// потому не спотыкается о правило Android «трафик самого VPN-приложения в
   /// свой же туннель не заворачивается». Наружу оно выходит тем же
-  /// VLESS-соединением, что и весь остальной трафик, — то есть проверяет
-  /// ровно то, что нужно.
+  /// VLESS-соединением, что и весь остальной трафик.
+  static IOClient _throughTunnelClient() => IOClient(
+      HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
+
+  /// Первый из [_probeUrls], который реально ответил через туннель, либо null.
   ///
   /// Раньше в VPN-режиме проверки не было вовсе: код ждал 1.2 секунды и верил
   /// событию «интерфейс поднят». Интерфейс поднимается и при полностью
   /// нерабочем сервере, поэтому приложение показывало «ПОДКЛЮЧЕНО» с нулевым
   /// трафиком и никогда не переходило к следующей локации подписки.
-  ///
-  /// Проверяем двумя адресами подряд: первый может быть заблокирован на
-  /// стороне сервера, и один отказ не повод браковать рабочую локацию.
-  Future<bool> _verifyInternetReachable({required bool proxyOnly}) async {
-    // Оба эндпоинта рассчитаны на обычный HTTP: лишнее TLS-рукопожатие поверх
-    // уже зашифрованного VLESS добавило бы к проверке целый круговой RTT. На
-    // безопасность это не влияет — туннель шифрует всё, что через него идёт.
-    const probes = [
-      'http://cp.cloudflare.com/generate_204',
-      'http://connectivitycheck.gstatic.com/generate_204',
-    ];
+  Future<Uri?> _reachableProbeUrl({required bool proxyOnly}) async {
     // В VPN-режиме окно шире: там к моменту проверки ядро ещё поднимает
     // маршруты и первые соединения идут медленнее.
     final timeout = Duration(seconds: proxyOnly ? 8 : 12);
-
-    for (final probe in probes) {
-      final client = IOClient(
-          HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
-      try {
-        final response =
-            await client.head(Uri.parse(probe)).timeout(timeout);
-        if (response.statusCode > 0) return true;
-      } catch (_) {
-        // Пробуем следующий адрес.
-      } finally {
-        client.close();
-      }
+    // Адреса проверяются одновременно, а не по очереди: последовательный
+    // перебор означал, что один недоступный адрес стоит целого таймаута, и
+    // проверка честного сервера растягивалась на десяток секунд. Побеждает
+    // первый ответивший.
+    final completer = Completer<Uri?>();
+    var pending = _probeUrls.length;
+    for (final probe in _probeUrls) {
+      final uri = Uri.parse(probe);
+      final client = _throughTunnelClient();
+      unawaited(client
+          .head(uri)
+          .timeout(timeout)
+          .then((response) {
+            if (response.statusCode > 0 && !completer.isCompleted) {
+              completer.complete(uri);
+            }
+          })
+          .catchError((_) {})
+          .whenComplete(() {
+            client.close();
+            pending--;
+            if (pending == 0 && !completer.isCompleted) {
+              completer.complete(null);
+            }
+          }));
     }
-    return false;
+    return completer.future;
+  }
+
+  Future<bool> _verifyInternetReachable({required bool proxyOnly}) async =>
+      await _reachableProbeUrl(proxyOnly: proxyOnly) != null;
+
+  /// Задержка через туннель в миллисекундах — то же число, что показывает
+  /// Hiddify.
+  ///
+  /// Меряется не первый запрос, а последующие: первый оплачивает
+  /// VLESS/Reality-рукопожатие и TCP-соединение до сервера, и это стабильно
+  /// в разы больше настоящей задержки (отсюда и брались «650 мс» там, где на
+  /// самом деле 75). Соединение переиспользуется — HttpClient держит его
+  /// живым, — поэтому второй и третий запросы это чистый круговой путь
+  /// «телефон → сервер → сайт → обратно». Из них берётся минимум: он меньше
+  /// всех подвержен случайной задержке в сети.
+  Future<int?> _measureWarmDelayMs(Uri probe,
+      {int samples = 3,
+      Duration timeout = const Duration(seconds: 6)}) async {
+    final client = _throughTunnelClient();
+    try {
+      // Прогрев: рукопожатие и установка соединения, время не учитываем.
+      try {
+        await client.head(probe).timeout(timeout);
+      } catch (_) {
+        return null;
+      }
+      int? best;
+      for (var i = 0; i < samples; i++) {
+        final sw = Stopwatch()..start();
+        try {
+          await client.head(probe).timeout(timeout);
+        } catch (_) {
+          continue;
+        }
+        sw.stop();
+        final ms = sw.elapsedMilliseconds;
+        if (best == null || ms < best) best = ms;
+      }
+      return best;
+    } finally {
+      client.close();
+    }
   }
 
   Future<void> disconnect() async {
