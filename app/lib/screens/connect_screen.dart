@@ -250,6 +250,11 @@ class _ConnectScreenState extends State<ConnectScreen>
 
   bool get _hasManualKey => _manualKey != null && _manualKey!.trim().isNotEmpty;
 
+  /// Был ли уже хоть один завершённый замер задержки. Отличает "ещё меряем"
+  /// от "померили и не достучались" — без этого подпись под кольцом навсегда
+  /// застревала бы на "проверка соединения…".
+  bool _latencyProbed = false;
+
   /// До подключения экран показывает имя локации из `/hosts`
   /// ("🇩🇪 Германия — Франкфурт"), а после — `remark` из самой VLESS-ссылки,
   /// куда панель 3x-ui дописывает название сервиса:
@@ -485,38 +490,69 @@ class _ConnectScreenState extends State<ConnectScreen>
   }
 
   Future<void> _measureLatency() async {
-    // Если туннель уже поднят — меряем задержку через него. Иначе грубая
-    // оценка "жив ли backend" секундомером вокруг обычного авторизованного
-    // запроса: отдельного /ping на сервере нет.
-    if (mounted) setState(() => _latencyChecking = true);
+    if (mounted) {
+      setState(() {
+        _latencyChecking = true;
+        _latencyProbed = false;
+      });
+    }
     try {
       if (_tunnel.isConnected) {
-        // Показываем то же число, что и список серверов: сглаженный замер единого
-        // замерщика в TunnelService для текущей локации. Собственный пробник здесь
-        // был бы третьим независимым замером со своей шкалой — отсюда и
-        // расхождения вида "215 мс" на главном при 70 мс у той же локации в другом
-        // клиенте. Если прогона ещё не было, ждём его, а не меряем своё.
+        // Туннель поднят — берём число единого замерщика в TunnelService: это
+        // URLTest самого ядра, полный запрос к http://cp.cloudflare.com/ через
+        // VLESS. Ровно то же меряет и показывает Hiddify. Собственный пробник
+        // здесь был бы вторым независимым замером — отсюда и расхождения вида
+        // "215 мс" на главном при 70 мс у той же локации в другом клиенте.
         final ms = _tunnel.latencyForHostName(_tunnel.connectedServerName.value);
         if (mounted) setState(() => _latencyMs = ms);
         return;
       }
-      final sw = Stopwatch()..start();
-      try {
-        // Секундомер меряет время этого запроса, а закэшированный ответ приходит
-        // мгновенно — получалось "0 мс · отличный сигнал" вообще без похода в
-        // сеть. forceRefresh заставляет запрос уйти на сервер.
-        await _api.getHosts(forceRefresh: true);
-        sw.stop();
-        // Нулевое или отрицательное время — не результат замера, а его
-        // отсутствие.
-        final measured = scaleDisplayPingMs(sw.elapsedMilliseconds);
-        if (mounted) setState(() => _latencyMs = measured > 0 ? measured : null);
-      } catch (_) {
-        sw.stop();
+      // Туннель не поднят — меряем рукопожатие до того самого сервера, куда
+      // пойдёт трафик. Раньше здесь стоял секундомер вокруг запроса к нашему
+      // API: он не имеет отношения ни к VPN-серверу, ни к его задержке, и
+      // показывал бодрые "15 мс" при неработающей локации.
+      final connectionString = _effectiveConnectionString;
+      if (connectionString == null || connectionString.isEmpty) {
         if (mounted) setState(() => _latencyMs = null);
+        return;
       }
+      final endpoints = await _tunnel.listProfileEndpoints(connectionString);
+      if (endpoints.isEmpty) {
+        if (mounted) setState(() => _latencyMs = null);
+        return;
+      }
+      // Имя локации на экране (host_name из /hosts) и remark в подписке
+      // различаются префиксом сервиса — сопоставляем по вхождению, как и
+      // везде в приложении.
+      final wanted = SelectedServer.hostName.value?.toLowerCase().trim();
+      var endpoint = endpoints.values.first;
+      if (wanted != null && wanted.isNotEmpty) {
+        for (final entry in endpoints.entries) {
+          final remark = entry.key.toLowerCase();
+          if (remark == wanted ||
+              remark.contains(wanted) ||
+              wanted.contains(remark)) {
+            endpoint = entry.value;
+            break;
+          }
+        }
+      }
+      final ms = await TunnelService.measureEndpointPingMs(
+        endpoint.host,
+        endpoint.port,
+        security: endpoint.security,
+        sni: endpoint.sni,
+      );
+      if (mounted) setState(() => _latencyMs = ms);
+    } catch (_) {
+      if (mounted) setState(() => _latencyMs = null);
     } finally {
-      if (mounted) setState(() => _latencyChecking = false);
+      if (mounted) {
+        setState(() {
+          _latencyChecking = false;
+          _latencyProbed = true;
+        });
+      }
     }
   }
 
@@ -631,14 +667,19 @@ class _ConnectScreenState extends State<ConnectScreen>
           : tr('проверка соединения…');
     }
     if (_latencyMs == null) {
-      // Замер завершился, но значения нет: либо TCP-подключение к узлу не
-      // удалось, либо это первый рендер до первого _measureLatency().
-      return _tunnel.isConnected
-          ? tr('сервер не отвечает на проверку задержки')
-          : tr('проверка соединения…');
+      // Замер завершился, но значения нет. До первого прогона это просто
+      // "ещё меряем"; после — сервер не ответил, и говорить "проверка
+      // соединения…" бесконечно нельзя: со стороны это выглядит как
+      // зависший экран.
+      if (!_latencyProbed) return tr('проверка соединения…');
+      return tr('сервер не отвечает на проверку задержки');
     }
-    if (_latencyMs! < 80) return '$_latencyMs ${tr('мс · отличный сигнал')}';
-    if (_latencyMs! < 200) return '$_latencyMs ${tr('мс · стабильно')}';
+    // Пороги рассчитаны на настоящие миллисекунды. При поднятом туннеле это
+    // URLTest ядра — полный HTTP-запрос через VLESS, где 150-400 мс обычное
+    // дело (те же числа показывает Hiddify); до подключения — рукопожатие с
+    // сервером, там значения меньше и в "отлично" попадают легко.
+    if (_latencyMs! < 150) return '$_latencyMs ${tr('мс · отличный сигнал')}';
+    if (_latencyMs! < 400) return '$_latencyMs ${tr('мс · стабильно')}';
     return '$_latencyMs ${tr('мс · медленно')}';
   }
 

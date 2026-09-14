@@ -12,22 +12,6 @@ import 'app_log_service.dart';
 import 'local_prefs.dart';
 import 'singbox_runtime.dart';
 
-// Приводит измеренную задержку к шкале, в которой она показывается на
-// экране. Влияет ТОЛЬКО на выводимое число: само измерение, выбор сервера,
-// авто-балансировка и работа туннеля используют настоящие значения.
-//
-// Единая точка на всё приложение — и главный экран, и список серверов, и
-// результат реальной проверки идут через неё, чтобы шкала нигде не
-// разъезжалась. Меняется здесь и больше нигде.
-int scaleDisplayPingMs(int rawMs) {
-  if (rawMs <= 0) return rawMs;
-  final scaled = rawMs ~/ _displayLatencyScale;
-  return scaled < _minDisplayLatencyMs ? _minDisplayLatencyMs : scaled;
-}
-
-const int _displayLatencyScale = 5;
-const int _minDisplayLatencyMs = 3;
-
 class TunnelService {
   TunnelService._();
   static final TunnelService instance = TunnelService._();
@@ -1095,6 +1079,44 @@ class TunnelService {
     }
   }
 
+  /// Задержка до адреса сервера без поднятого туннеля: TCP-рукопожатие, а для
+  /// профилей с обычным TLS — ещё и TLS поверх него. Настоящее сетевое время
+  /// до той машины, куда пойдёт трафик, без всяких пересчётов.
+  ///
+  /// null — не достучались. Для `security=reality` проверка ограничена TCP:
+  /// Reality с клиента не проверить, узел отвечает сертификатом
+  /// сайта-приманки в любом состоянии инбаунда.
+  static Future<int?> measureEndpointPingMs(
+    String host,
+    int port, {
+    String security = 'none',
+    String? sni,
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
+    Socket? socket;
+    try {
+      final sw = Stopwatch()..start();
+      socket = await Socket.connect(host, port, timeout: timeout);
+      sw.stop();
+      if (security != 'tls') {
+        return sw.elapsedMilliseconds;
+      }
+      final tlsSw = Stopwatch()..start();
+      final secure = await SecureSocket.secure(
+        socket,
+        host: (sni != null && sni.isNotEmpty) ? sni : host,
+      ).timeout(timeout);
+      tlsSw.stop();
+      secure.destroy();
+      socket = null;
+      return sw.elapsedMilliseconds + tlsSw.elapsedMilliseconds;
+    } catch (_) {
+      return null;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
   /// Задержка до локации по её имени с экрана (host_name из /hosts).
   /// Ключи `latencyByRemark` — remark'и подписки ("VPNonLine | 🇩🇪 Германия —
   /// Франкфурт"), имена на экране идут без префикса сервиса; сопоставляем по
@@ -1169,10 +1191,9 @@ class TunnelService {
             // забота вызывающего, здесь отдаём как есть.
             final remark = order[index].remark;
             if (remark.isEmpty) continue;
-            // Шкала scaleDisplayPingMs здесь не применяется: она приглушает числа
-            // "реальной проверки", которые меряют время запуска сессии и достигают
-            // секунд. Это же честный URLTest ядра — делить его ещё на пять значило бы
-            // поменять одну неверную цифру на другую.
+            // Это честный URLTest ядра: время полного запроса к
+            // http://cp.cloudflare.com/ через VLESS — ровно то же число, что
+            // показывает Hiddify.
             collected[remark] = delay;
           }
           // Все участники ответили — ждать дальше нечего.
@@ -1917,8 +1938,7 @@ class TunnelService {
         return const RealCheckResult(
             ok: false, error: 'VLESS-сервис не отвечает на запрос');
       }
-      return RealCheckResult(
-          ok: true, latencyMs: scaleDisplayPingMs(sw.elapsedMilliseconds));
+      return RealCheckResult(ok: true, latencyMs: sw.elapsedMilliseconds);
     } finally {
       try {
         await _disconnectNative();
@@ -2977,7 +2997,7 @@ class TunnelService {
           await client.head(probeUri).timeout(const Duration(seconds: 5));
       stopwatch.stop();
       if (response.statusCode <= 0) return null;
-      return scaleDisplayPingMs(stopwatch.elapsedMilliseconds.clamp(1, 9999));
+      return stopwatch.elapsedMilliseconds.clamp(1, 9999);
     } catch (_) {
       // Прогретое соединение могло протухнуть (сервер закрыл keep-alive, сменился
       // маршрут) — на следующий тик заведём новый клиент, а не будем биться в
