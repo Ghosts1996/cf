@@ -291,6 +291,7 @@ const Map<String, String> translationsEn = {
   'Локальный журнал событий приложения (подключения, ошибки) будет удалён полностью. Действие необратимо.':
       'The app\'s local event log (connections, errors) will be deleted completely. This can\'t be undone.',
   'Логи удалены': 'Logs deleted',
+  'Журнал скопирован': 'Log copied',
   'Kill Switch включён автоматически — строгий режим работает поверх него':
       'Kill Switch was turned on automatically — strict mode works on top of it',
   'Безопасность': 'Security',
