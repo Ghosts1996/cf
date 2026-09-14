@@ -1096,13 +1096,13 @@ class TunnelService {
       // Свой замер идёт обычным HTTP по уже прогретому keep-alive
       // соединению, то есть меряет чистый круговой путь — ровно то число,
       // которое показывает Hiddify.
+      // Запасной вариант: если ядро не отдало задержку ни по одной локации
+      // (группы нет — старая сессия, ядро не поддержало urltest), меряем
+      // текущий сервер сами. Число будет завышено — свой замер включает
+      // рукопожатие, — но лучше так, чем пустой экран.
       final currentName = connectedServerName.value;
-      if (currentName != null && currentName.isNotEmpty) {
+      if (smoothed.isEmpty && currentName != null && currentName.isNotEmpty) {
         final warm = await connectedDelayMs();
-        // Именно безусловно, а не «уточнить, если URLTest что-то дал»: URLTest
-        // ядра для группы-селектора может не вернуть ничего или вернуть код
-        // отказа, и тогда на главном экране висело «сервер не отвечает на
-        // проверку задержки» при работающем туннеле.
         if (warm != null && warm > 0) smoothed[currentName] = warm;
       }
       latencyByRemark.value = smoothed;
@@ -1213,7 +1213,7 @@ class TunnelService {
         for (final group in groups) {
           // Нас интересует только наша группа, а не любые другие, которые
           // ядро может отдавать.
-          if (_groupTagOf(group) != 'proxy') continue;
+          if (_groupTagOf(group) != _latencyGroupTag) continue;
           final items = _groupItemsOf(group);
           for (final item in items) {
             final tag = _groupTagOf(item);
@@ -1243,11 +1243,49 @@ class TunnelService {
       }, onError: (_) => finish());
 
       deadline = Timer(timeout, finish);
-      await _client.urlTest('proxy').timeout(_nativeCallTimeout);
+      await _client.urlTest(_latencyGroupTag).timeout(_nativeCallTimeout);
       return await completer.future;
     } catch (e) {
       lastError.value = 'Не удалось измерить задержку через туннель: $e';
       return Map<String, int>.from(collected);
+    } finally {
+      deadline?.cancel();
+      await sub?.cancel();
+    }
+  }
+
+  /// Задержка одного участника группы `latency` по версии самого ядра.
+  /// Используется «Реальной проверкой», где сессия поднята временно и
+  /// [measureLatenciesThroughTunnel] неприменим: там ещё нет ни
+  /// `_sessionOutboundOrder`, ни статуса «подключено».
+  Future<int?> _measureGroupDelayMs(
+      {Duration timeout = const Duration(seconds: 10)}) async {
+    final completer = Completer<int?>();
+    StreamSubscription<dynamic>? sub;
+    Timer? deadline;
+    void finish(int? value) {
+      if (!completer.isCompleted) completer.complete(value);
+    }
+
+    try {
+      sub = _client.outboundGroupStream.listen((groups) {
+        if (groups is! List) return;
+        for (final group in groups) {
+          if (_groupTagOf(group) != _latencyGroupTag) continue;
+          for (final item in _groupItemsOf(group)) {
+            final delay = _itemDelayOf(item);
+            if (delay == null || delay <= 0) continue;
+            if (delay >= _urlTestFailedDelayMs) continue;
+            finish(delay);
+            return;
+          }
+        }
+      }, onError: (_) => finish(null));
+      deadline = Timer(timeout, () => finish(null));
+      await _client.urlTest(_latencyGroupTag).timeout(_nativeCallTimeout);
+      return await completer.future;
+    } catch (_) {
+      return null;
     } finally {
       deadline?.cancel();
       await sub?.cancel();
@@ -1286,8 +1324,10 @@ class TunnelService {
     }
   }
 
-  /// 'out-3' -> 3. null для любого чужого тега.
+  /// 'out-3' -> 3. Когда локация в подписке одна, группы-селектора нет и
+  /// единственный outbound называется 'proxy' — это нулевой участник.
   int? _indexOfOutboundTag(String tag) {
+    if (tag == 'proxy') return 0;
     if (!tag.startsWith('out-')) return null;
     return int.tryParse(tag.substring(4));
   }
@@ -2165,8 +2205,11 @@ class TunnelService {
         return const RealCheckResult(
             ok: false, error: 'VLESS-сервис не отвечает на запрос');
       }
-      // И только потом — задержка, на прогретом соединении.
-      final latency = await _measureWarmDelayMs(probe);
+      // Задержку спрашиваем у ядра: оно не включает в неё дозвон до сервера,
+      // поэтому число сопоставимо с тем, что показывают другие клиенты. Свой
+      // замер оставлен запасным — он честный, но завышенный на рукопожатие.
+      final latency =
+          await _measureGroupDelayMs() ?? await _measureWarmDelayMs(probe);
       return RealCheckResult(ok: true, latencyMs: latency);
     } finally {
       try {
@@ -2223,6 +2266,13 @@ class TunnelService {
   }
 
   static const _proxyPort = 2080;
+
+  /// Группа, по которой ядро меряет задержку. В маршрутизации не участвует.
+  static const _latencyGroupTag = 'latency';
+
+  /// Адрес проверки — тот же, что в настройках Hiddify. Обычный HTTP: лишнее
+  /// TLS-рукопожатие поверх туннеля добавило бы к замеру целый круговой путь.
+  static const _latencyTestUrl = 'http://cp.cloudflare.com/';
 
   /// Значение задержки, которым libbox помечает провалившуюся проверку
   /// outbound'а (0xFFFF). Всё, что не меньше, — не замер, а отказ.
@@ -2661,6 +2711,36 @@ class TunnelService {
         'outbounds': memberTags,
         'default': 'out-0',
         'interrupt_exist_connections': false,
+      });
+    }
+    // Группа `urltest` существует только ради честного замера задержки — в
+    // маршрутизации она не участвует, трафик по-прежнему идёт через `proxy`.
+    //
+    // Нужна она по двум причинам. Первая: команда urlTest для группы, которая
+    // не является urltest-группой, всегда проверяет ядровый адрес по
+    // умолчанию — `https://www.gstatic.com/generate_204`, недоступный из
+    // России. Отсюда и брались 65535 мс, то есть код отказа. У urltest-группы
+    // адрес свой, и мы ставим тот же, что Hiddify.
+    //
+    // Вторая: ядро при своём замере перезапускает секундомер после дозвона до
+    // сервера (см. common/urltest — `if NeedHandshakeForWrite(instance)`), то
+    // есть не включает в число TLS/Reality-рукопожатие. Свой замер через
+    // локальный HTTP-инбаунд так не умеет: sing-box открывает новое
+    // соединение на каждый запрос, и в число попадает полное рукопожатие —
+    // отсюда 388 мс там, где на самом деле 75.
+    {
+      outbounds.add(<String, dynamic>{
+        'type': 'urltest',
+        'tag': _latencyGroupTag,
+        'outbounds':
+            useSelector ? ['out-0', for (var i = 0; i < alternates.length; i++) 'out-${i + 1}'] : ['proxy'],
+        'url': _latencyTestUrl,
+        // Своим расписанием группа почти не пользуется: замер запускает само
+        // приложение, когда туннель простаивает. Большой интервал — чтобы
+        // ядро не будило радиомодуль лишний раз.
+        'interval': '10m',
+        'tolerance': 50,
+        'idle_timeout': '30m',
       });
     }
     outbounds.add({'type': 'direct', 'tag': 'direct'});
