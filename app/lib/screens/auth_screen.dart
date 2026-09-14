@@ -4,25 +4,17 @@ import '../widgets/neon.dart';
 import '../services/api_client.dart';
 import '../services/locale_service.dart';
 
-/// [НОВОЕ v4 — самый критичный недостающий экран во всём приложении]
-/// До этого файла в приложении НЕ БЫЛО ни одного экрана входа/регистрации —
-/// главный экран открывался сразу поверх пустого `ApiClient()` без токена
-/// (см. подробный разбор в services/api_client.dart). Это единственная
-/// причина, по которой баланс/ключи/покупка/рефералка не могли
-/// синхронизироваться, несмотря на то что backend был готов их отдавать.
+/// Вход и регистрация.
 ///
-/// Механизм — 1:1 с реальным сайтом vpnonline.su (проверено напрямую, не
-/// придумано): вход по email+паролю, регистрация с подтверждением кода на
-/// почту, сброс пароля тоже по коду на почту.
+/// Повторяет механику сайта vpnonline.su: вход по email и паролю,
+/// регистрация с подтверждением кода на почту, сброс пароля тоже по коду.
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key, required this.onAuthenticated, this.initialInfo});
   final VoidCallback onAuthenticated;
 
-  /// [НОВОЕ] Необязательное сообщение, показанное сразу при открытии экрана —
-  /// используется main.dart, когда сюда попадают не по своей воле (нажал
-  /// "выйти"), а из-за автоматического сброса просроченной/невалидной
-  /// сессии (см. ApiClient.sessionExpired), чтобы это не выглядело как
-  /// внезапный выход в никуда без объяснений.
+  /// Сообщение, показываемое сразу при открытии экрана. Используется
+  /// main.dart, когда сюда попадают из-за сброса просроченной сессии
+  /// (ApiClient.sessionExpired), а не по кнопке "выйти".
   final String? initialInfo;
 
   @override
@@ -51,13 +43,6 @@ class _AuthScreenState extends State<AuthScreen> {
     _info = widget.initialInfo;
   }
 
-  // [ИСПРАВЛЕНО — утечка памяти] В классе не было ни одного override
-  // dispose(), хотя создаётся 5 TextEditingController. Каждый
-  // TextEditingController держит ChangeNotifier/слушателей и внутренний
-  // TextEditingValue; без dispose() они не освобождаются при закрытии
-  // экрана (например, после успешного входа, когда AuthScreen убирается из
-  // дерева) и остаются в памяти до конца жизни процесса — классическая
-  // утечка на каждый повторный показ экрана входа (после логаута и т.д.).
   @override
   void dispose() {
     _emailCtrl.dispose();
@@ -95,12 +80,8 @@ class _AuthScreenState extends State<AuthScreen> {
         widget.onAuthenticated();
       });
 
-  // [ИСПРАВЛЕНО] Реальный /auth/register/send-code принимает только email —
-  // пароль и имя пользователя реальный сервер запрашивает позже, вместе с
-  // кодом, одним вызовом /auth/register. Раньше здесь передавались
-  // username/password на этом шаге — эндпоинта с такими параметрами на
-  // сервере нет, это был вызов в никуда (сгенерированный под придуманный
-  // контракт API, а не проверенный по реальному коду).
+  ///auth/register/send-code принимает только email — пароль и имя сервер
+  // ждёт позже, вместе с кодом, в /auth/register.
   Future<void> _registerRequestCode() => _run(
         () => _api.registerSendCode(_emailCtrl.text.trim()),
         successInfo: tr('Код отправлен на почту (если такой email ещё не зарегистрирован)'),
@@ -135,10 +116,8 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ] Модуль переводчика — экран входа слушает LocaleService
-    // напрямую: сюда можно попасть после разлогина уже с выбранным ранее
-    // языком (см. LocaleService.setLanguage в settings_screen.dart), и
-    // текст должен быть переведён сразу, без лишнего перехода по экранам.
+    // Экран слушает LocaleService: сюда попадают после разлогина с уже
+    // выбранным языком, текст должен быть переведён сразу.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(

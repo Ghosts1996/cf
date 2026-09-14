@@ -4,17 +4,12 @@ import '../widgets/neon.dart';
 import '../services/app_log_service.dart';
 import '../services/locale_service.dart';
 
-/// [НОВОЕ] Просмотр локальных логов приложения — отдельный экран, на который
-/// ведёт кнопка "Просмотреть логи" в разделе "Хранение логов" на экране
-/// "Безопасность" (см. security_screen.dart). Никакой новой логики хранения
-/// не добавляет — читает те же записи через AppLogService.instance.getAll(),
-/// которые уже пишутся туда остальным приложением, и просто показывает их
-/// списком, в стиле остальных экранов (AppHeader/NeonCard/SectionTitle).
+/// Просмотр локальных логов приложения. Открывается кнопкой
+/// "Просмотреть логи" в разделе "Хранение логов" на экране
+/// "Безопасность", читает записи через AppLogService.instance.getAll().
 ///
-/// Загрузка — по требованию (при открытии экрана и по свайпу вниз), без
-/// подписки на поток: список логов меняется нечасто, а
-/// AppLogService.entryCount уже даёт живой счётчик записей на экране
-/// "Безопасность" — здесь достаточно перечитывать при обновлении.
+/// Загрузка по требованию — при открытии и по свайпу вниз: список меняется
+/// нечасто, а живой счётчик записей уже есть на экране "Безопасность".
 class LogsViewerScreen extends StatefulWidget {
   const LogsViewerScreen({super.key});
 
@@ -99,7 +94,6 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ] Модуль переводчика.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(

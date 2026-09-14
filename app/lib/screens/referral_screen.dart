@@ -7,15 +7,11 @@ import '../services/locale_service.dart';
 
 /// Реферальная программа.
 ///
-/// [ИСПРАВЛЕНО] Отдельного эндпоинта GET /referral на реальном сервере нет
-/// (см. REPORT.md аудита безопасности) — раньше экран звал
-/// несуществующий `getReferralInfo()`. Реальный API отдаёт всё нужное
-/// одним вызовом `GET /user/profile` (см. services/api_client.dart ->
-/// getProfile()): `referral_link`, `referral_count`, `referral_balance_all`.
-/// Проценты начисления (10%/15% и т.п.) сервер клиенту не возвращает —
-/// это значение живёт только в bot_settings на стороне бота, поэтому
-/// текст ниже больше не показывает конкретный процент, чтобы не соврать
-/// цифрой, которую нельзя проверить с этого экрана.
+/// Отдельного эндпоинта GET /referral на сервере нет — всё нужное отдаёт
+/// `GET /user/profile` (api_client.dart -> getProfile()): `referral_link`,
+/// `referral_count`, `referral_balance_all`. Проценты начисления сервер
+/// клиенту не возвращает (они живут в bot_settings), поэтому конкретная
+/// цифра в тексте не показывается.
 class ReferralScreen extends StatefulWidget {
   const ReferralScreen({super.key});
   @override
@@ -36,9 +32,6 @@ class _ReferralScreenState extends State<ReferralScreen> {
   Future<void> _load() async {
     try {
       final profile = await _api.getProfile();
-      // [ИСПРАВЛЕНО] Не было проверки `mounted` после `await` — уход с
-      // экрана до ответа `/user/profile` приводил к падению
-      // "setState() called after dispose()" на медленной сети.
       if (!mounted) return;
       setState(() => _profile = profile);
     } catch (e) {

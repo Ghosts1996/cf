@@ -13,19 +13,7 @@ import 'settings_screen.dart';
 import 'support_screen.dart';
 import 'topup_screen.dart';
 
-/// Меню/профиль — сведено по SCREEN 5 макета (.contact-card шапка с
-/// email+балансом, .menu-list с кольцевыми иконками).
-///
-/// [ИСПРАВЛЕНО v4] Раньше `final _api = ApiClient()` создавал свой
-/// собственный неавторизованный клиент (см. подробный разбор в
-/// services/api_client.dart) — теперь используется общий
-/// `ApiClient.instance` с реально восстановленным токеном.
-/// [ИСПРАВЛЕНО v4] Кнопка "Выйти из аккаунта" была `onPressed: () {}` —
-/// ничего не делала. Теперь реально чистит токен и возвращает на экран входа.
-/// [ИСПРАВЛЕНО v4] Диалог "Бесплатный период" сообщал, что триал "не
-/// настроен" — это было неверно: триал включён через bot_settings (не
-/// через таблицу plans, см. backend v4), просто предыдущая версия не знала,
-/// где его искать. Теперь кнопка реально активирует триал через API.
+/// Меню и профиль: шапка с email и балансом, список разделов.
 class MenuScreen extends StatefulWidget {
   const MenuScreen({super.key, required this.onLoggedOut});
   final VoidCallback onLoggedOut;
@@ -36,10 +24,8 @@ class MenuScreen extends StatefulWidget {
 
 class _MenuScreenState extends State<MenuScreen> {
   final _api = ApiClient.instance;
-  // [ИСПРАВЛЕНО] Реального /balance эндпоинта на сервере нет — отдельного
-  // getBalance() в новом ApiClient тоже нет. Баланс приходит вместе со
-  // всем остальным профилем одним вызовом GET /user/profile
-  // (см. services/api_client.dart -> getProfile()).
+  // Отдельного /balance на сервере нет — баланс приходит вместе с профилем
+  // одним вызовом GET /user/profile (api_client.dart -> getProfile()).
   Map<String, dynamic>? _profile;
   List<dynamic>? _keys;
 
@@ -52,9 +38,6 @@ class _MenuScreenState extends State<MenuScreen> {
   Future<void> _load() async {
     try {
       final results = await Future.wait([_api.getProfile(), _api.getKeys()]);
-      // [ИСПРАВЛЕНО] Проверка `mounted` после `await` — без неё уход с
-      // экрана до ответа сервера приводил к падению `setState()` на уже
-      // отключённом виджете, особенно вероятно на медленной сети.
       if (!mounted) return;
       setState(() {
         _profile = results[0] as Map<String, dynamic>;
@@ -132,21 +115,16 @@ class _MenuScreenState extends State<MenuScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [ИСПРАВЛЕНО] Реальный /user/keys не отдаёт поле `active_in_panel` —
-    // "активность" ключа определяется сроком действия (`expiry_date`),
-    // как и на экране "Мои ключи" (см. keys_screen.dart -> _KeyCard).
+    // Реальный /user/keys не отдаёт `active_in_panel` — активность ключа
+    // определяется сроком действия, как и на экране "Мои ключи".
     final activeKeys = _keys?.cast<Map<String, dynamic>>().where((k) {
       final expiryStr = k['expiry_date'] as String?;
       final expiry = expiryStr != null ? DateTime.tryParse(expiryStr) : null;
       return expiry != null && expiry.isAfter(DateTime.now());
     }).length;
 
-    // [НОВОЕ] Модуль переводчика — слушаем LocaleService, чтобы список
-    // пунктов меню и баланс сразу перерисовались новым языком, если
-    // пользователь меняет его на вложенном экране "Настройки" и
-    // возвращается назад (Navigator.pop не пересоздаёт MenuScreen сам по
-    // себе — без этой подписки старый язык остался бы виден до следующего
-    // захода на вкладку "Меню").
+    // Слушаем LocaleService: язык могли сменить на вложенном экране
+    // "Настройки", а Navigator.pop не пересоздаёт MenuScreen.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => SingleChildScrollView(

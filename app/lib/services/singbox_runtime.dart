@@ -1,30 +1,12 @@
-// [НОВОЕ — Windows real-VPN] Абстракция над "движком" туннеля.
+// Абстракция над движком туннеля.
 //
-// Зачем этот файл вообще нужен, если раньше в tunnel_service.dart просто
-// стояло `final SingboxClient _client = SingboxClient();`?
-//
-// `SingboxClient` из пакета flutter_singbox_client — это MethodChannel-обёртка
-// над НАТИВНЫМ Android-плагином (Kotlin + libbox). У пакета сегодня нет
-// нативной реализации под Windows — на Windows вызов любого метода
-// `SingboxClient` падает `MissingPluginException`, потому что на той стороне
-// платформенного канала просто некому ответить.
-//
-// Здесь этот класс НЕ пытается "почитить" сам пакет и не трогает Android-код.
-// Вместо этого — один уровень косвенности:
-//   - `SingboxRuntimeClient` — интерфейс с ровно тем набором методов/потоков,
-//     которые реально вызываются в tunnel_service.dart (проверено по всем
-//     местам использования `_client.*` в файле).
-//   - `AndroidSingboxRuntime` (см. singbox_runtime_android.dart) — тонкая
-//     обёртка, 1-в-1 форвардящая каждый вызов в тот самый `SingboxClient`,
-//     что был раньше. Поведение на Android НЕ меняется ни на бит.
-//   - `WindowsSingboxRuntime` (см. singbox_runtime_windows.dart) — реальная
-//     Windows-реализация поверх процесса sing-box.exe (TUN-режим,
-//     VLESS/Reality), см. докстринг в том файле.
-//
-// В tunnel_service.dart единственное изменение — какой класс создаётся в
-// поле `_client` (было `SingboxClient()`, стало `createSingboxRuntime()`).
-// Все остальные ~40 мест, где `_client.connect(...)`, `.disconnect()`,
-// `.serviceStateStream` и т.д. — не тронуты вообще.
+// SingboxClient из flutter_singbox_client — MethodChannel-обёртка над
+// нативным Android-плагином; на Windows любой его вызов падает с
+// MissingPluginException. Поэтому tunnel_service.dart работает не с ним
+// напрямую, а с этим интерфейсом:
+//   - AndroidSingboxRuntime форвардит вызовы в SingboxClient;
+//   - WindowsSingboxRuntime поднимает отдельный процесс sing-box.exe
+//     в TUN-режиме.
 import 'dart:io' show Platform;
 
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
@@ -49,32 +31,23 @@ abstract class SingboxRuntimeClient {
 
   Future<bool> requestVPNPermission();
 
-  /// [НОВОЕ — бесшовная смена сервера] Переключает активный outbound внутри
-  /// группы-`selector` У РАБОТАЮЩЕГО ядра, не останавливая туннель.
+  /// Переключает активный outbound внутри группы-`selector` у работающего
+  /// ядра, не останавливая туннель. Ради этого в конфиг и добавляется
+  /// группа `proxy` (см. TunnelService._buildSingBoxConfig).
   ///
-  /// Ровно тот метод, ради которого в конфиг добавляется группа `proxy`
-  /// (см. TunnelService._buildSingBoxConfig). На Android форвардится в
-  /// `SingboxClient.selectOutbound` — тот уходит по MethodChannel в
-  /// FlutterSingboxClientPlugin.kt и дальше в libbox CommandClient, который
-  /// плагин держит открытым всё время работы сервиса. Ни VpnService, ни TUN
-  /// при этом не трогаются.
-  ///
-  /// Реализация ОБЯЗАНА бросать исключение там, где это не поддерживается,
-  /// а не молча ничего не делать: вызывающий (switchPreferredHost) ловит
-  /// ошибку и уходит на обычный путь с переподключением. Тихий no-op привёл
-  /// бы к тому, что пользователь нажал "сменить сервер", ничего не
-  /// произошло, и приложение отрапортовало бы об успехе.
+  /// Там, где переключение не поддерживается, реализация обязана бросить
+  /// исключение: вызывающий (switchPreferredHost) ловит его и уходит на
+  /// обычное переподключение. Тихий no-op выглядел бы для пользователя как
+  /// успешная смена сервера, которой не было.
   Future<void> selectOutbound(String groupTag, String outboundTag);
 
-  /// [НОВОЕ — замер задержки ПРИ ВКЛЮЧЁННОМ VPN] Просит работающее ядро
-  /// прогнать проверку задержки по всем участникам группы. Ядро делает это
-  /// само, своими же outbound'ами, не останавливая туннель: это настоящее
-  /// VLESS-рукопожатие до каждого сервера, а не TCP-стук в порт. Результаты
-  /// приходят не сюда, а отдельно — в [outboundGroupStream].
+  /// Просит работающее ядро прогнать проверку задержки по всем участникам
+  /// группы: настоящее VLESS-рукопожатие до каждого сервера, а не TCP-стук
+  /// в порт. Результаты приходят в [outboundGroupStream].
   Future<void> urlTest(String groupTag);
 
   /// Состояние групп outbound'ов: какой участник выбран сейчас и какая у
-  /// каждого измеренная задержка (`urlTestDelayMs`). Обновляется само после
+  /// каждого измеренная задержка (`urlTestDelayMs`). Обновляется после
   /// [urlTest] и при смене выбранного участника.
   Stream<dynamic> get outboundGroupStream;
 }
@@ -83,7 +56,5 @@ SingboxRuntimeClient createSingboxRuntime() {
   if (Platform.isWindows) {
     return WindowsSingboxRuntime();
   }
-  // Android (и любая другая платформа, где раньше стоял голый SingboxClient) —
-  // поведение полностью прежнее.
   return AndroidSingboxRuntime();
 }

@@ -7,23 +7,14 @@ import '../services/app_log_service.dart';
 import '../services/locale_service.dart';
 import 'logs_viewer_screen.dart';
 
-/// Безопасность (Kill Switch, DNS) — пункт меню из макета.
+/// Безопасность: Kill Switch, DNS, обход LAN, Mux, Fake IP.
 ///
-/// [ИСПРАВЛЕНО] Тумблеры были обычным `bool` полем State — забывались при
-/// выходе с экрана/перезапуске (подробности — services/local_prefs.dart).
-/// Теперь читаются/пишутся в LocalPrefs, значение реально сохраняется.
-/// Ключи хранения общие с SettingsScreen (killSwitch — один и тот же
-/// переключатель показан в двух местах интерфейса, обе копии теперь
-/// синхронизированы через один и тот же persist-ключ вместо двух
-/// независимых друг от друга состояний).
+/// Состояние тумблеров живёт в LocalPrefs. Ключи хранения общие с
+/// SettingsScreen — killSwitch показан в двух местах интерфейса и обе копии
+/// синхронизированы одним persist-ключом.
 ///
-/// [НОВОЕ] Набор пунктов расширен до уровня функционала Hiddify (по
-/// согласованию с разработчиком): строгий Kill Switch (физическая
-/// блокировка трафика, а не только авто-переподключение — см.
-/// tunnel_service.dart::_engageHardKillSwitch), обход локальной сети (LAN),
-/// мультиплексирование соединений (Mux) и Fake IP DNS. Каждый пункт реально
-/// прокидывается в конфиг sing-box при следующем подключении — см.
-/// TunnelService.connect()/_buildSingBoxConfig, никаких заглушек.
+/// Каждый пункт прокидывается в конфиг sing-box при следующем подключении
+/// (TunnelService.connect() / _buildSingBoxConfig).
 class SecurityScreen extends StatefulWidget {
   const SecurityScreen({super.key});
   @override
@@ -33,10 +24,9 @@ class SecurityScreen extends StatefulWidget {
 class _SecurityScreenState extends State<SecurityScreen> {
   final _prefs = LocalPrefs.instance;
 
-  // [ИЗМЕНЕНО] Дефолты подогнаны под макет: Kill Switch/Строгий режим/Обход
-  // LAN/Агрессивное переподключение — выключены; Защита от DNS-протечек,
-  // Fake IP, Блокировка рекламы и Mux — включены по умолчанию (Mux с
-  // протоколом SMux).
+  // Дефолты: Kill Switch, строгий режим, обход LAN и агрессивное
+  // переподключение выключены; защита от DNS-протечек, Fake IP, блокировка
+  // рекламы и Mux (SMux) — включены.
   bool _killSwitch = false;
   bool _strictKillSwitch = false;
   bool _dnsProtection = true;
@@ -45,16 +35,13 @@ class _SecurityScreenState extends State<SecurityScreen> {
   bool _muxEnabled = true;
   String _muxProtocol = 'smux';
   bool _fakeIpDns = true;
-  // [НОВОЕ] "Агрессивное переподключение" — настраиваемое число попыток
-  // восстановления соединения. false = 3 попытки (мягко,
-  // экономит батарею при долгом отсутствии сети), true = 8 попыток
-  // (пытается дольше на нестабильных сетях). Реально читается
-  // TunnelService.connect() при каждом подключении — см. tunnel_service.dart.
+  // Число попыток восстановить соединение: false = 3 (экономит батарею при
+  // долгом отсутствии сети), true = 8 (дольше пытается на нестабильных
+  // сетях). Читается TunnelService.connect() при каждом подключении.
   bool _aggressiveReconnect = false;
   bool _loaded = false;
 
-  // [НОВОЕ] Срок хранения локальных логов приложения — см.
-  // services/app_log_service.dart и раздел "Хранение логов" ниже.
+  // Срок хранения локальных логов — см. services/app_log_service.dart.
   int _logRetentionDays = AppLogService.defaultRetentionDays;
 
   static const _muxProtocolLabels = {
@@ -77,10 +64,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
 
   Future<void> _load() async {
     final results = await Future.wait([
-      // [ИЗМЕНЕНО] fallback приведён в соответствие с макетом — те же
-      // значения, что и в стартовых полях State выше, чтобы UI не
-      // расходился с реальным конфигом при первом запуске (до того как
-      // пользователь что-то сохранил в SharedPreferences).
+      // Fallback повторяет стартовые значения полей State выше, чтобы UI не
+      // расходился с конфигом до первого сохранения.
       _prefs.getBool(PrefKeys.killSwitch, fallback: false),
       _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
       _prefs.getBool(PrefKeys.dnsProtection, fallback: true),
@@ -91,9 +76,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
       _prefs.getBool(PrefKeys.fakeIpDns, fallback: true),
     ]);
     final savedMuxProtocol = await _prefs.getString(PrefKeys.muxProtocol);
-    // [НОВОЕ] Отдельным запросом, как и savedMuxProtocol выше — не трогает
-    // типы/индексы в results, чтобы ничего не сломать в существующей
-    // Future.wait-цепочке.
     final savedLogRetentionDays = await AppLogService.instance.getRetentionDays();
     if (!mounted) return;
     setState(() {
@@ -115,19 +97,16 @@ class _SecurityScreenState extends State<SecurityScreen> {
     });
   }
 
-  /// [НОВОЕ] Меняет срок хранения локальных логов — применяется сразу же к
-  /// уже накопленным записям (см. AppLogService.setRetentionDays), а не
-  /// только к новым.
+  /// Меняет срок хранения логов. Применяется сразу и к уже накопленным
+  /// записям — см. AppLogService.setRetentionDays.
   Future<void> _setLogRetentionDays(int? days) async {
     if (days == null) return;
     setState(() => _logRetentionDays = days);
     await AppLogService.instance.setRetentionDays(days);
   }
 
-  /// [НОВОЕ] Кнопка "Удалить все логи" — с подтверждением, как и другие
-  /// необратимые действия в приложении (см. "Выйти из аккаунта" в
-  /// menu_screen.dart/settings_screen.dart, "Очистить кэш" в
-  /// settings_screen.dart).
+  /// Удаление всех логов — с подтверждением, как и другие необратимые
+  /// действия в приложении.
   Future<void> _deleteAllLogs() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -157,22 +136,18 @@ class _SecurityScreenState extends State<SecurityScreen> {
     }
   }
 
-  /// [НОВОЕ] Реальная настройка, не декоративная — TunnelService.connect()
-  /// читает settings.reconnect_attempts при каждом подключении и именно
-  /// столько раз подряд пытается восстановить туннель после неожиданного
-  /// обрыва, прежде чем сдаться и показать предупреждение "интернет БЕЗ
-  /// защиты VPN".
+  /// TunnelService.connect() читает settings.reconnect_attempts и именно
+  /// столько раз пытается восстановить туннель после обрыва, прежде чем
+  /// показать предупреждение "интернет без защиты VPN".
   Future<void> _setAggressiveReconnect(bool v) async {
     setState(() => _aggressiveReconnect = v);
     await _prefs.setInt(PrefKeys.reconnectAttempts, v ? 8 : 3);
   }
 
-  /// [НОВОЕ] Строгий Kill Switch — см. подробный докстринг
-  /// PrefKeys.strictKillSwitch и TunnelService._engageHardKillSwitch.
-  /// Требует, чтобы обычный Kill Switch (переподключение) тоже был включён —
-  /// строгий режим включается уже ПОСЛЕ того, как обычные попытки
-  /// переподключения исчерпались, поэтому без базового тумблера ему просто
-  /// нечего "продолжать".
+  /// Строгий Kill Switch — см. PrefKeys.strictKillSwitch и
+  /// TunnelService._engageHardKillSwitch. Требует включённого обычного Kill
+  /// Switch: строгий режим вступает в силу после того, как обычные попытки
+  /// переподключения исчерпаны.
   Future<void> _setStrictKillSwitch(bool v) async {
     if (v && !_killSwitch) {
       setState(() {
@@ -228,7 +203,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ] Модуль переводчика.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(
@@ -247,9 +221,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
                 )
               else ...[
-                // [НОВОЕ] Живой индикатор, когда строгий Kill Switch реально
-                // держит трафик заблокированным прямо сейчас (см.
-                // TunnelService.hardKillSwitchActive).
+                // Индикатор того, что строгий Kill Switch держит трафик заблокированным
+                // прямо сейчас (TunnelService.hardKillSwitchActive).
                 ValueListenableBuilder<bool>(
                   valueListenable: TunnelService.instance.hardKillSwitchActive,
                   builder: (context, active, _) {
@@ -297,10 +270,8 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         ),
                       ),
                       const Divider(height: 20),
-                      // [НОВОЕ] Настоящий Kill Switch как в Hiddify — не
-                      // просто переподключение, а физическая блокировка
-                      // трафика, когда переподключиться не вышло. См.
-                      // tunnel_service.dart::_engageHardKillSwitch.
+                      // Строгий режим — физическая блокировка трафика, когда переподключиться
+                      // не вышло; см. tunnel_service.dart::_engageHardKillSwitch.
                       _Row(
                         icon: Icons.gpp_bad_rounded,
                         title: tr('Строгий режим (блокировать трафик)'),
@@ -352,7 +323,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         ),
                       ),
                       const Divider(height: 20),
-                      // [НОВОЕ] Fake IP — режим DNS-резолва, как в Hiddify.
                       _Row(
                         icon: Icons.alt_route_rounded,
                         title: tr('Fake IP (DNS)'),
@@ -374,9 +344,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         ),
                       ),
                       const Divider(height: 20),
-                      // [ИСПРАВЛЕНО] Обход локальной сети (LAN) — по
-                      // умолчанию выключено, включается вручную (как и все
-                      // остальные тумблеры на этом экране).
                       _Row(
                         icon: Icons.lan_rounded,
                         title: tr('Обход локальной сети'),
@@ -386,7 +353,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         trailing: NeonToggle(value: _bypassLan, onChanged: _setBypassLan),
                       ),
                       const Divider(height: 20),
-                      // [НОВОЕ] Mux — мультиплексирование соединений.
                       _Row(
                         icon: Icons.merge_type_rounded,
                         title: tr('Mux (мультиплексирование)'),
@@ -414,9 +380,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         ),
                       ],
                       const Divider(height: 20),
-                      // [НОВОЕ] Настраиваемая "живучесть" Kill Switch —
-                      // реально влияет на TunnelService.connect(), см.
-                      // _setAggressiveReconnect выше.
                       _Row(
                         icon: Icons.replay_circle_filled_rounded,
                         title: tr('Агрессивное переподключение'),
@@ -432,8 +395,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
                   ),
                 ),
                 const SizedBox(height: 14),
-                // [НОВОЕ] Хранение логов — срок автоудаления (1/7/30 дней)
-                // и ручное удаление всех записей. См. AppLogService.
                 SectionTitle(tr('Хранение логов')),
                 NeonCard(
                   child: Column(
@@ -468,10 +429,6 @@ class _SecurityScreenState extends State<SecurityScreen> {
                         ),
                       ),
                       const Divider(height: 20),
-                      // [НОВОЕ] Кнопка "Просмотреть логи" — ведёт на
-                      // LogsViewerScreen, который читает те же записи через
-                      // AppLogService.instance.getAll() и показывает их
-                      // списком в стиле остальных экранов приложения.
                       Center(
                         child: PillButton(
                           label: tr('Просмотреть логи'),

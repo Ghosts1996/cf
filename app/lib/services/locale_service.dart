@@ -3,37 +3,25 @@ import '../l10n/app_language.dart';
 import '../l10n/translations_en.dart' as en;
 import 'local_prefs.dart';
 
-/// [НОВОЕ] Модуль переводчика — ядро.
+/// Локализация интерфейса.
 ///
-/// Как это устроено (специально без сторонних пакетов вроде `easy_localization`
-/// или официального `flutter gen-l10n`/ARB — их генератор требует шаг
-/// кодогенерации при сборке, который негде было прогнать и проверить в
-/// этой среде; ниже — обычный Dart, ничего не генерируется):
+/// Сделано без сторонних пакетов и без кодогенерации ARB:
 ///
-/// 1. Весь интерфейс как был написан на русском текстом прямо в виджетах
-///    (`Text('Настройки')`) — так и остаётся. Русский текст остаётся
-///    единственным источником правды.
-/// 2. Каждая такая строка оборачивается в `tr('Настройки')` — если текущий
-///    язык русский (или в словаре перевода не нашлось), `tr()` вернёт
-///    строку как есть; если выбран другой язык — вернёт перевод из
-///    соответствующей карты (см. lib/l10n/translations_en.dart).
-/// 3. `LocaleService` — обычный `ChangeNotifier`-синглтон (тот же паттерн,
-///    что и `TunnelService`/`ApiClient` в этом репозитории): хранит
-///    текущий `AppLanguage`, persist через `LocalPrefs` (переживает
-///    перезапуск приложения — та же история багов, что описана в докстринге
-///    самого `LocalPrefs`), и уведомляет `main.dart`, когда язык меняется.
+/// 1. Русский текст в виджетах остаётся единственным источником правды.
+/// 2. Строка оборачивается в `tr('Настройки')`: для русского (или когда
+///    перевода нет) вернётся она же, иначе — значение из карты
+///    (lib/l10n/translations_en.dart).
+/// 3. LocaleService — ChangeNotifier-синглтон: хранит текущий язык,
+///    сохраняет его через LocalPrefs и уведомляет main.dart о смене.
 ///
-/// Кнопка "Язык" на экране "Настройки" вызывает [setLanguage] — дальше всё
-/// происходит само: `AnimatedBuilder` в `main.dart` перестраивает
-/// `MaterialApp` с новой `Locale`.
+/// Кнопка "Язык" вызывает [setLanguage], после чего AnimatedBuilder в
+/// main.dart перестраивает MaterialApp с новой Locale.
 class LocaleService extends ChangeNotifier {
   LocaleService._();
   static final LocaleService instance = LocaleService._();
 
-  /// [НОВОЕ] Здесь регистрируются все языки, для которых есть карта
-  /// переводов. Русский не нуждается в карте — это исходный язык кода.
-  /// Добавляя новый язык (см. докстринг в app_language.dart), добавь его
-  /// карту сюда одной строкой.
+  /// Все языки, для которых есть карта переводов. Русскому карта не нужна —
+  /// это исходный язык кода.
   static final Map<AppLanguage, Map<String, String>> _dictionaries = {
     AppLanguage.en: en.translationsEn,
   };
@@ -44,8 +32,8 @@ class LocaleService extends ChangeNotifier {
   bool _loaded = false;
   Future<void>? _loadFuture;
 
-  /// Дожидается, пока сохранённый язык прочитается из LocalPrefs. Вызывается
-  /// один раз в main() до runApp() — см. докстринг там же.
+  /// Дожидается, пока сохранённый язык прочитается из LocalPrefs.
+  /// Вызывается один раз в main() до runApp().
   Future<void> ensureLoaded() {
     return _loadFuture ??= _load();
   }
@@ -65,11 +53,9 @@ class LocaleService extends ChangeNotifier {
     await LocalPrefs.instance.setString(PrefKeys.appLanguage, value.code);
   }
 
-  /// Переводит [russianText] (исходная строка из кода) на текущий язык.
-  /// Если текущий язык — русский, или перевода для этой конкретной строки
-  /// ещё нет в карте (см. REPORT_TRANSLATOR.md — не весь текст приложения
-  /// переведён за один заход), возвращает исходную строку без изменений —
-  /// пользователь никогда не увидит пустое место или ключ вместо текста.
+  /// Переводит [russianText] на текущий язык. Для русского языка и для
+  /// строк, которых ещё нет в карте, возвращает исходный текст — вместо
+  /// текста никогда не появится пустое место или ключ.
   String translate(String russianText) {
     if (_language == AppLanguage.ru) return russianText;
     final dict = _dictionaries[_language];
@@ -78,7 +64,5 @@ class LocaleService extends ChangeNotifier {
   }
 }
 
-/// Короткий глобальный хелпер — короче, чем писать
-/// `LocaleService.instance.translate(...)` в каждом виджете.
-/// Использование: `Text(tr('Настройки'))` вместо `Text('Настройки')`.
+/// Короткий хелпер: `Text(tr('Настройки'))`.
 String tr(String russianText) => LocaleService.instance.translate(russianText);
