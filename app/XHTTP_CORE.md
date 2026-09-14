@@ -65,31 +65,56 @@
 
 ## Как получить ядро с XHTTP
 
-### Вариант 1 — через GitHub Actions (проще)
+Всё собрано и разложено автоматически — workflow
+`.github/workflows/build-xhttp-core.yml` не просто отдаёт `.aar` артефактом,
+а сам кладёт его в отдельную ветку плагина.
 
-1. Actions → **Build sing-box core with XHTTP** → Run workflow.
-2. `core_ref` — ревизия форка. По умолчанию `dd10a2129de7` (проверено, XHTTP
-   в ней есть).
-3. Скачать артефакт `libbox-xhttp-<ref>` — внутри `libbox.aar` (API 23+) и
-   `libbox-legacy.aar` (API 21+).
+### Что делает workflow
 
-### Вариант 2 — локально
+1. Клонирует `hiddify/hiddify-sing-box` на прибитом коммите
+   `8d94f44` (ветка по умолчанию у форка называется `extended`, не `main`).
+2. Собирает `libbox.aar` тем же `gomobile bind` и с теми же тегами, что и
+   `cmd/internal/build_libbox` самого ядра: пакет `io.nekohasekai`,
+   `-androidapi 23`, `-libname=box`. Поэтому `.aar` подходит плагину
+   `flutter_singbox_client` без единой правки Kotlin-кода.
+3. Проверяет собранную библиотеку на наличие режимов XHTTP (`stream-one` и
+   остальные) — иначе сборка падает, а не выкладывает тихо непригодное ядро.
+4. Проверяет размер: GitHub отклоняет push с файлом больше 100 МБ.
+5. Создаёт (или обновляет) ветку `ccurecc_singbox_xhttp` — копию рабочей
+   `ccurecc_singbox_dns`, отличающуюся ровно одним файлом,
+   `android/libs/libbox.aar`.
+
+### Архитектуры
+
+По умолчанию собираются только `android/arm64` и `android/arm`: на них
+работают все телефоны, а каждая лишняя архитектура добавляет к `.aar`
+примерно четверть его размера — с четырьмя файл упирается в лимит GitHub.
+Эмуляторы x86_64 при таком ядре работать не будут; нужны — задай
+`abis: android/arm64,android/arm,android/amd64` при ручном запуске и следи за
+размером.
+
+### Как запустить
+
+Файл лежит не в ветке по умолчанию, а GitHub показывает кнопку «Run workflow»
+только для workflow из неё. Поэтому основной триггер здесь — push, который
+меняет сам файл workflow в ветке `claude/xhttp-support`: достаточно тронуть
+комментарий «Пересборка №» в его шапке и запушить. Если файл когда-нибудь
+попадёт в ветку по умолчанию, заработает и обычный `workflow_dispatch` с теми
+же параметрами.
+
+### Локально
 
 Понадобятся Go (не ниже версии из `go.mod` ядра), JDK 17, Android SDK и NDK.
 
 ```bash
 git clone https://github.com/hiddify/hiddify-sing-box.git
-cd hiddify-sing-box && git checkout dd10a2129de7
-go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.11
-go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.11
+cd hiddify-sing-box && git checkout 8d94f44
+go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
+go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.12
 go run ./cmd/internal/build_libbox -target android   # -> libbox.aar
 ```
 
-Это тот же способ, которым ядро собирает себя само (`make lib_android`), с
-тем же пакетом `io.nekohasekai` — поэтому `.aar` подходит плагину
-`flutter_singbox_client` без правок Kotlin-кода.
-
-## Как подставить ядро, не трогая рабочую сборку
+## Как ядро подключается к приложению
 
 Плагин подключён git-зависимостью, и ядро лежит внутри него:
 
@@ -98,21 +123,15 @@ go run ./cmd/internal/build_libbox -target android   # -> libbox.aar
 flutter_singbox_client:
   git:
     url: https://github.com/Ghosts1996/cf.git
-    ref: ccurecc_singbox_dns        # ветка с текущим ядром
+    ref: ccurecc_singbox_xhttp     # ядро с XHTTP (собрано workflow'ом)
     path: app/third_party/flutter_singbox_client
 ```
 
-Поэтому переключение ядра — это переключение ветки, а не правка кода:
-
-1. Создать ветку плагина от рабочей:
-   `git checkout ccurecc_singbox_dns && git checkout -b ccurecc_singbox_xhttp`
-2. Заменить в ней `app/third_party/flutter_singbox_client/android/libs/libbox.aar`
-   собранным файлом, закоммитить и запушить.
-3. В ветке приложения с XHTTP поменять `ref:` на `ccurecc_singbox_xhttp`.
-4. `flutter pub get` (ревизия зафиксируется в `pubspec.lock`) и сборка APK.
-
-Рабочая ветка приложения при этом продолжает ссылаться на прежнее ядро —
-`ccurecc_singbox_dns` остаётся нетронутой. Откат = вернуть `ref:` обратно.
+Переключение ядра — это переключение ветки, а не правка кода. Рабочая ветка
+приложения (`claude/repository-analysis-5xv6jp`) продолжает ссылаться на
+`ccurecc_singbox_dns` с прежним ядром, и она не меняется вовсе. Откат для
+ветки с XHTTP — вернуть `ref:` обратно на `ccurecc_singbox_dns` и выполнить
+`flutter pub get`.
 
 ## Что проверить после подмены ядра
 
