@@ -31,20 +31,24 @@ dependencies:
   # Без платформенной настройки (App Group + Network Extension на iOS/macOS
   # через Xcode, sing-box.exe на Windows — см. app/NATIVE_SETUP.md) одно лишь
   # добавление пакета VPN не включит.
-  # Ядро то же самое, что в ccurecc_singbox_dns — файл libbox.aar не менялся.
-  # Ветка ccurecc_singbox_dns_vpndns отличается от неё одним файлом Kotlin:
-  # VpnService снова публикует DNS-резолвер (см. коммит в той ветке). Ветка с
-  # ядром на форке Hiddify
-  # (ccurecc_singbox_xhttp) собрана и лежит рядом, но по умолчанию не
-  # используется: она собрана только под arm64 и arm и без части протоколов,
-  # отчего APK худеет на треть, а поведение ядра отличается от проверенного.
-  # XHTTP в коде остаётся — приложение спрашивает поддержку у самого ядра, так
-  # что переключение ветки ниже включает его без правок кода
-  # (см. app/XHTTP_CORE.md).
+  # Ядро sing-box из форка hiddify/hiddify-sing-box: оно, в отличие от
+  # апстримного, умеет транспорт XHTTP (он же splithttp) и умеет рвать на
+  # куски собственное TLS-рукопожатие к серверу — то самое, по которому DPI
+  # решает, пропускать соединение. Собрано под те же четыре архитектуры, что и
+  # штатное (см. .github/workflows/build-xhttp-core.yml), 79 МБ против 91.
+  #
+  # Ветка ccurecc_singbox_xhttp собрана поверх ccurecc_singbox_dns_vpndns,
+  # то есть несёт и исправление публикации DNS на VPN-интерфейсе. Отличие от
+  # штатной ветки плагина — ровно два файла: libbox.aar и SingboxVPNService.kt.
+  #
+  # Откат на штатное ядро — поменять ref на ccurecc_singbox_dns и выполнить
+  # flutter pub get. Код приложения при этом не меняется: и XHTTP, и
+  # фрагментацию он включает только после того, как ядро само подтвердит их
+  # поддержку (см. app/XHTTP_CORE.md).
   flutter_singbox_client:
     git:
       url: https://github.com/Ghosts1996/cf.git
-      ref: ccurecc_singbox_dns_vpndns
+      ref: ccurecc_singbox_xhttp
       path: app/third_party/flutter_singbox_client
   # Список установленных приложений для экрана split-tunnel. API 2.0.0+ —
   # именованные аргументы (excludeSystemApps/excludeNonLaunchableApps).
