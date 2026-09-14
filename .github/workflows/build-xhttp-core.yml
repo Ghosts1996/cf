@@ -19,7 +19,7 @@ on:
   # push, который меняет сам этот файл в ветке с XHTTP. Чтобы пересобрать
   # ядро, достаточно тронуть комментарий ниже и запушить.
   #
-  # Пересборка № 1
+  # Пересборка № 2
   push:
     branches: [ claude/xhttp-support ]
     paths: [ '.github/workflows/build-xhttp-core.yml' ]
@@ -28,7 +28,9 @@ on:
       core_ref:
         description: 'Коммит, ветка или тег hiddify/hiddify-sing-box'
         required: true
-        default: 'main'
+        # Ветка по умолчанию у форка называется `extended`, не `main`.
+        # Прибит конкретный коммит: в нём XHTTP проверен глазами.
+        default: '8d94f445c72dfb704f2ed4d2984dcefc79362e66'
       abis:
         description: 'Архитектуры для gomobile bind'
         required: true
@@ -59,7 +61,7 @@ jobs:
         run: |
           git clone https://github.com/hiddify/hiddify-sing-box.git core
           cd core
-          git checkout "${{ inputs.core_ref || 'main' }}"
+          git checkout "${{ inputs.core_ref || '8d94f445c72dfb704f2ed4d2984dcefc79362e66' }}"
           echo "CORE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           grep -q 'V2RayTransportTypeXHTTP' constant/v2ray.go \
             || { echo "::error::в этой ревизии ядра нет XHTTP"; exit 1; }
@@ -161,7 +163,7 @@ jobs:
       - name: Upload core
         uses: actions/upload-artifact@v4
         with:
-          name: libbox-xhttp-${{ inputs.core_ref || 'main' }}
+          name: libbox-xhttp-${{ inputs.core_ref || '8d94f44' }}
           path: core/libbox.aar
           if-no-files-found: error
           retention-days: 30
