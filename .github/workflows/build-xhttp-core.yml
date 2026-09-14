@@ -19,7 +19,7 @@ on:
   # push, который меняет сам этот файл в ветке с XHTTP. Чтобы пересобрать
   # ядро, достаточно тронуть комментарий ниже и запушить.
   #
-  # Пересборка № 6
+  # Пересборка № 7
   push:
     branches: [ claude/xhttp-support ]
     paths: [ '.github/workflows/build-xhttp-core.yml' ]
@@ -39,6 +39,10 @@ on:
         description: 'Ветка плагина, куда положить собранное ядро'
         required: true
         default: 'ccurecc_singbox_xhttp'
+      base_branch:
+        description: 'Ветка плагина, от которой берутся исходники'
+        required: true
+        default: 'ccurecc_singbox_dns_vpndns'
       publish:
         description: 'Записать ядро в ветку плагина (нет — только артефакт)'
         required: true
@@ -165,11 +169,16 @@ jobs:
         if: ${{ (inputs.publish || 'true') == 'true' }}
         env:
           PLUGIN_BRANCH: ${{ inputs.plugin_branch || 'ccurecc_singbox_xhttp' }}
+          # База — ветка плагина с исправленной публикацией DNS на
+          # VPN-интерфейсе. Ядро с XHTTP должно нести её тоже, иначе
+          # переключение на него вернуло бы «подключено, но ничего не
+          # работает».
+          BASE_BRANCH: ${{ inputs.base_branch || 'ccurecc_singbox_dns_vpndns' }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git fetch origin ccurecc_singbox_dns
-          git checkout -B "$PLUGIN_BRANCH" origin/ccurecc_singbox_dns
+          git fetch origin "$BASE_BRANCH"
+          git checkout -B "$PLUGIN_BRANCH" "origin/$BASE_BRANCH"
           cp core/libbox.aar app/third_party/flutter_singbox_client/android/libs/libbox.aar
           git add app/third_party/flutter_singbox_client/android/libs/libbox.aar
           git commit -m "Ядро sing-box с поддержкой XHTTP
@@ -177,7 +186,7 @@ jobs:
           Собрано из hiddify/hiddify-sing-box @ ${CORE_SHA}
           архитектуры: ${{ inputs.abis || 'android/arm64,android/arm,android/amd64,android/386' }}
 
-          Ветка отличается от ccurecc_singbox_dns ровно одним файлом —
+          Ветка отличается от ${BASE_BRANCH} ровно одним файлом —
           android/libs/libbox.aar. Исходники плагина те же."
           git push --force origin "$PLUGIN_BRANCH"
           echo "ядро записано в ветку $PLUGIN_BRANCH"

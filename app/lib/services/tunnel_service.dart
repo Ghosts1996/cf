@@ -1497,6 +1497,57 @@ class TunnelService {
     }
   }
 
+  /// Умеет ли ядро фрагментировать собственное TLS-рукопожатие к серверу
+  /// (`tls_fragment` на диалере outbound'а). Это есть в форке
+  /// hiddify-sing-box и нет в апстриме, поэтому спрашиваем у ядра так же, как
+  /// про транспорты, — пробным конфигом.
+  bool? _tlsFragmentSupport;
+
+  Future<bool> _coreSupportsTlsFragment() async {
+    final cached = _tlsFragmentSupport;
+    if (cached != null) return cached;
+    try {
+      await _ensureInitialized();
+      final supported = await _checkConfigQuietly(jsonEncode({
+        'log': {'level': 'error'},
+        'outbounds': [
+          {
+            'type': 'vless',
+            'tag': 'probe',
+            'server': '127.0.0.1',
+            'server_port': 443,
+            'uuid': '00000000-0000-0000-0000-000000000000',
+            'tls_fragment': _tlsFragmentOptions,
+          }
+        ],
+      }));
+      _tlsFragmentSupport = supported;
+      return supported;
+    } catch (_) {
+      _tlsFragmentSupport = false;
+      return false;
+    }
+  }
+
+  /// Параметры фрагментации — те же, что по умолчанию у Hiddify: рвать
+  /// ClientHello на куски по 10-100 байт с паузой 50-200 мс между ними.
+  /// Именно ClientHello видит DPI, когда решает, пропускать ли соединение.
+  static const Map<String, dynamic> _tlsFragmentOptions = {
+    'enabled': true,
+    'size': '10-100',
+    'sleep': '50-200',
+    'method': 'tlsHello',
+  };
+
+  Future<bool> _checkConfigQuietly(String config) async {
+    try {
+      await _client.checkConfig(config).timeout(_nativeCallTimeout);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<bool> _checkProbeConfig(String type) async {
     try {
       await _client
@@ -1676,6 +1727,11 @@ class TunnelService {
         await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: false);
     final ipv6Enabled = await LocalPrefs.instance
         .getBool(PrefKeys.ipv6Enabled, fallback: false);
+    // Спрашиваем у ядра один раз за запуск: умеет ли оно рвать собственное
+    // рукопожатие. На штатном ядре — нет, и «Обход DPI» остаётся прежним
+    // правилом маршрутизации.
+    final tlsFragmentSupported =
+        dpiBypass ? await _coreSupportsTlsFragment() : false;
     // См. PrefKeys.excludeAppFromTunnel. При fallback false список исключений
     // ниже остаётся пустым и конфиг собирается ровно такой же, как без этой
     // настройки.
@@ -1781,6 +1837,7 @@ class TunnelService {
           muxProtocol: muxProtocol,
           fakeIpDns: fakeIpDns,
           ipv6Enabled: ipv6Enabled,
+          tlsFragmentSupported: tlsFragmentSupported,
           alternates: alternates,
         );
         // Если сборка ядра не переваривает группу-селектор, конфиг отвергается
@@ -1810,6 +1867,7 @@ class TunnelService {
             muxProtocol: muxProtocol,
             fakeIpDns: fakeIpDns,
             ipv6Enabled: ipv6Enabled,
+            tlsFragmentSupported: tlsFragmentSupported,
           );
           await _client.checkConfig(config);
         }
@@ -2304,6 +2362,9 @@ class TunnelService {
     String muxProtocol = 'h2mux',
     bool fakeIpDns = false,
     bool ipv6Enabled = false,
+    // Умеет ли ядро фрагментировать собственное рукопожатие (см.
+    // _coreSupportsTlsFragment). От этого зависит, чем включается «Обход DPI».
+    bool tlsFragmentSupported = false,
     // Остальные локации подписки. Пустой список означает один outbound и
     // никакой группы — см. построение `outbounds` ниже.
     List<_ParsedVless> alternates = const <_ParsedVless>[],
@@ -2327,6 +2388,14 @@ class TunnelService {
         // Hiddify подставляет xudp всегда, когда в ссылке нет packetEncoding
         // (ray2sing/vless.go).
         'packet_encoding': p.packetEncoding ?? 'xudp',
+        // «Обход DPI» в том виде, в каком он вообще что-то значит: рвётся на
+        // куски наше собственное TLS-рукопожатие к VLESS-серверу — то самое,
+        // по которому DPI решает, пропускать соединение или нет. Правило
+        // маршрутизации с tls_fragment, которое стояло здесь раньше, рвало
+        // рукопожатия уже внутри туннеля: для обхода блокировки бесполезно,
+        // потому что снаружи видно только внешнее соединение.
+        if (dpiBypass && tlsFragmentSupported)
+          'tls_fragment': _tlsFragmentOptions,
         // Mux (PrefKeys.muxEnabled) по умолчанию выключен — как и в Hiddify.
         // Мультиплексор sing-box (smux/yamux/h2mux) понимает только сервер на
         // sing-box; Xray за ним не следует, и обёрнутое соединение рвётся
@@ -2519,10 +2588,12 @@ class TunnelService {
       if (bypassLan)
         {'ip_is_private': true, 'action': 'route', 'outbound': 'direct'},
       if (blockAds) {'domain_suffix': _adBlockDomains, 'action': 'reject'},
-      // В sing-box 1.14 `tls_fragment` — булева опция route-action. Объект
-      // `{enabled: true}` не соответствует схеме ядра и отклоняется на
-      // checkConfig() с INVALID_CONFIG.
-      if (dpiBypass)
+      // Запасной вариант для ядра без фрагментации на outbound'е: правило
+      // маршрутизации с булевым tls_fragment. Оно рвёт рукопожатия внутри
+      // туннеля, а не наше собственное, и от блокировки по ClientHello не
+      // спасает — но и вреда не делает, а на части сетей помогает сайтам,
+      // которые режет уже сам провайдер за пределами туннеля.
+      if (dpiBypass && !tlsFragmentSupported)
         {
           'network': 'tcp',
           'action': 'route',
@@ -2709,6 +2780,7 @@ class TunnelService {
     bool fakeIpDns = false,
     bool bypassLan = false,
     bool ipv6Enabled = false,
+    bool tlsFragmentSupported = false,
     bool dnsProtection = true,
     String dnsProvider = 'cloudflare',
     String? customDns,
@@ -2743,6 +2815,7 @@ class TunnelService {
       muxProtocol: muxProtocol,
       fakeIpDns: fakeIpDns,
       ipv6Enabled: ipv6Enabled,
+      tlsFragmentSupported: tlsFragmentSupported,
       alternates: alternates,
     );
   }
