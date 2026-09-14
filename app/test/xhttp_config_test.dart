@@ -113,4 +113,42 @@ void main() {
     print('configs: ${dir.path}');
     expect(Directory(dir.path).listSync().length, 2);
   });
+  group('обход DPI', () {
+    const reality = 'vless://11111111-1111-1111-1111-111111111111@a.example.com:443'
+        '?type=tcp&security=reality&pbk=PUBKEY&sid=aa&sni=yahoo.com'
+        '&fp=chrome&flow=xtls-rprx-vision#DPI';
+
+    Map<String, dynamic> proxyOf(String config) =>
+        (jsonDecode(config) as Map<String, dynamic>)['outbounds']
+            .cast<Map<String, dynamic>>()
+            .first as Map<String, dynamic>;
+
+    test('на ядре с поддержкой рвётся собственное рукопожатие', () {
+      final config = TunnelService.instance.buildConfigFromUri(reality,
+          proxyOnly: true, dpiBypass: true, tlsFragmentSupported: true);
+      final fragment = proxyOf(config)['tls_fragment'] as Map<String, dynamic>;
+      expect(fragment['enabled'], true);
+      expect(fragment['method'], 'tlsHello');
+      // Правило маршрутизации при этом не нужно: оно рвёт трафик уже внутри
+      // туннеля и от блокировки по ClientHello не спасает.
+      final rules = (jsonDecode(config) as Map<String, dynamic>)['route']
+          ['rules'] as List;
+      expect(rules.any((r) => (r as Map).containsKey('tls_fragment')), isFalse);
+    });
+
+    test('на штатном ядре остаётся прежнее правило маршрутизации', () {
+      final config = TunnelService.instance.buildConfigFromUri(reality,
+          proxyOnly: true, dpiBypass: true, tlsFragmentSupported: false);
+      expect(proxyOf(config).containsKey('tls_fragment'), isFalse);
+      final rules = (jsonDecode(config) as Map<String, dynamic>)['route']
+          ['rules'] as List;
+      expect(rules.any((r) => (r as Map)['tls_fragment'] == true), isTrue);
+    });
+
+    test('выключенный тумблер не добавляет ничего', () {
+      final config = TunnelService.instance.buildConfigFromUri(reality,
+          proxyOnly: true, dpiBypass: false, tlsFragmentSupported: true);
+      expect(proxyOf(config).containsKey('tls_fragment'), isFalse);
+    });
+  });
 }
