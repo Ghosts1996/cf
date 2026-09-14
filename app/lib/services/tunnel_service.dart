@@ -8,6 +8,7 @@ import 'package:flutter_singbox_client/flutter_singbox_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:app_settings/app_settings.dart';
+import 'app_log_service.dart';
 import 'local_prefs.dart';
 import 'singbox_runtime.dart';
 
@@ -82,6 +83,7 @@ class TunnelService {
   StreamSubscription? _stateSub;
   StreamSubscription? _statsSub;
   StreamSubscription? _faultSub;
+  StreamSubscription? _coreLogSub;
   DateTime? _connectStartedAt;
   int _downloadTotalBytes = 0;
   int _uploadTotalBytes = 0;
@@ -243,6 +245,7 @@ class TunnelService {
       // иначе он подставит `DateTime.now()` и обнулит счётчик работающей
       // сессии.
       await _loadPersistedSession();
+      await _applyCompatDefaults();
       // Таймаут нужен и здесь: `_client.initialize()` — тоже MethodChannel-вызов,
       // и он единственный оставался без ограничения по времени. Если после свайпа
       // приложения из списка задач foreground VpnService подвис, await на этой
@@ -271,6 +274,27 @@ class TunnelService {
       _faultSub = _client.faultStream.listen((error) {
         lastError.value = error.toString();
       });
+      // Предупреждения и ошибки самого ядра — единственное место, где видно
+      // настоящую причину "подключено, а трафика нет": отказ сервера в
+      // рукопожатии, непонятый транспорт, сорванный резолв. Без этой
+      // подписки они оставались только в logcat. Пишем в тот же журнал, что
+      // показывает экран "Безопасность", и не трогаем info/debug — иначе
+      // полезное тонет в служебном потоке.
+      _coreLogSub = _client.coreLogStream.listen((entries) {
+        if (entries is! List) return;
+        for (final entry in entries) {
+          final level = entry.level;
+          if (level == LogLevel.warn) {
+            AppLogService.instance
+                .log('Ядро: ${entry.message}', level: AppLogLevel.warning);
+          } else if (level == LogLevel.error ||
+              level == LogLevel.fatal ||
+              level == LogLevel.panic) {
+            AppLogService.instance
+                .log('Ядро: ${entry.message}', level: AppLogLevel.error);
+          }
+        }
+      });
     } catch (e) {
       // Плагин мог не отдать стримы, если его initialize() выше отвалился
       // по таймауту. Это не повод рушить весь запуск приложения — состояние
@@ -280,6 +304,29 @@ class TunnelService {
     }
 
     _initialized = true;
+  }
+
+  /// Разовый сброс трёх настроек, которые раньше включались по умолчанию и
+  /// ломают трафик на серверах Xray (вся линейка x-ui, включая 3x-ui):
+  /// мультиплексор, Fake IP и фрагментация TLS. Симптом одинаковый и
+  /// обманчивый — туннель поднимается, счётчик времени идёт, а любой сайт
+  /// отвечает разрывом соединения.
+  ///
+  /// Сбрасываем именно сохранённые значения, а не выставляем новые: после
+  /// миграции пользователь волен включить любую из трёх обратно, и второй раз
+  /// его выбор никто не тронет.
+  Future<void> _applyCompatDefaults() async {
+    try {
+      final prefs = LocalPrefs.instance;
+      if (await prefs.getBool(PrefKeys.compatDefaultsApplied)) return;
+      await prefs.remove(PrefKeys.muxEnabled);
+      await prefs.remove(PrefKeys.fakeIpDns);
+      await prefs.remove(PrefKeys.dpiBypass);
+      await prefs.setBool(PrefKeys.compatDefaultsApplied, true);
+    } catch (_) {
+      // Недоступный SharedPreferences не должен мешать запуску: в худшем
+      // случае миграция повторится при следующем старте.
+    }
   }
 
   /// Однократное чтение сохранённого состояния сессии с диска. Никогда не
@@ -1298,6 +1345,72 @@ class TunnelService {
     }
   }
 
+  /// ALPN для TLS-блока. Транспорт диктует его жёстче, чем ссылка: ws и
+  /// httpupgrade работают поверх HTTP/1.1, gRPC — поверх HTTP/2, QUIC — поверх
+  /// HTTP/3. Панели этот параметр в ссылке часто не проставляют вовсе или
+  /// проставляют неверно, и сервер отвечает отказом на ALPN, которого не ждёт.
+  /// Порядок и состав повторяют ray2sing (hiddify): для HTTP-подобных
+  /// транспортов отдаём обе версии, чтобы сервер выбрал сам.
+  static List<String>? _alpnForTransport(String? transportType, String? alpn) {
+    switch (transportType) {
+      case 'ws':
+      case 'httpupgrade':
+      case 'grpc':
+      case 'http':
+        return const ['h2', 'http/1.1'];
+      case 'quic':
+        return const ['h3'];
+    }
+    if (alpn == null || alpn.trim().isEmpty) return null;
+    final parts = alpn
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    return parts.isEmpty ? null : parts;
+  }
+
+  /// Разбирает адрес DNS-сервера в поля sing-box. Принимает и голый IP
+  /// (`1.1.1.1` — обычный UDP), и адрес со схемой (`https://dns.google/dns-query`,
+  /// `tls://1.1.1.1`). Так же это делает Hiddify (hiddify-core: getDnsAddress).
+  static Map<String, dynamic> _dnsServerOptions(String address) {
+    final raw = address.trim();
+    if (!raw.contains('://')) {
+      return {'type': 'udp', 'server': raw};
+    }
+    final uri = Uri.tryParse(raw);
+    if (uri == null || uri.host.isEmpty) {
+      return {'type': 'udp', 'server': raw};
+    }
+    final scheme = uri.scheme.toLowerCase();
+    const known = {'udp', 'tcp', 'tls', 'https', 'quic', 'h3'};
+    return {
+      'type': known.contains(scheme) ? scheme : 'udp',
+      'server': uri.host,
+      if (uri.hasPort) 'server_port': uri.port,
+      if ((scheme == 'https' || scheme == 'h3') && uri.path.isNotEmpty)
+        'path': uri.path,
+    };
+  }
+
+  /// Отделяет параметр `ed` (ранние данные, 0-RTT) от пути ws/httpupgrade.
+  /// Xray передаёт его внутри пути, sing-box ждёт отдельным полем.
+  static _WsPath _splitEarlyData(String? rawPath) {
+    var path = (rawPath == null || rawPath.isEmpty) ? '/' : rawPath;
+    if (!path.startsWith('/')) path = '/$path';
+    final q = path.indexOf('?');
+    if (q < 0) return _WsPath(path, 0);
+    final query = Uri.splitQueryString(path.substring(q + 1));
+    final ed = int.tryParse(query['ed'] ?? '') ?? 0;
+    if (ed <= 0) return _WsPath(path, 0);
+    final rest = Map<String, String>.from(query)..remove('ed');
+    final base = path.substring(0, q);
+    final tail = rest.isEmpty
+        ? ''
+        : '?${rest.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}').join('&')}';
+    return _WsPath('$base$tail', ed);
+  }
+
   static bool _isTransportSupported(_ParsedVless p) {
     final type = (p.transportType ?? 'tcp').trim().toLowerCase();
     return type.isEmpty || _supportedTransports.contains(type);
@@ -1398,7 +1511,7 @@ class TunnelService {
     final blockAds =
         await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: true);
     final dpiBypass =
-        await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: true);
+        await LocalPrefs.instance.getBool(PrefKeys.dpiBypass, fallback: false);
     final proxyOnly = await LocalPrefs.instance
         .getBool(PrefKeys.proxyOnlyMode, fallback: false);
     final dnsProvider =
@@ -1427,11 +1540,11 @@ class TunnelService {
     final bypassLan =
         await LocalPrefs.instance.getBool(PrefKeys.bypassLan, fallback: false);
     final muxEnabled = await LocalPrefs.instance
-        .getBool(PrefKeys.muxEnabled, fallback: true);
+        .getBool(PrefKeys.muxEnabled, fallback: false);
     final muxProtocol =
-        await LocalPrefs.instance.getString(PrefKeys.muxProtocol) ?? 'smux';
+        await LocalPrefs.instance.getString(PrefKeys.muxProtocol) ?? 'h2mux';
     final fakeIpDns =
-        await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: true);
+        await LocalPrefs.instance.getBool(PrefKeys.fakeIpDns, fallback: false);
     final ipv6Enabled = await LocalPrefs.instance
         .getBool(PrefKeys.ipv6Enabled, fallback: false);
     // См. PrefKeys.excludeAppFromTunnel. При fallback false список исключений
@@ -1737,9 +1850,11 @@ class TunnelService {
     await _stateSub?.cancel();
     await _statsSub?.cancel();
     await _faultSub?.cancel();
+    await _coreLogSub?.cancel();
     _stateSub = null;
     _statsSub = null;
     _faultSub = null;
+    _coreLogSub = null;
 
     // Секундомер стартует только после того, как сессия реально поднята, прямо
     // перед единственным запросом-пробником. Запущенный раньше, он включал бы
@@ -1877,9 +1992,9 @@ class TunnelService {
     // приложения (PrefKeys.excludeAppFromTunnel).
     List<String> extraExcludedPackages = const <String>[],
     bool bypassLan = false,
-    bool muxEnabled = true,
-    String muxProtocol = 'smux',
-    bool fakeIpDns = true,
+    bool muxEnabled = false,
+    String muxProtocol = 'h2mux',
+    bool fakeIpDns = false,
     bool ipv6Enabled = false,
     // Остальные локации подписки. Пустой список означает один outbound и
     // никакой группы — см. построение `outbounds` ниже.
@@ -1897,27 +2012,47 @@ class TunnelService {
         'server_port': p.port,
         'uuid': p.uuid,
         if (p.flow != null && p.flow!.isNotEmpty) 'flow': p.flow,
-        // Mux (PrefKeys.muxEnabled) несовместим с flow: xtls-rprx-vision и
-        // подобные потоки сами управляют TCP-соединением на уровне TLS и не могут
-        // быть завёрнуты в мультиплексор. Включаем, только если flow не задан —
-        // ровно как это ограничение работает в самом sing-box.
+        // Как упаковывать UDP внутри VLESS. Панели линейки x-ui поднимают
+        // Xray, а он принимает только XUDP; в «родном» формате sing-box такие
+        // пакеты сервер молча отбрасывает, и при живом TCP не работают ни
+        // QUIC, ни звонки в мессенджерах, ни DNS по UDP через туннель.
+        // Hiddify подставляет xudp всегда, когда в ссылке нет packetEncoding
+        // (ray2sing/vless.go).
+        'packet_encoding': p.packetEncoding ?? 'xudp',
+        // Mux (PrefKeys.muxEnabled) по умолчанию выключен — как и в Hiddify.
+        // Мультиплексор sing-box (smux/yamux/h2mux) понимает только сервер на
+        // sing-box; Xray за ним не следует, и обёрнутое соединение рвётся
+        // сразу после рукопожатия. Включать стоит, только если точно известно,
+        // что на той стороне sing-box.
+        //
+        // С flow: xtls-rprx-vision несовместим в любом случае: такие потоки
+        // сами управляют TCP-соединением на уровне TLS.
         if (muxEnabled && (p.flow == null || p.flow!.isEmpty))
           'multiplex': {
             'enabled': true,
             'protocol': muxProtocol,
             'max_streams': 8,
+            'padding': true,
           },
       };
 
       if (p.security == 'reality' || p.security == 'tls') {
+        // uTLS подставляем только там, где он действительно нужен: отпечаток
+        // задан в ссылке или это Reality (без маскировки под браузер Reality
+        // не работает вовсе). Навязывать «хром» обычному TLS не нужно — часть
+        // серверов на нестандартный ClientHello отвечает отказом. Так же
+        // поступает Hiddify (ray2sing: fp по умолчанию только для reality).
+        final fingerprint = (p.fp != null && p.fp!.isNotEmpty)
+            ? p.fp
+            : (p.security == 'reality' ? 'chrome' : null);
+        final alpn = _alpnForTransport(p.transportType, p.alpn);
         outbound['tls'] = {
           'enabled': true,
           'server_name': p.sni ?? p.host,
-          if (p.alpn != null && p.alpn!.isNotEmpty) 'alpn': p.alpn!.split(','),
-          'utls': {
-            'enabled': true,
-            'fingerprint': (p.fp == null || p.fp!.isEmpty) ? 'chrome' : p.fp
-          },
+          if (p.allowInsecure) 'insecure': true,
+          if (alpn != null) 'alpn': alpn,
+          if (fingerprint != null)
+            'utls': {'enabled': true, 'fingerprint': fingerprint},
           if (p.security == 'reality')
             'reality': {
               'enabled': true,
@@ -1933,13 +2068,20 @@ class TunnelService {
       // http-заголовками из другого клиента) не подключаются: сервер отвергает handshake.
       final transportType = p.transportType ?? 'tcp';
       if (transportType == 'ws') {
+        // `ed` в query пути — размер раннего пакета (0-RTT). Xray кладёт его
+        // прямо в path (`/ws?ed=2048`), sing-box ждёт отдельных полей
+        // max_early_data и early_data_header_name. Оставленный в пути
+        // параметр сервер не понимает, и соединение обрывается на апгрейде.
+        final ws = _splitEarlyData(p.transportPath);
         outbound['transport'] = {
           'type': 'ws',
-          'path': (p.transportPath == null || p.transportPath!.isEmpty)
-              ? '/'
-              : p.transportPath,
+          'path': ws.path,
           if (p.transportHost != null && p.transportHost!.isNotEmpty)
             'headers': {'Host': p.transportHost},
+          if (ws.maxEarlyData > 0) ...{
+            'max_early_data': ws.maxEarlyData,
+            'early_data_header_name': 'Sec-WebSocket-Protocol',
+          },
         };
       } else if (transportType == 'grpc') {
         outbound['transport'] = {
@@ -1947,6 +2089,11 @@ class TunnelService {
           'service_name': (p.transportPath == null || p.transportPath!.isEmpty)
               ? ''
               : p.transportPath,
+          // Те же таймауты, что подставляет Hiddify: без них соединение
+          // держится до разрыва на стороне сервера и не переоткрывается.
+          'idle_timeout': '15s',
+          'ping_timeout': '15s',
+          'permit_without_stream': false,
         };
       } else if (transportType == 'http') {
         outbound['transport'] = {
@@ -1956,6 +2103,9 @@ class TunnelService {
           'path': (p.transportPath == null || p.transportPath!.isEmpty)
               ? '/'
               : p.transportPath,
+          // Без TLS транспорт http — это обычная HTTP-маскировка, и запрос
+          // должен быть GET. Поверх TLS это уже HTTP/2, там метод не задаётся.
+          if (p.security != 'tls' && p.security != 'reality') 'method': 'GET',
         };
       } else if (transportType == 'httpupgrade') {
         // HTTPUpgrade — ближайший к XHTTP транспорт, который это ядро реально
@@ -1965,10 +2115,8 @@ class TunnelService {
         outbound['transport'] = {
           'type': 'httpupgrade',
           if (p.transportHost != null && p.transportHost!.isNotEmpty)
-            'host': p.transportHost,
-          'path': (p.transportPath == null || p.transportPath!.isEmpty)
-              ? '/'
-              : p.transportPath,
+            'headers': {'Host': p.transportHost},
+          'path': _splitEarlyData(p.transportPath).path,
         };
       } else if (transportType == 'xhttp') {
         // XHTTP (в старых панелях — splithttp).
@@ -2000,89 +2148,87 @@ class TunnelService {
       return outbound;
     }
 
-    // DNS должен быть доступен ещё до первого DNS-ответа через туннель.
-    // Поэтому для встроенных провайдеров используем DoT с фиксированным IP
-    // и корректным TLS SNI, а не DoH к голому IP. Иначе часть устройств
-    // поднимает TUN, но не может установить защищённое DNS-соединение —
-    // внешне это выглядит как «подключено, а интернета нет».
+    // DNS-блок повторяет схему Hiddify (hiddify-core/v2/config/dns.go):
+    // три резолвера с разными задачами.
+    //
+    //  * dns-remote — всё, что уходит в туннель. Обычный UDP, а не DoT/DoH:
+    //    запрос и так идёт внутри VLESS, второй слой TLS ничего не скрывает,
+    //    зато добавляет рукопожатие, которое на части сетей не проходит —
+    //    снаружи это выглядит как «подключено, а интернета нет».
+    //  * dns-direct — прямые соединения и, главное, адрес самого
+    //    VLESS-сервера, когда он задан доменом (route.default_domain_resolver
+    //    ниже). Через туннель его резолвить нельзя: туннель ещё не поднят.
+    //  * dns-local — системный резолвер устройства, им разрешается адрес
+    //    самого dns-direct, если тот задан доменом.
     const dnsProviders = {
-      'cloudflare': {'server': '1.1.1.1', 'server_name': 'cloudflare-dns.com'},
-      'google': {'server': '8.8.8.8', 'server_name': 'dns.google'},
-      'adguard': {
-        'server': '94.140.14.14',
-        'server_name': 'dns.adguard-dns.com'
-      },
-      'quad9': {'server': '9.9.9.9', 'server_name': 'dns.quad9.net'},
+      'cloudflare': '1.1.1.1',
+      'google': '8.8.8.8',
+      'adguard': '94.140.14.14',
+      'quad9': '9.9.9.9',
     };
     // Провайдер 'custom' — адрес с экрана "Настройки"
     // (PrefKeys.customDnsServer). Если custom выбран, но адрес не указан,
     // откатываемся на Cloudflare, чтобы не отправлять sing-box пустой server.
-    final selectedDns =
-        dnsProviders[dnsProvider] ?? dnsProviders['cloudflare']!;
     final hasCustomDns = dnsProvider == 'custom' &&
         customDns != null &&
         customDns.trim().isNotEmpty;
+    final remoteDnsAddress = hasCustomDns
+        ? customDns.trim()
+        : (dnsProviders[dnsProvider] ?? '1.1.1.1');
 
-    // Fake IP (PrefKeys.fakeIpDns): домены внутри туннеля резолвятся в адреса
-    // из служебных диапазонов 198.18.0.0/15 и fc00::/18, а настоящий домен
-    // подставляется обратно тем же sniffing, который уже используется для
-    // блокировки рекламы (route.rules 'action': 'sniff' ниже). Формат —
-    // штатный блок dns.fakeip sing-box.
     final dnsServers = <Map<String, dynamic>>[
       {
-        // Для произвольного сервера оставляем прежний DoH-режим: у него нет
-        // известного имени сертификата/SNI, необходимого для безопасного DoT.
-        'type': hasCustomDns ? 'https' : 'tls',
-        'tag': 'remote-dns',
-        'server': hasCustomDns ? customDns.trim() : selectedDns['server'],
-        if (!hasCustomDns) 'server_port': 853,
-        if (!hasCustomDns)
-          'tls': {
-            'enabled': true,
-            'server_name': selectedDns['server_name'],
-          },
-        // DNS перехватывается правилом hijack-dns ниже, поэтому должен
-        // направляться через VLESS при любом положении UI-тумблера.
+        ..._dnsServerOptions(remoteDnsAddress),
+        'tag': 'dns-remote',
         'detour': 'proxy',
+        'domain_resolver': 'dns-direct',
       },
+      {
+        ..._dnsServerOptions('1.1.1.1'),
+        'tag': 'dns-direct',
+        'domain_resolver': 'dns-local',
+      },
+      {'type': 'local', 'tag': 'dns-local'},
+      // Fake IP (PrefKeys.fakeIpDns): домены резолвятся в адреса из служебных
+      // диапазонов мгновенно, без запроса наружу, а настоящий домен ядро
+      // подставляет обратно по своей таблице. Таблица обязана переживать
+      // перезапуск ядра — см. experimental.cache_file ниже.
       if (fakeIpDns)
         {
           'type': 'fakeip',
-          'tag': 'fakeip',
+          'tag': 'dns-fake',
           'inet4_range': '198.18.0.0/15',
           'inet6_range': 'fc00::/18',
         },
-      // Системный резолвер — им ядро разрешает адрес самого VLESS-сервера,
-      // когда тот задан доменом (см. route.default_domain_resolver ниже).
-      {'type': 'local', 'tag': 'local-dns'},
     ];
     final dnsRules = <Map<String, dynamic>>[
       if (fakeIpDns)
         {
           'query_type': ['A', 'AAAA'],
-          'server': 'fakeip',
+          'action': 'route',
+          'server': 'dns-fake',
         },
     ];
 
     final routeRules = <Map<String, dynamic>>[
+      // Порядок правил взят у Hiddify: сначала сниффинг, потом перехват DNS,
+      // и только потом всё остальное. В TUN-режиме на вход попадают голые
+      // IP-пакеты без домена, и единственный источник поля "domain" для
+      // правил ниже — сниффинг SNI из TLS ClientHello.
+      {'action': 'sniff'},
+      {'protocol': 'dns', 'action': 'hijack-dns'},
       // geoip:'private' здесь использовать нельзя: база GeoIP объявлена
-      // ustaревшей в sing-box 1.8.0 и удалена в 1.12.0 — отсюда ошибка
+      // устаревшей в sing-box 1.8.0 и удалена в 1.12.0 — отсюда ошибка
       // "geoip database is deprecated" и разрыв соединения на всех серверах.
-      // Замена — булево ip_is_private: никакой базы не требует и матчит приватные
-      // диапазоны прямо в бинарнике.
+      // Замена — булево ip_is_private: никакой базы не требует и матчит
+      // приватные диапазоны прямо в бинарнике.
       //
       // Под условием bypassLan: выключив "Обход локальной сети", пользователь
       // заворачивает в туннель и LAN-трафик — например, чтобы достучаться до
       // ресурсов в сети самого VPN-сервера.
       if (bypassLan)
         {'ip_is_private': true, 'action': 'route', 'outbound': 'direct'},
-      // 'sniff' обязан идти перед доменной блокировкой рекламы. В TUN-режиме на
-      // вход попадают голые IP-пакеты без домена, и единственный источник поля
-      // "domain" для правила ниже — сниффинг SNI из TLS ClientHello. Стоя раньше
-      // сниффинга, правило по domain_suffix не совпадает никогда.
-      {'action': 'sniff'},
       if (blockAds) {'domain_suffix': _adBlockDomains, 'action': 'reject'},
-      {'protocol': 'dns', 'action': 'hijack-dns'},
       // В sing-box 1.14 `tls_fragment` — булева опция route-action. Объект
       // `{enabled: true}` не соответствует схеме ядра и отклоняется на
       // checkConfig() с INVALID_CONFIG.
@@ -2160,7 +2306,11 @@ class TunnelService {
         'type': 'tun',
         'tag': 'tun-in',
         'interface_name': 'vpnonline-tun',
-        'mtu': 1500,
+        // 9000, как в Hiddify и по умолчанию в sing-box. TCP внутри TUN
+        // терминируется самим ядром, наружу данные уходят отдельным
+        // соединением, поэтому большой MTU не приводит к фрагментации, зато
+        // снимает лишние проходы по стеку.
+        'mtu': 9000,
         // strict_route обязателен на Android: без него не работает 'hijack-dns'
         // ниже (в документации sing-box — "prevents IP address leaks and makes DNS
         // hijacking work on Android").
@@ -2198,43 +2348,53 @@ class TunnelService {
 
     final config = <String, dynamic>{
       'log': {'level': 'warn'},
-      // Явная 'strategy' обязательна. Без неё sing-box может резолвить и адрес
-      // самого VLESS-сервера (когда он задан доменом), и обычные сайты в IPv6 у
-      // провайдера, который формально его поддерживает, но реально не
-      // маршрутизирует AAAA — частая ситуация у мобильных операторов. TCP SYN на
-      // IPv6-адрес уходит в никуда без ошибки, соединение просто висит: те же
-      // "подключено, 0 МБ", но уже из-за резолва. IPv4 для VLESS+Reality
-      // достаточно.
-      //
-      // Когда пользователь осознанно включил IPv6, берём 'prefer_ipv4' вместо
-      // жёсткого 'ipv4_only': резолвер по-прежнему предпочитает IPv4, но при
-      // отсутствии A-записи честно отдаёт AAAA, а не отбрасывает домен.
       'dns': {
         'servers': dnsServers,
         if (dnsRules.isNotEmpty) 'rules': dnsRules,
-        // 'final' — фолбэк, когда ни одно правило не сработало. fakeIpDns
-        // подключается отдельным правилом выше (query_type A/AAAA -> server
-        // fakeip), поэтому final всегда остаётся настоящим резолвером: иначе
-        // запросы других типов (TXT, MX) тоже ушли бы в fakeip и не получили
-        // ответа.
-        'final': 'remote-dns',
+        // 'final' — фолбэк, когда ни одно правило не сработало. Тумблер
+        // "Защита от DNS-протечек" решает, куда он ведёт: через туннель
+        // (запросы видит только VPN-сервер) или напрямую (быстрее, но имена
+        // сайтов видит провайдер).
+        'final': dnsProtection ? 'dns-remote' : 'dns-direct',
+        // Явная 'strategy' обязательна. Без неё sing-box может резолвить
+        // сайты в IPv6 у провайдера, который формально его поддерживает, но
+        // реально не маршрутизирует AAAA — частая ситуация у мобильных
+        // операторов. TCP SYN на IPv6-адрес уходит в никуда без ошибки,
+        // соединение просто висит: те же "подключено, 0 МБ".
+        //
+        // Когда пользователь осознанно включил IPv6, берём 'prefer_ipv4'
+        // вместо жёсткого 'ipv4_only': резолвер по-прежнему предпочитает
+        // IPv4, но при отсутствии A-записи честно отдаёт AAAA.
         'strategy': ipv6Enabled ? 'prefer_ipv4' : 'ipv4_only',
-        'independent_cache': true,
+        'independent_cache': false,
       },
       'inbounds': inbounds,
       'outbounds': outbounds,
       'route': {
+        // На Android сокеты самого ядра защищает VpnService.protect(), и
+        // вызывает его ядро только при включённом auto_detect_interface —
+        // иначе исходящее соединение уйдёт обратно в TUN и зациклится.
         'auto_detect_interface': true,
         'final': 'proxy',
         // Чем резолвить домены, к которым подключается само ядро — прежде
         // всего адрес VLESS-сервера. Без этого поля резолв идёт общим путём,
-        // то есть через remote-dns с `detour: proxy`: чтобы поднять туннель,
+        // то есть через dns-remote с `detour: proxy`: чтобы поднять туннель,
         // нужно зарезолвить домен, а резолвер ходит через тот же ещё не
         // поднятый туннель. На сервере, заданном IP, это незаметно, а на
-        // домене подключение висит до таймаута. Плюс без этого поля sing-box
-        // 1.12 пишет предупреждение, а в 1.14 оно станет ошибкой.
-        'default_domain_resolver': 'local-dns',
+        // домене подключение висит до таймаута.
+        'default_domain_resolver': {'server': 'dns-direct'},
         'rules': routeRules,
+      },
+      // Файл состояния ядра. Без него таблица Fake IP живёт только в памяти
+      // процесса: после перезапуска ядра адреса 198.18.x.x, уже закэшированные
+      // браузером и мессенджерами, перестают разворачиваться обратно в домены,
+      // и соединения рвутся с "missing fakeip record" — снаружи это выглядит
+      // как ERR_CONNECTION_RESET на каждом сайте.
+      'experimental': {
+        'cache_file': {
+          'enabled': true,
+          if (fakeIpDns) 'store_fakeip': true,
+        },
       },
     };
 
@@ -2502,6 +2662,8 @@ class TunnelService {
           xhttpMode: xhttpMode,
           transportHost: transportHost,
           transportPath: transportPath,
+          packetEncoding: item['packet_encoding'] as String?,
+          allowInsecure: tls?['insecure'] == true,
           remark: (item['tag'] as String?) ?? host,
         ));
       }
@@ -2833,9 +2995,11 @@ class TunnelService {
     await _stateSub?.cancel();
     await _statsSub?.cancel();
     await _faultSub?.cancel();
+    await _coreLogSub?.cancel();
     _stateSub = null;
     _statsSub = null;
     _faultSub = null;
+    _coreLogSub = null;
     // Подписки сняты — значит клиент больше не инициализирован в том смысле, в
     // каком это понимает `_ensureInitialized()`. Без сброса полей повторный
     // вызов после dispose() увидел бы `_initialized == true` и не подписался бы
@@ -2911,6 +3075,8 @@ class _ParsedVless {
     this.xhttpMode,
     this.transportHost,
     this.transportPath,
+    this.packetEncoding,
+    this.allowInsecure = false,
     required this.remark,
   });
 
@@ -2931,7 +3097,21 @@ class _ParsedVless {
   final String? xhttpMode;
   final String? transportHost; // Host-заголовок для ws/http-маскировки
   final String? transportPath; // path для ws / service_name-путь для grpc
+
+  /// Упаковка UDP внутри VLESS из параметра `packetEncoding`. null — не
+  /// задано, тогда подставляется `xudp` (так же поступает Hiddify).
+  final String? packetEncoding;
+
+  /// `allowInsecure`/`insecure` из ссылки — не проверять сертификат сервера.
+  /// Встречается у ключей с самоподписанным сертификатом.
+  final bool allowInsecure;
   final String remark; // Имя сервера
+
+  /// «Да» в понимании панелей — и `1`, и `true`.
+  static bool _isTruthy(String? value) {
+    final v = value?.trim().toLowerCase();
+    return v == '1' || v == 'true';
+  }
 
   static _ParsedVless? tryParse(String line) {
     try {
@@ -3001,6 +3181,10 @@ class _ParsedVless {
         xhttpMode: xhttpMode.isEmpty ? null : xhttpMode,
         transportHost: q['host'],
         transportPath: q['path'] ?? q['serviceName'],
+        packetEncoding: (q['packetEncoding'] ?? q['packetencoding'])?.trim(),
+        allowInsecure: _isTruthy(q['allowInsecure']) ||
+            _isTruthy(q['allowinsecure']) ||
+            _isTruthy(q['insecure']),
         remark: remark,
       );
     } catch (_) {
@@ -3014,4 +3198,10 @@ class TunnelException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+/// Путь ws/httpupgrade, из которого вынесен параметр ранних данных.
+class _WsPath {
+  const _WsPath(this.path, this.maxEarlyData);
+  final String path;
+  final int maxEarlyData;
 }

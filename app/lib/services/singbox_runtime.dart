@@ -22,6 +22,10 @@ abstract class SingboxRuntimeClient {
   Stream<dynamic> get trafficStatsStream;
   Stream<dynamic> get faultStream;
 
+  /// Поток журнала самого ядра пачками записей. Нужен для диагностики:
+  /// причина «туннель поднят, а трафика нет» видна только здесь.
+  Stream<dynamic> get coreLogStream;
+
   Future<dynamic> getServiceState();
   Future<dynamic> getTrafficStats();
 

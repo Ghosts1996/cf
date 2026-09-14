@@ -104,6 +104,12 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   @override
   Stream<dynamic> get faultStream => _faultCtrl.stream;
 
+  // На Windows ядро — отдельный процесс sing-box.exe, и его журнал пишется в
+  // файл рядом с бинарником, а не приходит событиями. Отдаём пустой поток,
+  // чтобы подписчик работал одинаково на обеих платформах.
+  @override
+  Stream<dynamic> get coreLogStream => const Stream<dynamic>.empty();
+
   @override
   Future<dynamic> getServiceState() async => _state;
 
