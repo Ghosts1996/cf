@@ -175,7 +175,9 @@ class TunnelService {
   bool _latencyProbeRunning = false;
   final Map<String, List<int>> _latencySamples = {};
   static const Duration _latencyProbeInterval = Duration(seconds: 25);
-  static const int _latencySampleWindow = 3;
+  /// Сколько последних замеров участвует в выборе минимума. Больше окно —
+  /// устойчивее число, но дольше реакция на реальное ухудшение канала.
+  static const int _latencySampleWindow = 5;
   // Выше этой скорости (байт/с в любую сторону) прогон пропускается —
   // пробник встанет в очередь за реальными данными и измерит не сеть.
   static const int _latencyProbeBusyBps = 300 * 1024;
@@ -1077,25 +1079,33 @@ class TunnelService {
     }
     _latencyProbeRunning = true;
     try {
+      // Два прогона подряд: одиночный замер на мобильной сети сильно скачет,
+      // и показывать этот скачок как «пинг» нельзя.
       final raw = await measureLatenciesThroughTunnel();
+      final second = await measureLatenciesThroughTunnel();
+      for (final entry in second.entries) {
+        final known = raw[entry.key];
+        if (known == null || entry.value < known) raw[entry.key] = entry.value;
+      }
+
       final smoothed = <String, int>{};
       for (final entry in raw.entries) {
         final samples = _latencySamples.putIfAbsent(entry.key, () => <int>[]);
         samples.add(entry.value);
         if (samples.length > _latencySampleWindow) samples.removeAt(0);
-        final sorted = [...samples]..sort();
-        smoothed[entry.key] = sorted[sorted.length ~/ 2]; // медиана
+        // Минимум, а не медиана. Так же считает Hiddify: он гоняет несколько
+        // проверок по разным адресам и оставляет наименьшее
+        // (common/monitoring: `if t < his.Delay { his.Delay = t }` и
+        // getMinGroupOutboundHistory). Медиана вбирает в себя случайные
+        // задержки радиоканала — отсюда и брались числа вдвое больше, чем в
+        // других клиентах на тех же серверах. Минимум — это чистый круговой
+        // путь, то есть то, что пользователь и называет пингом.
+        smoothed[entry.key] = samples.reduce((a, b) => a < b ? a : b);
       }
       // Локация выпала из прогона — забываем её историю, иначе после
       // возвращения она унаследует устаревшие значения.
       _latencySamples.removeWhere((remark, _) => !raw.containsKey(remark));
 
-      // Для сервера, на котором туннель стоит прямо сейчас, число уточняем
-      // своим замером. URLTest ядра ходит по HTTPS-адресу и каждый раз платит
-      // за TLS-рукопожатие поверх туннеля — это завышает показания в разы.
-      // Свой замер идёт обычным HTTP по уже прогретому keep-alive
-      // соединению, то есть меряет чистый круговой путь — ровно то число,
-      // которое показывает Hiddify.
       // Запасной вариант: если ядро не отдало задержку ни по одной локации
       // (группы нет — старая сессия, ядро не поддержало urltest), меряем
       // текущий сервер сами. Число будет завышено — свой замер включает
@@ -2208,8 +2218,14 @@ class TunnelService {
       // Задержку спрашиваем у ядра: оно не включает в неё дозвон до сервера,
       // поэтому число сопоставимо с тем, что показывают другие клиенты. Свой
       // замер оставлен запасным — он честный, но завышенный на рукопожатие.
-      final latency =
-          await _measureGroupDelayMs() ?? await _measureWarmDelayMs(probe);
+      final first = await _measureGroupDelayMs();
+      final second = await _measureGroupDelayMs();
+      int? best;
+      for (final value in [first, second]) {
+        if (value == null) continue;
+        if (best == null || value < best) best = value;
+      }
+      final latency = best ?? await _measureWarmDelayMs(probe);
       return RealCheckResult(ok: true, latencyMs: latency);
     } finally {
       try {
