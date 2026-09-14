@@ -2947,7 +2947,15 @@ class TunnelService {
     //
     // Пустой `alternates` даёт прежний конфиг — один outbound с тегом `proxy`,
     // без группы.
-    final useSelector = !proxyOnly && alternates.isNotEmpty;
+    // Группа-селектор нужна и в proxy-режиме. Раньше здесь стояло
+    // `!proxyOnly && ...`: проверка всех локаций
+    // (realCheckAllProfiles) поднимает именно proxy-сессию, и без селектора в
+    // конфиг попадал бы один-единственный outbound — измерялась бы только
+    // первая локация подписки, а все остальные показывались бы как
+    // «не отвечает». Маршрутизации это не меняет: `route.final` по-прежнему
+    // `proxy`, только теперь `proxy` — селектор со значением по умолчанию
+    // out-0, то есть тот же сервер, что и был.
+    final useSelector = alternates.isNotEmpty;
     final outbounds = <Map<String, dynamic>>[];
     if (!useSelector) {
       outbounds.add(buildProxyOutbound(p, 'proxy'));

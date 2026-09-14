@@ -180,6 +180,32 @@ void main() {
       expect(experimentalOf(config).containsKey('unified_delay'), isFalse);
     });
 
+    test('проверка всех локаций видит всю подписку, а не только первую', () {
+      // Так собирается конфиг «Реальной проверки»: proxy-режим и все
+      // остальные локации подписки. Раньше группа-селектор в proxy-режиме не
+      // собиралась, в группе latency оставался один участник, и на экране
+      // все локации кроме первой показывались как «не отвечает».
+      final raw = TunnelService.instance.buildConfigFromUri(
+        reality,
+        proxyOnly: true,
+        alternateUris: const [
+          'vless://22222222-2222-2222-2222-222222222222@b.example.com:443'
+              '?type=tcp&security=reality&pbk=PUBKEY&sid=bb&sni=yahoo.com#PING2',
+        ],
+      );
+      final group = latencyGroupOf(raw);
+      expect(group['outbounds'], ['out-0', 'out-1']);
+      final outbounds =
+          ((jsonDecode(raw) as Map<String, dynamic>)['outbounds'] as List)
+              .cast<Map<String, dynamic>>();
+      expect(outbounds.any((o) => o['tag'] == 'out-0'), isTrue);
+      expect(outbounds.any((o) => o['tag'] == 'out-1'), isTrue);
+      // Маршрут по-прежнему заканчивается на proxy — теперь это селектор.
+      final selector = outbounds.firstWhere((o) => o['tag'] == 'proxy');
+      expect(selector['type'], 'selector');
+      expect(selector['default'], 'out-0');
+    });
+
     test('группа latency меряет по тому же адресу, что и Hiddify', () {
       final config = TunnelService.instance.buildConfigFromUri(reality);
       final group = latencyGroupOf(config);
