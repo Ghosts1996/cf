@@ -1186,8 +1186,13 @@ class _ServersScreenState extends State<ServersScreen> {
                       : _realCheckResults[id];
                   if (realCheck != null) {
                     if (realCheck.ok) {
-                      pingLabel =
-                          '${tr('работает ·')} ${realCheck.latencyMs} ${tr('мс (проверено)')}';
+                      // Задержку ядро отдаёт не всегда (замер не успел, ядро
+                      // без группы). Печатать её как есть нельзя — на экране
+                      // появлялось «работает · null мс».
+                      final ms = realCheck.latencyMs;
+                      pingLabel = ms == null || ms <= 0
+                          ? tr('работает (проверено)')
+                          : '${tr('работает ·')} $ms ${tr('мс (проверено)')}';
                       pingColor = AppColors.success;
                     } else {
                       pingLabel =
