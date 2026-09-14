@@ -1,19 +1,13 @@
 name: Build iOS IPA
 
-# [НОВОЕ] Аналог build-android.yml, но под iOS. Xcode-сборка возможна
-# только на macOS-раннере (GitHub Actions это поддерживает нативно —
-# отдельного Mac покупать не нужно).
+# Сборка под iOS. Xcode есть только на macOS-раннере.
 #
-# Сейчас Apple Developer аккаунта и сертификатов ещё нет, поэтому workflow
-# в текущем виде делает "unsigned"-сборку — она НЕ ставится на реальный
-# iPhone и НЕ годится для App Store, но подтверждает, что Flutter/Xcode-код
-# вообще компилируется под iOS (ловит поломки до того, как появится смысл
-# тратить время на подпись). Как только заведёшь Apple Developer аккаунт и
-# сертификат/профиль — добавь секреты, перечисленные в шаге
-# "Import signing certificate & profile" ниже, и workflow сам переключится
-# на полноценную подписанную сборку .ipa, готового к загрузке в App Store
-# Connect (тот же паттерн "если секрет есть — собираем настоящий релиз",
-# что и в build-android.yml с ANDROID_KEYSTORE_BASE64).
+# Пока Apple Developer аккаунта и сертификатов нет, workflow собирает
+# unsigned-сборку: на реальный iPhone она не ставится и для App Store не
+# годится, но подтверждает, что код компилируется под iOS. Когда появятся
+# секреты из шага "Import signing certificate & profile", сборка сама
+# переключится на подписанный .ipa — тот же приём, что в build-android.yml
+# с ANDROID_KEYSTORE_BASE64.
 on:
   workflow_dispatch:
   push:
@@ -24,12 +18,9 @@ on:
 jobs:
   build:
     name: Build Flutter iOS
-    # [ИСПРАВЛЕНО] macos-14 по умолчанию даёт Xcode со Swift tools 5.10 —
-    # пакет app_settings 5.2.0 (резолвится из "^5.1.1" в pubspec.yaml)
-    # требует Swift tools 6.0 (Xcode 16+). SPM падает на "resolve package
-    # dependencies" ещё до компиляции. macos-15 несёт Xcode с поддержкой
-    # Swift tools 6.0 по умолчанию — без этого фикса все 3 попытки retry
-    # гарантированно проваливаются с одной и той же ошибкой.
+    # macos-15, а не macos-14: пакет app_settings 5.2.0 (резолвится из "^5.1.1")
+    # требует Swift tools 6.0, то есть Xcode 16+, и на macos-14 SPM падает на
+    # резолве зависимостей ещё до компиляции.
     runs-on: macos-15
     defaults:
       run:
@@ -49,9 +40,8 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
-      # Та же правка, что и в build-android.yml: генератор иконок настроен
-      # в pubspec.yaml, но сам по себе не запускается — без этого шага и
-      # iOS-сборка ушла бы со стандартной иконкой Flutter.
+      # Генератор иконок настроен в pubspec.yaml, но сам не запускается — как и
+      # в build-android.yml.
       - name: Generate app icons
         run: dart run flutter_launcher_icons
 
@@ -78,14 +68,11 @@ jobs:
       - name: Install CocoaPods dependencies
         run: cd ios && pod install --repo-update
 
-      # [ВАЖНО] Секреты ниже пока НЕ заведены в репозитории — это ожидаемо.
-      # Пока их нет, шаг просто ничего не делает (условие if), и сборка
-      # ниже идёт по unsigned-ветке. Когда получишь Apple Developer аккаунт:
-      #   IOS_CERTIFICATE_BASE64      — .p12-сертификат распространения,
-      #                                  экспортированный из Keychain, в base64
-      #   IOS_CERTIFICATE_PASSWORD    — пароль, которым .p12 был защищён при экспорте
-      #   IOS_PROVISION_PROFILE_BASE64 — .mobileprovision профиль (App Store
-      #                                  или Ad Hoc — какой получишь), в base64
+      # Пока секретов нет, шаг ничего не делает (условие if) и сборка идёт по
+      # unsigned-ветке. Что понадобится с Apple Developer аккаунтом:
+      #   IOS_CERTIFICATE_BASE64       — .p12-сертификат распространения в base64
+      #   IOS_CERTIFICATE_PASSWORD     — пароль, которым защищён .p12
+      #   IOS_PROVISION_PROFILE_BASE64 — .mobileprovision профиль в base64
       #   APPLE_TEAM_ID                — Team ID из developer.apple.com/account
       - name: Import signing certificate & profile
         id: signing

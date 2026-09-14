@@ -10,56 +10,31 @@ on:
 jobs:
   build:
     name: Build Flutter Windows app
-    # [НОВОЕ] В отличие от build-android.yml (ubuntu-latest) — сборка под
-    # Windows обязана идти на windows-раннере: `flutter build windows`
-    # использует MSBuild/Visual Studio Build Tools, которых на Linux нет
-    # физически, это не вопрос настройки, а требование самого Flutter.
+    # Сборка под Windows идёт только на windows-раннере: `flutter build windows`
+    # использует MSBuild и Visual Studio Build Tools.
     runs-on: windows-latest
     defaults:
       run:
         working-directory: app
-    # [ИСПРАВЛЕНО — реальный баг образа windows-latest] По умолчанию
-    # PUB_CACHE = C:\Users\runneradmin\.pub-cache. На раннерах GitHub
-    # Windows Defender/индексатор папок успевает положить служебный файл
-    # (например desktop.ini) в только что созданную ПУСТУЮ временную папку
-    # `_temp\dirXXXXXXXX` ещё до того, как `git clone --mirror` успевает
-    # туда что-то склонировать — поэтому git видит "already exists and is
-    # not empty" даже на самой первой попытке, с новым случайным именем
-    # папки каждый раз (это видно в логе: dir9e93c3d2, dir57e286f1,
-    # dir347b6388, dir2fdd8578, dir9198d584, dir895fc61f — разные имена,
-    # одна и та же ошибка). Дело не в "мусоре от прошлой попытки" —
-    # реальная причина в самой папке C:\Users\runneradmin\.pub-cache на
-    # этом образе раннера.
+    # PUB_CACHE по умолчанию лежит в C:\Users\runneradmin\.pub-cache, и на
+    # этом образе раннера `git clone --mirror` стабильно падает там с
+    # "already exists and is not empty": в свежесозданную пустую временную
+    # папку успевает попасть служебный файл (например desktop.ini) до того,
+    # как git начнёт клонировать.
     #
-    # [ИСПРАВЛЕНО #2 — почему просто `env: PUB_CACHE: D:\...` на уровне job
-    # не сработал] Лог показал, что PUB_CACHE всё равно оставался
-    # `/c/Users/runneradmin/.pub-cache`, несмотря на job-level env. Причина:
-    # `flutter-actions/setup-flutter@v2` сам прописывает PUB_CACHE через
-    # файл GITHUB_ENV (стандартный способ setup-экшенов задавать переменные
-    # для последующих шагов) — а такая запись выполняется ПОЗЖЕ, чем
-    # применяется job-level `env:`, и поэтому перебивает его для всех шагов
-    # после Setup Flutter. Поэтому переопределяем PUB_CACHE не через job
-    # `env:`, а отдельным шагом СРАЗУ ПОСЛЕ Setup Flutter — тем же
-    # механизмом GITHUB_ENV, только последним, значит именно он и победит.
+    # Job-level `env:` эту переменную не перебивает: setup-flutter прописывает
+    # свой PUB_CACHE через GITHUB_ENV уже после того, как job-level env
+    # применён. Поэтому переопределяем отдельным шагом сразу после Setup
+    # Flutter — тем же механизмом, но последними.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # [ИСПРАВЛЕНО #3 — предыдущие два фикса (node reuse + flutter clean)
-      # не помогли: лог показал, что каждая из 3 попыток была ПОЛНОЙ чистой
-      # пересборкой (81-112с, все зависимости заново) и всё равно падала на
-      # том же LNK1327 в одном и том же месте — значит это не гонка
-      # процессов и не грязный кэш, а стабильно воспроизводимая проблема.
-      # Точечное исключение через Add-MpPreference -ExclusionPath (шаг
-      # ниже) могло тихо не сработать — `-ErrorAction SilentlyContinue`
-      # скрывает реальную причину отказа. Раз приложение — VPN-клиент
-      # (сетевая/туннельная функциональность), это классический кейс, когда
-      # Windows Defender карантинит/удаляет свежесобранный .exe прямо между
-      # link.exe и mt.exe как потенциально нежелательное ПО — отсюда
-      # "failure during running mt.exe" (mt.exe пытается открыть файл,
-      # которого уже нет). Отключаем real-time protection целиком, в
-      # самом начале job, с запасом времени на применение — это сильнее и
-      # надёжнее точечных исключений.
+      # Приложение — VPN-клиент, и Defender может отправить свежесобранный .exe
+      # в карантин прямо между link.exe и mt.exe: отсюда "failure during running
+      # mt.exe" — mt.exe открывает файл, которого уже нет. Точечное исключение
+      # через Add-MpPreference может тихо не сработать, поэтому отключаем
+      # real-time protection целиком в начале job.
       - name: Disable Windows Defender real-time protection
         shell: pwsh
         run: |
@@ -73,11 +48,10 @@ jobs:
         with:
           channel: stable
 
-      # [ИСПРАВЛЕНО #2] Переопределяем PUB_CACHE ПОСЛЕ Setup Flutter (он
-      # сам молча прописывает свой PUB_CACHE через GITHUB_ENV, поэтому
-      # переопределение ДО этого шага не срабатывает — см. комментарий
-      # выше). Диск D: на GitHub Windows-раннерах отдельный от системного
-      # C:, там не проявляется баг с "already exists and is not empty".
+      # Переопределяем PUB_CACHE после Setup Flutter — он сам прописывает свой
+      # через GITHUB_ENV, и переопределение до этого шага не срабатывает. Диск D:
+      # на Windows-раннерах отдельный от системного C:, там нет проблемы с
+      # "already exists and is not empty".
       - name: Move PUB_CACHE to D drive
         shell: pwsh
         run: |
@@ -91,14 +65,10 @@ jobs:
       - name: Enable Windows desktop support
         run: flutter config --enable-windows-desktop
 
-      # Сама git-зависимость (flutter_singbox_client, github.com/Ghosts1996/
-      # cf.git, ветка ccurecc_singbox_dns) рабочая — build-android.yml тянет
-      # тот же пакет 152 раза без единого сбоя на ubuntu-latest. Проблема
-      # была в системной папке C:\Users\runneradmin\.pub-cache на
-      # Windows-образе раннера, а не в логике pub get — перенос PUB_CACHE
-      # на D: (шаг выше) устраняет причину напрямую. Retry оставляем как
-      # страховку на случай обычного сетевого сбоя при клонировании — на
-      # реальную причину бага он не влияет, но не мешает.
+      # Сама git-зависимость (flutter_singbox_client) рабочая — build-android.yml
+      # тянет тот же пакет без сбоев. Проблема была в системной папке
+      # .pub-cache на Windows-образе, и перенос PUB_CACHE на D: устраняет её
+      # напрямую. Retry остаётся страховкой на случай обычного сетевого сбоя.
       - name: Flutter pub get
         uses: nick-fields/retry@v3
         with:
@@ -122,19 +92,11 @@ jobs:
         run: flutter test --coverage
         continue-on-error: true
 
-      # [ИСПРАВЛЕНО #2 — предыдущая гипотеза (Defender) не подтвердилась]
-      # Лог показал: попытка 1 шла 91.7с (полная сборка) и упала на
-      # mt.exe, а попытки 2 и 3 падали почти мгновенно (8с) на ТОЙ ЖЕ
-      # ошибке — значит retry просто повторно бился об уже испорченные
-      # промежуточные файлы в build\windows, не пересобирая с нуля. Реальная
-      # причина LNK1327 здесь — гонка процессов MSBuild: Flutter Windows
-      # CMake-проект собирает параллельно несколько целей (сам .exe +
-      # плагины flutter_secure_storage_windows, url_launcher_windows,
-      # connectivity_plus и т.д.), и несколько worker-узлов MSBuild
-      # (node reuse) могут одновременно писать во временный файл манифеста
-      # — это известная проблема параллельных Windows-сборок Flutter на CI.
-      # Исключение из Defender оставляем (не мешает), но реальный фикс —
-      # ниже.
+      # LNK1327 здесь вызывает гонка процессов MSBuild: CMake-проект Flutter
+      # собирает параллельно несколько целей (.exe плюс плагины), и несколько
+      # worker-узлов могут одновременно писать во временный файл манифеста —
+      # известная проблема параллельных Windows-сборок на CI. Исключение из
+      # Defender не мешает, но реальный фикс ниже.
       - name: Exclude build folder from Windows Defender
         shell: pwsh
         run: |
@@ -143,24 +105,15 @@ jobs:
           Add-MpPreference -ExclusionProcess "link.exe" -ErrorAction SilentlyContinue
           Write-Host "Defender exclusions added for ${{ github.workspace }}, mt.exe, link.exe"
 
-      # [ИСПРАВЛЕНО #2] MSBUILDDISABLENODEREUSE=1 запрещает MSBuild
-      # переиспользовать worker-процессы между вызовами — это убирает
-      # гонку файловых блокировок между параллельными worker-узлами,
-      # которая и вызывает LNK1327 на mt.exe в параллельных Windows-сборках
-      # Flutter на CI. Внутри каждой попытки retry сначала делаем `flutter
-      # clean` — иначе повторная попытка бьётся об уже испорченные
-      # промежуточные файлы из предыдущей неудачной попытки (что и
-      # произошло в последнем логе: попытки 2-3 падали за 8 секунд вместо
-      # полной пересборки).
-      # [ДИАГНОСТИКА] Три разных фикса подряд (изоляция от Defender, отказ
-      # от переиспользования MSBuild-узлов, чистая пересборка) дали ИДЕНТИЧНЫЙ
-      # результат — значит причина не во внешней среде раннера, а в самом
-      # проекте/сборке. `flutter build windows` по умолчанию глушит
-      # детальный вывод MSBuild и показывает только финальную сводку
-      # линкера — добавляем `-v`, чтобы увидеть РЕАЛЬНУЮ команду mt.exe и
-      # её настоящий текст ошибки, без этого дальше чинить вслепую.
-      # Пока не выясним причину — оставляем только одну попытку (без
-      # ретраев), чтобы не тратить время раннера на 3x одинаковый лог.
+      # MSBUILDDISABLENODEREUSE=1 запрещает переиспользовать worker-процессы
+      # MSBuild между вызовами: это убирает гонку файловых блокировок, вызывающую
+      # LNK1327 на mt.exe. Внутри каждой попытки сначала идёт `flutter clean` —
+      # иначе повторная попытка бьётся об испорченные промежуточные файлы
+      # предыдущей и падает за считанные секунды вместо полной пересборки.
+      #
+      # `-v` оставлен намеренно: без детального вывода MSBuild видна только
+      # финальная сводка линкера, без настоящей команды mt.exe и текста её
+      # ошибки. Попытка одна — три одинаковых лога времени раннера не стоят.
       - name: Build Windows release (verbose diagnostic)
         shell: pwsh
         env:
@@ -170,11 +123,10 @@ jobs:
           flutter pub get
           flutter build windows --release -v --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
 
-      # [ВАЖНО] Предупреждение прямо в логе сборки, если windows/sing-box/
-      # пустая — тогда .exe соберётся нормально, но реальный VPN на Windows
-      # заработает только через автозагрузку sing-box.exe/wintun.dll при
-      # первом подключении клиента (см. singbox_runtime_windows.dart), а не
-      # "из коробки" сразу после установки — это ожидаемо, не ошибка сборки.
+      # Предупреждение в лог, если windows/sing-box/ пустая: .exe соберётся
+      # нормально, но sing-box.exe и wintun.dll клиент тогда скачает сам при
+      # первом подключении (см. singbox_runtime_windows.dart), а не получит
+      # сразу после установки.
       - name: Check bundled sing-box binaries
         shell: bash
         run: |
@@ -184,13 +136,9 @@ jobs:
             echo "sing-box.exe и wintun.dll найдены — будут зашиты прямо в сборку."
           fi
 
-      # [ИЗМЕНЕНО] Раньше здесь просто паковали build/windows/x64/runner/Release
-      # целиком в .zip — пользователь получал папку с .exe и кучей .dll рядом,
-      # без установки: запускать нужно было прямо из распакованного архива, без
-      # ярлыков, без записи в "Установка и удаление программ", без
-      # деинсталлятора. Теперь собираем полноценный установщик через Inno
-      # Setup (см. windows/installer/installer.iss) — результат один .exe,
-      # который ставит приложение в Program Files и создаёт ярлыки.
+      # Собираем установщик через Inno Setup (windows/installer/installer.iss):
+      # один .exe, который ставит приложение в Program Files и создаёт ярлыки,
+      # вместо zip-архива с папкой, из которой нужно запускать вручную.
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress -y

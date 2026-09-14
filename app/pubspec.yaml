@@ -9,92 +9,51 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  # [НОВОЕ] Модуль переводчика — нужен для GlobalMaterialLocalizations /
-  # GlobalWidgetsLocalizations / GlobalCupertinoLocalizations в main.dart
-  # (переключает язык системных виджетов Material — кнопки "ОК"/"Отмена"
-  # в диалогах, формат дат и т.п. — синхронно с языком, выбранным в
-  # "Настройки" -> "Язык"). Часть Flutter SDK, отдельно из pub.dev не
-  # тянется — версии не бывает, привязана к самому SDK.
+  # GlobalMaterialLocalizations и компания для main.dart: переключает язык
+  # системных виджетов Material (кнопки "ОК"/"Отмена" в диалогах, формат дат)
+  # вместе с языком из "Настройки" -> "Язык". Часть SDK, версии не имеет.
   flutter_localizations:
     sdk: flutter
   http: ^1.2.0
   google_fonts: ^6.2.1
-  # [НОВОЕ] нужны для: онбординга/флага "первый запуск", открытия
-  # payment_url в системном браузере/webview при покупке.
+  # Флаг "первый запуск" для онбординга и открытие payment_url в системном
+  # браузере при покупке.
   shared_preferences: ^2.3.2
   url_launcher: ^6.3.0
-  # [НОВОЕ v4] Хранилище JWT-токена — Keychain на iOS/macOS, Keystore на
-  # Android, Credential Manager на Windows. Раньше токен вообще негде было
-  # хранить, потому что не было экрана входа (см. auth_screen.dart) — JWT
-  # НЕЛЬЗЯ класть в SharedPreferences (это открытый файл на диске, не
-  # защищённое хранилище — прямое требование из harness-промпта про секреты).
+  # Хранилище токена сессии: Keychain на iOS/macOS, Keystore на Android,
+  # Credential Manager на Windows. В SharedPreferences токену не место — это
+  # обычный файл на диске, а не защищённое хранилище.
   flutter_secure_storage: ^9.2.2
-  # [НОВОЕ v4.2] Реальный VLESS/Reality-туннель — Android/iOS/macOS/Windows
-  # из коробки, MIT, поддерживает VPN и proxy-only режим. Выбран вместо
-  # ручного JNI/Go-биндинга к sing-box, потому что: (а) писать и связывать
-  # Kotlin<->Go biнding вручную здесь, без Android SDK/Go toolchain и
-  # реального устройства для проверки, — очень высокий риск получить
-  # нерабочий/несобирающийся код; (б) этот пакет официально числится в
-  # README самого Xray-core как поддерживающий VLESS+XTLS+Reality, активно
-  # обновляется и уже протестирован авторами на реальных устройствах по
-  # всем 4 протоколам, включая TCP/Reality. См. app/NATIVE_SETUP.md —
-  # без ручной настройки на каждой платформе (App Group + Network
-  # Extension на iOS/macOS через Xcode, xray.exe на Windows) само по себе
-  # добавление в pubspec.yaml НЕ включит VPN — платформенные шаги нельзя
-  # выполнить только правкой файлов.
-  # [ЗАМЕНЕНО — по прямому требованию] Раньше был flutter_vless (Xray-core).
-  # Переход на flutter_singbox_client — то же ядро (sing-box), что
-  # использует Hiddify, где твои ключи подтверждённо работают. Реальный,
-  # публикуемый пакет (pub.dev/packages/flutter_singbox_client), НЕ
-  # самописный биндинг — его API описан README.md пакета, а не выдуман.
-  #
-  # [ЧЕСТНО — прочитай перед сборкой]
-  # 1. Лицензия пакета — GPL-3.0 (flutter_vless был MIT). Это накладывает
-  #    требования GPL на сборку, в которую он статически слинкован —
-  #    если приложение распространяется (а не используется только тобой),
-  #    проконсультируйся насчёт условий распространения (обычно требуется
-  #    доступность исходников приложения или динамическое связывание).
-  #    Это не вопрос кода, я не могу решить его за тебя.
-  # 2. На сегодня пакет поддерживает ТОЛЬКО Android (iOS/macOS — "в
-  #    разработке", Windows/Linux — "в планах", см. README пакета). Раз твой
-  #    CI (.github/workflows) собирает именно Android APK — это не должно
-  #    быть проблемой для реального релиза, но упоминаю явно, а не молчу.
-  # Версия плагина с исправленной передачей DNS в Android VPN Service.
-  # Ревизия фиксируется в pubspec.lock.
+  # Ядро туннеля — то же sing-box, что в Hiddify. Лицензия пакета GPL-3.0.
+  # Сегодня поддерживается только Android (iOS/macOS в разработке,
+  # Windows/Linux в планах) — на Windows туннель поднимает отдельный процесс
+  # sing-box.exe, см. lib/services/singbox_runtime_windows.dart.
+  # Без платформенной настройки (App Group + Network Extension на iOS/macOS
+  # через Xcode, sing-box.exe на Windows — см. app/NATIVE_SETUP.md) одно лишь
+  # добавление пакета VPN не включит.
+  # Ревизия с исправленной передачей DNS в Android VPN Service; точный коммит
+  # зафиксирован в pubspec.lock.
   flutter_singbox_client:
     git:
       url: https://github.com/Ghosts1996/cf.git
       ref: ccurecc_singbox_dns
       path: app/third_party/flutter_singbox_client
-  # [НОВОЕ] Реальный список установленных приложений для split-tunnel
-  # экрана (см. screens/split_tunnel_screen.dart) — раньше там был
-  # фиксированный демо-список из 5 названий, не имевший отношения к
-  # реальному устройству. API v2.0.0+ — именованные аргументы
-  # (excludeSystemApps/excludeNonLaunchableApps). Только Android — на
-  # iOS/macOS/Windows методы пакета возвращают пустой список/заглушку,
+  # Список установленных приложений для экрана split-tunnel. API 2.0.0+ —
+  # именованные аргументы (excludeSystemApps/excludeNonLaunchableApps).
+  # Только Android: на остальных платформах пакет возвращает пустой список,
   # экран обрабатывает это отдельной веткой.
   installed_apps: ^2.0.0
-  # [НОВОЕ] Кнопка "Открыть системные настройки VPN" рядом с Kill Switch —
-  # см. tunnel_service.dart::openSystemVpnSettingsHint(). Официально
-  # поддерживает открытие именно экрана VPN-настроек (AppSettingsType.vpn),
-  # это подтверждено в changelog пакета.
+  # Кнопка "Открыть системные настройки VPN" рядом с Kill Switch —
+  # tunnel_service.dart::openSystemVpnSettingsHint().
   app_settings: ^5.1.1
-  # [НОВОЕ] Реальная реализация тумблера "Умное подключение на публичном
-  # Wi-Fi" (settings_screen.dart) — раньше тумблер только сохранял
-  # значение в LocalPrefs и ни на что не влиял. Нужен, чтобы приложение
-  # само узнавало о смене сети (Wi-Fi/мобильная/нет сети) — см.
-  # services/network_watcher_service.dart.
+  # Тумблер "Умное подключение на публичном Wi-Fi": приложению нужно знать о
+  # смене сети (Wi-Fi, мобильная, нет сети) — см. connect_screen.dart.
   connectivity_plus: ^6.1.0
-  # [НОВОЕ] Значок приложения в системном трее Windows (рядом с часами) —
-  # раньше при закрытии окна крестиком приложение просто завершалось
-  # целиком, никакого значка в трее никогда не было (не забытый баг —
-  # функциональность физически отсутствовала). window_manager нужен, чтобы
-  # перехватить закрытие окна крестиком и вместо выхода СПРЯТАТЬ его (а не
-  # завершить процесс — иначе VPN-туннель, реально работающий отдельным
-  # процессом sing-box.exe, тоже пришлось бы останавливать при каждом
-  # закрытии окна). tray_manager рисует сам значок и его меню. Оба —
-  # только Windows/macOS/Linux (см. tray_service.dart — на Android/iOS
-  # просто не инициализируются).
+  # Значок в системном трее Windows. window_manager перехватывает закрытие
+  # окна крестиком и прячет окно вместо выхода — иначе вместе с процессом
+  # пришлось бы останавливать и туннель (на Windows это отдельный процесс
+  # sing-box.exe). tray_manager рисует сам значок и меню. Оба только для
+  # Windows/macOS/Linux, на Android и iOS tray_service.dart их не трогает.
   window_manager: ^0.4.3
   tray_manager: ^0.2.3
 
@@ -102,11 +61,10 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
-  # [НОВОЕ] Генерация иконки приложения (щит в фирменных цветах) для всех
-  # платформ из одного PNG — см. assets/icon/ и flutter_launcher_icons:
-  # ниже. Запускается один раз командой:
-  #   dart run flutter_launcher_icons
-  # (или отдельным шагом в CI — см. .github/workflows/build-android.yml).
+  # Генерация иконок для всех платформ из одного PNG (assets/icon/ и секция
+  # flutter_launcher_icons ниже). Запускается командой
+  # `dart run flutter_launcher_icons` — в CI это отдельный шаг, см.
+  # .github/workflows/build-android.yml.
   flutter_launcher_icons: ^0.14.1
 
 flutter:
@@ -115,14 +73,10 @@ flutter:
     - assets/icon/
     - assets/tray/
 
-# Конфиг flutter_launcher_icons: генерирует mipmap/AppIcon.appiconset/etc.
-# из одного источника. image_path — полная иконка (фигура + фон, глубокий
-# чёрный с фиолетово-мадженным свечением, см. app_icon.png) для iOS/macOS/
-# Windows/web, где адаптивных иконок нет. Для Android отдельно собирается
-# adaptive icon: непрозрачный foreground (только сам щит, без фона —
-# app_icon_foreground.png) поверх сплошного фонового цвета бренда —
-# так контур щита не обрезается разными масками формы иконки на разных
-# лаунчерах Android.
+# image_path — полная иконка (фигура и фон) для iOS/macOS/Windows/web, где
+# адаптивных иконок нет. Для Android собирается adaptive icon: непрозрачный
+# foreground (щит без фона) поверх сплошного фонового цвета бренда, иначе
+# контур щита обрезают маски формы разных лаунчеров.
 flutter_launcher_icons:
   android: true
   ios: true
