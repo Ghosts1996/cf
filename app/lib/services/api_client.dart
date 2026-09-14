@@ -289,7 +289,25 @@ class ApiClient {
       throw ApiException(0, 'Сервер не отвечает — проверь интернет-соединение и попробуй ещё раз');
     } on SocketException {
       throw ApiException(0, 'Нет соединения с сервером — проверь интернет');
+    } on http.ClientException {
+      // Обрыв на уровне пакета http: "Connection closed before full header
+      // was received", "Software caused connection abort" и подобное. На
+      // мобильной сети это такой же сетевой сбой, как SocketException, и
+      // отвечать на него нужно так же — с кодом 0, иначе слой кэша в
+      // _fetchAndStore() примет его за настоящий ответ сервера и не отдаст
+      // сохранённую копию.
+      throw ApiException(0, 'Соединение с сервером прервалось — попробуй ещё раз');
+    } on HandshakeException {
+      // TLS-рукопожатие не состоялось: перехватывающий прокси, часы устройства
+      // сбиты, сеть режет соединение. Сырое "HandshakeException: Connection
+      // terminated during handshake" пользователю ничего не говорит.
+      throw ApiException(0, 'Не удалось установить защищённое соединение с сервером');
     } on HttpException {
+      throw ApiException(0, 'Ошибка соединения с сервером');
+    } on IOException {
+      // Любой другой сбой ввода-вывода (в том числе FileSystemException от
+      // защищённого хранилища внутри запроса) — тоже сетевая, а не серверная
+      // ошибка.
       throw ApiException(0, 'Ошибка соединения с сервером');
     }
   }

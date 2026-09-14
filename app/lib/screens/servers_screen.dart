@@ -644,6 +644,36 @@ class _ServersScreenState extends State<ServersScreen> {
     return DateTime.now().difference(last) < _realCheckMaxAge;
   }
 
+  /// Имя локации на экране (`host_name` из /hosts) по тому, что
+  /// TunnelService считает текущим сервером.
+  ///
+  /// Там лежит remark из VLESS-ссылки ("VPNonLine | 🇩🇪 Германия"), а после
+  /// мгновенного переключения внутри группы — уже host_name ("🇩🇪 Германия"):
+  /// панель 3x-ui дописывает в remark название сервиса. Прямое сравнение с
+  /// host_name поэтому почти никогда не совпадает, и авто-балансировка
+  /// считала, что текущего сервера нет в списке. Сопоставляем по вхождению —
+  /// той же логикой, что TunnelService._matchProfile и latencyForHostName.
+  String? _hostIdForConnectedName(String? connectedName) {
+    final hosts = _hosts;
+    if (hosts == null || connectedName == null || connectedName.isEmpty) {
+      return null;
+    }
+    final needle = connectedName.trim().toLowerCase();
+    String idOf(dynamic raw) =>
+        (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
+    for (final raw in hosts) {
+      final id = idOf(raw);
+      if (id.isNotEmpty && id.trim().toLowerCase() == needle) return id;
+    }
+    for (final raw in hosts) {
+      final id = idOf(raw);
+      if (id.isEmpty) continue;
+      final hay = id.trim().toLowerCase();
+      if (needle.contains(hay) || hay.contains(needle)) return id;
+    }
+    return null;
+  }
+
   void _maybeApplyAutoBalance() {
     if (!_autoBalance || _hosts == null || _hosts!.isEmpty) return;
     String? bestId;
@@ -662,7 +692,7 @@ class _ServersScreenState extends State<ServersScreen> {
     if (bestId == null) return;
 
     final tunnelConnected = _tunnel.isConnected;
-    final connectedName = _tunnel.connectedServerName.value;
+    final connectedId = _hostIdForConnectedName(_tunnel.connectedServerName.value);
 
     if (!tunnelConnected) {
       // Туннель не поднят — просто держим предпочтение актуальным.
@@ -675,11 +705,11 @@ class _ServersScreenState extends State<ServersScreen> {
     }
 
     // Туннель поднят. Сравниваем реальный текущий сервер с лучшим найденным.
-    if (bestId == connectedName) return; // уже и так на лучшем сервере
+    if (bestId == connectedId) return; // уже и так на лучшем сервере
     if (_switching || _realChecking || _tunnel.isBusy) {
       return; // уже идёт подключение, отключение или реальная проверка
     }
-    if (connectedName == null) {
+    if (connectedId == null) {
       // Не наш известный хост (например, ручной ключ с произвольным remark'ом) —
       // чужое соединение не трогаем.
       return;
@@ -687,7 +717,7 @@ class _ServersScreenState extends State<ServersScreen> {
     // Текущий сервер оценивается той же мерой, что и кандидаты: смешав две
     // шкалы (реальная VLESS-задержка против TCP-оценки), можно оторвать
     // рабочее соединение, сравнив килограммы с метрами.
-    final currentPing = _autoBalanceScore(connectedName);
+    final currentPing = _autoBalanceScore(connectedId);
     if (currentPing == null) return;
     if (bestPing == null || (currentPing - bestPing) < _switchThresholdMs) {
       return; // разница в пределах шума — не стоит рвать рабочее соединение
@@ -732,7 +762,9 @@ class _ServersScreenState extends State<ServersScreen> {
     _prefs.setString(PrefKeys.selectedServerId, id);
 
     if (!_tunnel.isConnected) return; // не из чего переключать — обычный выбор
-    if (id == _tunnel.connectedServerName.value) return; // уже подключены сюда
+    if (id == _hostIdForConnectedName(_tunnel.connectedServerName.value)) {
+      return; // уже подключены сюда
+    }
     if (_switching || _tunnel.isBusy) return; // уже идёт подключение/отключение
 
     _switching = true;

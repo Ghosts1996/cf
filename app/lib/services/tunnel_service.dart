@@ -92,8 +92,6 @@ class TunnelService {
   int? _lastNativeTxBytes;
   DateTime? _lastNativeStatsAt;
   bool _nativeStatsPolling = false;
-  String? _connectedHost;
-  int? _connectedPort;
   // Тикает раз в секунду, пока статус connected, чтобы таймер сессии на
   // экране реально считал время. См. _restartDurationTicker.
   Timer? _durationTicker;
@@ -547,12 +545,17 @@ class TunnelService {
               .inSeconds
           : current.duration,
       // На некоторых версиях libbox мгновенные up/down приходят нулевыми,
-      // хотя session total растёт: считаем скорость по дельте totals и
-      // используем её как fallback. Берём показания ядра, а fallback — только
-      // если конкретный тик действительно нулевой: `current.*` изначально
-      // равен нулю, а UID-счётчики Android не видят трафик других приложений.
-      download: stats.downlinkBps > 0 ? stats.downlinkBps : current.download,
-      upload: stats.uplinkBps > 0 ? stats.uplinkBps : current.upload,
+      // хотя session total растёт: тогда берём скорость, посчитанную по дельте
+      // totals, и только если и она нулевая — оставляем прошлое значение.
+      // Без промежуточного шага цифра залипала на последнем ненулевом замере:
+      // `current.*` не пересчитывается сам, а UID-счётчики Android не видят
+      // трафик других приложений.
+      download: stats.downlinkBps > 0
+          ? stats.downlinkBps
+          : (derivedDownload > 0 ? derivedDownload : current.download),
+      upload: stats.uplinkBps > 0
+          ? stats.uplinkBps
+          : (derivedUpload > 0 ? derivedUpload : current.upload),
       downloadTotalBytes: reportedDownload,
       uploadTotalBytes: reportedUpload,
     );
@@ -1212,8 +1215,6 @@ class TunnelService {
                 .timeout(_nativeCallTimeout);
             _lastPreferredHostName = hostName;
             connectedServerName.value = hostName;
-            _connectedHost = target.host;
-            _connectedPort = target.port;
             _persistSessionRoute();
             return hostName;
           } catch (e) {
@@ -1253,6 +1254,33 @@ class TunnelService {
     } finally {
       _switchInProgress = false;
     }
+  }
+
+  // Транспорты, которые умеет ядро sing-box внутри flutter_singbox_client.
+  // XHTTP (в старых панелях splithttp) сюда не входит: это транспорт
+  // Xray-core, sing-box его не реализует, и конфиг с таким блоком ядро
+  // отвергает на checkConfig целиком — вместе со всеми остальными локациями
+  // подписки, попавшими в тот же конфиг.
+  static const _supportedTransports = <String>{
+    'tcp',
+    'ws',
+    'grpc',
+    'http',
+    'httpupgrade',
+    'quic',
+  };
+
+  /// Приводит написание транспорта к одному виду: splithttp — прежнее имя
+  /// XHTTP, встречается и в старых панелях, и в старых ссылках.
+  static String _normalizeTransportType(String raw) {
+    final type = raw.trim().toLowerCase();
+    if (type.isEmpty) return 'tcp';
+    return type == 'splithttp' ? 'xhttp' : type;
+  }
+
+  static bool _isTransportSupported(_ParsedVless p) {
+    final type = (p.transportType ?? 'tcp').trim().toLowerCase();
+    return type.isEmpty || _supportedTransports.contains(type);
   }
 
   _ParsedVless? _matchProfile(List<_ParsedVless> profiles, String? hostName) {
@@ -1438,15 +1466,29 @@ class TunnelService {
         ? [preferred, ...profiles.where((p) => !identical(p, preferred))]
         : profiles;
 
+    // Локация с транспортом, которого ядро не знает, портит не только себя:
+    // конфиг проверяется целиком, поэтому одна такая запись в подписке
+    // отправила бы в отказ и группу-селектор со всеми остальными серверами
+    // (см. _isTransportSupported). Отсеиваем её до сборки конфига.
+    final usable = ordered.where(_isTransportSupported).toList();
+    final skippedCount = ordered.length - usable.length;
+    if (usable.isEmpty) {
+      throw TunnelException(
+        'В подписке нет серверов с транспортом, который поддерживает ядро '
+        'sing-box: все ${ordered.length} используют XHTTP или другой '
+        'неизвестный ядру транспорт.',
+      );
+    }
+
     Object? lastFailure;
-    for (final profile in ordered) {
+    for (final profile in usable) {
       try {
         // Остальные локации подписки идут в тот же конфиг отдельными outbound'ами
         // под группой-селектором — это и позволяет менять страну без разрыва (см.
         // построение `outbounds` в _buildSingBoxConfig и switchPreferredHost).
         // Порядок здесь и порядок тегов out-N обязаны совпадать.
         final alternates = (_selectorSupported && !proxyOnly)
-            ? ordered.where((e) => !identical(e, profile)).toList()
+            ? usable.where((e) => !identical(e, profile)).toList()
             : const <_ParsedVless>[];
         var config = _buildSingBoxConfig(
           profile,
@@ -1583,8 +1625,6 @@ class TunnelService {
             ? profile.remark
             : (preferredHostName ?? 'VPNOnline');
         connectedServerName.value = connectedName;
-        _connectedHost = profile.host;
-        _connectedPort = profile.port;
         localProxyAddress.value =
             proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
 
@@ -1608,7 +1648,9 @@ class TunnelService {
       }
     }
     throw TunnelException(
-      'Не удалось подключиться ни к одному серверу (${ordered.length} исп.): $lastFailure',
+      'Не удалось подключиться ни к одному серверу (${usable.length} исп.'
+      '${skippedCount > 0 ? ', ещё $skippedCount пропущено — ядро не поддерживает их транспорт' : ''}'
+      '): $lastFailure',
     );
   }
 
@@ -1911,19 +1953,14 @@ class TunnelService {
       } else if (transportType == 'xhttp') {
         // XHTTP (в старых панелях — splithttp).
         //
-        // Ветка срабатывает только на ключах с `type=xhttp`; ключи
-        // tcp/ws/grpc/http/httpupgrade сюда не попадают.
-        //
-        // Ядро, которое лежит в проекте (libbox.aar, sing-box v1.7.0), этот
-        // транспорт не поддерживает: строк 'xhttp'/'splithttp' в бинарнике нет, а
+        // Ядро, которое лежит в проекте (libbox.aar), этот транспорт не
+        // поддерживает: XHTTP — транспорт Xray-core, в sing-box его нет, а
         // парсер отвечает "unknown transport type" на всё, кроме
-        // ws / grpc / http / httpupgrade / quic. Конфиг с этим блоком ядро отвергнет
-        // на checkConfig, и connect() перейдёт к следующему серверу — ломается
-        // только сам xhttp-ключ, остальные локации подписки работают.
-        //
-        // Когда libbox.aar пересоберут на ядре с поддержкой XHTTP, такие ключи
-        // подхватятся без правок в Dart. Форма блока та же, что у остальных
-        // транспортов sing-box: type + host + path (+ специфичный для XHTTP mode).
+        // ws / grpc / http / httpupgrade / quic. Поэтому такие профили
+        // отсеиваются раньше, в _connectInternal (см. _isTransportSupported),
+        // и сюда в обычной работе не доходят — блок остаётся заготовкой на
+        // случай, когда ядро с поддержкой XHTTP появится: форма та же, что у
+        // остальных транспортов sing-box (type + host + path + mode).
         outbound['transport'] = {
           'type': 'xhttp',
           if (p.transportHost != null && p.transportHost!.isNotEmpty)
@@ -1977,7 +2014,7 @@ class TunnelService {
         // известного имени сертификата/SNI, необходимого для безопасного DoT.
         'type': hasCustomDns ? 'https' : 'tls',
         'tag': 'remote-dns',
-        'server': hasCustomDns ? customDns!.trim() : selectedDns['server'],
+        'server': hasCustomDns ? customDns.trim() : selectedDns['server'],
         if (!hasCustomDns) 'server_port': 853,
         if (!hasCustomDns)
           'tls': {
@@ -2333,6 +2370,7 @@ class TunnelService {
         final transport = item['transport'] as Map<String, dynamic>?;
         String? transportHost;
         String? transportPath;
+        String? xhttpMode;
         if (transport != null) {
           final headers = transport['headers'] as Map<String, dynamic>?;
           final headerHost = headers?['Host'] ?? headers?['host'];
@@ -2343,6 +2381,8 @@ class TunnelService {
                   : null);
           transportPath = transport['path'] as String? ??
               transport['service_name'] as String?;
+          final mode = transport['mode'];
+          if (mode is String && mode.trim().isNotEmpty) xhttpMode = mode.trim();
         }
 
         // security=reality без public_key нативное ядро не примет — та же
@@ -2367,7 +2407,11 @@ class TunnelService {
           alpn: (alpnList is List && alpnList.isNotEmpty)
               ? alpnList.join(',')
               : null,
-          transportType: (transport?['type'] as String?) ?? 'tcp',
+          // splithttp — прежнее имя XHTTP; приводим к одному написанию, как
+          // это делает _ParsedVless.tryParse для vless://-ссылок.
+          transportType: _normalizeTransportType(
+              (transport?['type'] as String?) ?? 'tcp'),
+          xhttpMode: xhttpMode,
           transportHost: transportHost,
           transportPath: transportPath,
           remark: (item['tag'] as String?) ?? host,
@@ -2511,12 +2555,11 @@ class TunnelService {
         lastError.value = 'Отключение не удалось: $e';
       }
       connectedServerName.value = null;
-      _connectedHost = null;
-      _connectedPort = null;
       localProxyAddress.value = null;
       // Обнуляем строго здесь, а не в начале метода, чтобы не было окна, где
       // туннеля для switchPreferredHost() формально уже нет, а status ещё
       // "connected".
+      _sessionOutboundOrder = const <_ParsedVless>[];
       _lastConnectionString = null;
       _lastPreferredHostName = null;
       _connectStartedAt = null;
@@ -2546,8 +2589,6 @@ class TunnelService {
       lastError.value = 'Отключение не удалось: $e';
     } finally {
       connectedServerName.value = null;
-      _connectedHost = null;
-      _connectedPort = null;
       localProxyAddress.value = null;
       // `_lastConnectionString` обнуляется ровно в той же точке, что и публичный
       // статус. Обнуляя его в первой строке disconnect(), мы получали окно, где
@@ -2822,7 +2863,7 @@ class _ParsedVless {
       // встречаются оба имени. Приводим к одному, чтобы дальше по коду была одна
       // ветка вместо двух одинаковых.
       final normalizedTransport =
-          transportType == 'splithttp' ? 'xhttp' : transportType;
+          TunnelService._normalizeTransportType(transportType);
       // Режим XHTTP: auto | packet-up | stream-up | stream-one, в ссылке лежит в
       // параметре `mode`. Пустое значение оставляем пустым — ядро подставит своё
       // умолчание само.

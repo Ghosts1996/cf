@@ -38,10 +38,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _autoConnect = false;
   bool _smartWifi = true;
   bool _killSwitch = false;
-  // Сам тумблер строгого режима живёт на экране "Безопасность", но значение
-  // нужно и здесь — чтобы сбросить его при выключении Kill Switch
-  // (см. _setKillSwitch).
-  bool _strictKillSwitch = false;
   bool _dpiBypass = true;
   bool _proxyOnly = false;
   // Выбор DNS-over-HTTPS резолвера. Прокидывается в конфиг sing-box через
@@ -83,7 +79,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _prefs.getBool(PrefKeys.dpiBypass, fallback: true),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
       _prefs.getBool(PrefKeys.ipv6Enabled, fallback: false),
-      _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
     ]);
     final savedDnsProvider = await _prefs.getString(PrefKeys.dnsServerProvider);
     final savedCustomDns = await _prefs.getString(PrefKeys.customDnsServer);
@@ -95,7 +90,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _dpiBypass = results[3];
       _proxyOnly = results[4];
       _ipv6Enabled = results[5];
-      _strictKillSwitch = results[6];
       _dnsProvider = (savedDnsProvider != null && _dnsProviderLabels.containsKey(savedDnsProvider))
           ? savedDnsProvider
           : 'cloudflare';
@@ -188,10 +182,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // но экран "Безопасность" показывал бы строгий режим включённым вопреки
   // собственному правилу.
   Future<void> _setKillSwitch(bool v) async {
-    setState(() {
-      _killSwitch = v;
-      if (!v) _strictKillSwitch = false;
-    });
+    setState(() => _killSwitch = v);
     await _prefs.setBool(PrefKeys.killSwitch, v);
     if (!v) await _prefs.setBool(PrefKeys.strictKillSwitch, false);
   }

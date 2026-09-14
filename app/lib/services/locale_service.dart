@@ -29,7 +29,6 @@ class LocaleService extends ChangeNotifier {
   AppLanguage _language = AppLanguage.ru;
   AppLanguage get language => _language;
 
-  bool _loaded = false;
   Future<void>? _loadFuture;
 
   /// Дожидается, пока сохранённый язык прочитается из LocalPrefs.
@@ -41,7 +40,6 @@ class LocaleService extends ChangeNotifier {
   Future<void> _load() async {
     final saved = await LocalPrefs.instance.getString(PrefKeys.appLanguage);
     _language = AppLanguage.fromCode(saved);
-    _loaded = true;
     notifyListeners();
   }
 

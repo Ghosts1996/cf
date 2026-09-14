@@ -286,15 +286,9 @@ class _ConnectScreenState extends State<ConnectScreen>
     return expiryStr != null ? DateTime.tryParse(expiryStr) : null;
   }
 
-  /// Несколько попыток подряд с паузой: на слабом сигнале один легитимный,
-  /// просто медленный ответ иногда не укладывается в таймаут запроса
-  /// (ApiClient._send), и экран сдавался бы с "Сервер не отвечает", оставаясь
-  /// на "НЕТ КЛЮЧА" до перезапуска приложения — pull-to-refresh здесь нет, а
-  /// переключение вкладок с IndexedStack экран не пересоздаёт.
-  ///
-  /// Повторяем только сетевые сбои (`statusCode == 0`): настоящую ошибку
-  /// сервера повтор не исправит, только продержит человека перед пустым
-  /// экраном лишние секунды.
+  /// Сортировка активных ключей по убыванию срока действия. Один и тот же
+  /// порядок нужен в трёх местах: свежая загрузка, восстановление из кэша и
+  /// фоновая перепроверка.
   void _sortByExpiryDesc(List<Map<String, dynamic>> keys) {
     keys.sort((a, b) {
       final ea = _expiryOf(a);
@@ -306,9 +300,18 @@ class _ConnectScreenState extends State<ConnectScreen>
     });
   }
 
-  /// Сортировка активных ключей по убыванию срока действия. Один и тот же
-  /// порядок нужен в трёх местах: свежая загрузка, восстановление из кэша и
-  /// фоновая перепроверка.
+  /// Несколько попыток подряд с паузой: на слабом сигнале один легитимный,
+  /// просто медленный ответ иногда не укладывается в таймаут запроса
+  /// (ApiClient._send), и экран сдавался бы с "Сервер не отвечает", оставаясь
+  /// на "НЕТ КЛЮЧА" до перезапуска приложения — pull-to-refresh здесь нет, а
+  /// переключение вкладок с IndexedStack экран не пересоздаёт.
+  ///
+  /// Повторяем только сетевые сбои (`statusCode == 0`): настоящую ошибку
+  /// сервера повтор не исправит, только продержит человека перед пустым
+  /// экраном лишние секунды. Офлайн-копию ключей при этом ведёт сам
+  /// ApiClient — он же дедуплицирует одинаковые `getKeys()`, которые вкладки
+  /// отправляют одновременно при холодном старте; экрану остаётся флаг
+  /// `ApiClient.instance.keysFromCache`.
   Future<List<dynamic>> _fetchKeysWithRetry() async {
     const maxAttempts = 3;
     for (var attempt = 1;; attempt++) {
@@ -326,15 +329,14 @@ class _ConnectScreenState extends State<ConnectScreen>
   Future<void> _loadKeyState() async {
     setState(() => _loadingKey = true);
     try {
-      /// Офлайн-копию ключей ведёт единый слой загрузки в ApiClient — он же
-      /// дедуплицирует четыре одинаковых `getKeys()`, которые вкладки отправляют
-      /// одновременно при холодном старте. Экрану остаётся флаг
-      /// `ApiClient.instance.keysFromCache`.
-      final keys = await _fetchKeysWithRetry();
       // getKeys() сам отдаст сохранённую копию, если сеть не ответила, поэтому
       // цикл повторов срабатывает, только когда показывать вообще нечего.
+      final keys = await _fetchKeysWithRetry();
       if (!mounted) return;
       final active = keys.cast<Map<String, dynamic>>().where(_isActive).toList();
+      // Берём ключ с максимальным expiry_date, а не первый активный: бэкенд
+      // отдаёт их в порядке покупки, и при нескольких ключах подключение уходило
+      // бы на тот, что истекает раньше.
       _sortByExpiryDesc(active);
       setState(() {
         _activeKey = active.isNotEmpty ? active.first : null;
@@ -342,16 +344,16 @@ class _ConnectScreenState extends State<ConnectScreen>
         _keyError = null;
         _loadingKey = false;
       });
-      // Берём ключ с максимальным expiry_date, а не первый активный: бэкенд
-      // отдаёт их в порядке покупки, и при нескольких ключах подключение уходило
-      // бы на тот, что истекает раньше.
+      // "Автоподключение при запуске": только при первой загрузке экрана, не при
+      // каждом фоновом обновлении (см. _recheckKeyExpiry).
       if (!_autoConnectTried) {
         _autoConnectTried = true;
-        // "Автоподключение при запуске": при первой загрузке экрана (не при каждом
-        // фоновом обновлении, см. _recheckKeyExpiry) поднимаем туннель, если
-        // тумблер включён, есть активный ключ и туннель ещё не поднят.
-        final autoConnect = await LocalPrefs.instance.getBool(PrefKeys.autoConnect, fallback: false);
         // По умолчанию выключено — автоподключение пользователь включает сам.
+        final autoConnect = await LocalPrefs.instance.getBool(PrefKeys.autoConnect, fallback: false);
+        // `_runtimeStateKnown` обязателен: если реальное состояние нативного
+        // сервиса прочитать не удалось, isConnected ниже равен false просто
+        // потому, что мы ничего не знаем, а не потому что VPN выключен — и
+        // автоподключение подняло бы вторую сессию поверх работающей.
         if (autoConnect &&
             _runtimeStateKnown &&
             (_activeKey != null || _hasManualKey) &&
@@ -363,10 +365,11 @@ class _ConnectScreenState extends State<ConnectScreen>
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        // Если реальное состояние нативного сервиса прочитать не удалось,
-        // isConnected ниже равен false просто потому, что мы ничего не знаем,
-        // а не потому что VPN выключен — и автоподключение подняло бы вторую
-        // сессию поверх работающей.
+        // Текст ошибки зависит от того, есть ли что показать: ключ из кэша —
+        // это "не удалось обновить", а не "НЕТ КЛЮЧА". Отдельно разбираем
+        // частый случай, когда туннель поднят, но трафик через него не идёт:
+        // тогда недоступен весь интернет на телефоне, и подсказка должна вести
+        // к отключению VPN, а не к "проверь интернет".
         if (_activeKey != null) {
           _keyError = _tunnel.isConnected
               ? tr('Не удалось обновить данные через активный VPN — показан '
@@ -384,11 +387,15 @@ class _ConnectScreenState extends State<ConnectScreen>
     _measureLatency();
   }
 
-  // Текст ошибки зависит от того, есть ли что показать: ключ из кэша — это
-  // "не удалось обновить", а не "НЕТ КЛЮЧА". Отдельно разбираем частый
-  // случай, когда туннель поднят, но трафик через него не идёт: тогда
-  // недоступен весь интернет на телефоне, и подсказка должна вести к
-  // отключению VPN, а не к "проверь интернет".
+  /// Тихая фоновая перепроверка ключей — без спиннера на весь экран.
+  /// Три исхода:
+  ///  1. Туннель не подключён — просто освежаем `_activeKey`.
+  ///  2. Туннель подключён, и ключ, на котором он поднят, ещё активен —
+  ///     ничего не трогаем: рвать рабочее соединение только потому, что
+  ///     где-то есть ключ подлиннее, незачем.
+  ///  3. Ключ, на котором поднят туннель, истёк — переключаемся на следующий
+  ///     активный, а если активных больше нет, отключаемся и предлагаем
+  ///     оформить подписку.
   Future<void> _recheckKeyExpiry() async {
     if (!mounted) return;
     List<dynamic> keys;
@@ -399,15 +406,8 @@ class _ConnectScreenState extends State<ConnectScreen>
     }
     if (!mounted) return;
 
-    final active = keys.cast<Map<String, dynamic>>().where(_isActive).toList()
-      ..sort((a, b) {
-        final ea = _expiryOf(a);
-        final eb = _expiryOf(b);
-        if (ea == null && eb == null) return 0;
-        if (ea == null) return 1;
-        if (eb == null) return -1;
-        return eb.compareTo(ea);
-      });
+    final active = keys.cast<Map<String, dynamic>>().where(_isActive).toList();
+    _sortByExpiryDesc(active);
     final newBest = active.isNotEmpty ? active.first : null;
 
     if (_hasManualKey && _tunnel.isConnected) {
