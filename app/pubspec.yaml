@@ -31,12 +31,15 @@ dependencies:
   # Без платформенной настройки (App Group + Network Extension на iOS/macOS
   # через Xcode, sing-box.exe на Windows — см. app/NATIVE_SETUP.md) одно лишь
   # добавление пакета VPN не включит.
-  # Ревизия с исправленной передачей DNS в Android VPN Service; точный коммит
-  # зафиксирован в pubspec.lock.
+  # Ядро с поддержкой XHTTP. Ветка ccurecc_singbox_xhttp — копия рабочей
+  # ccurecc_singbox_dns, отличающаяся ровно одним файлом: android/libs/
+  # libbox.aar собран из форка hiddify/hiddify-sing-box (см. XHTTP_CORE.md).
+  # Исходники плагина в обеих ветках одни и те же. Откат — вернуть сюда
+  # ccurecc_singbox_dns и выполнить flutter pub get.
   flutter_singbox_client:
     git:
       url: https://github.com/Ghosts1996/cf.git
-      ref: ccurecc_singbox_dns
+      ref: ccurecc_singbox_xhttp
       path: app/third_party/flutter_singbox_client
   # Список установленных приложений для экрана split-tunnel. API 2.0.0+ —
   # именованные аргументы (excludeSystemApps/excludeNonLaunchableApps).

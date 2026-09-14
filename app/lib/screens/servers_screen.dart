@@ -252,8 +252,10 @@ class _ServersScreenState extends State<ServersScreen> {
             host: (sni != null && sni.isNotEmpty) ? sni : host,
           ).timeout(const Duration(seconds: 4));
           tlsSw.stop();
-          if (mounted) setState(() => _livePing[hostName] = scaleDisplayPingMs(
-              sw.elapsedMilliseconds + tlsSw.elapsedMilliseconds));
+          if (mounted) {
+            setState(() => _livePing[hostName] =
+                sw.elapsedMilliseconds + tlsSw.elapsedMilliseconds);
+          }
           secureSocket.destroy();
         } catch (_) {
           // TCP-порт открыт, но TLS не поднимается — сервис за ним не работает.
@@ -264,7 +266,7 @@ class _ServersScreenState extends State<ServersScreen> {
         }
       } else {
         // `sw` уже остановлен выше — здесь чистое время TCP-подключения.
-        if (mounted) setState(() => _livePing[hostName] = scaleDisplayPingMs(sw.elapsedMilliseconds));
+        if (mounted) setState(() => _livePing[hostName] = sw.elapsedMilliseconds);
         socket.destroy();
       }
     } catch (_) {
@@ -1103,6 +1105,12 @@ class _ServersScreenState extends State<ServersScreen> {
                     _realEndpoints[id]?.security == 'reality';
                 // Для сервера, на котором туннель поднят прямо сейчас, берём настоящий
                 // замер через VLESS (см. `_connectedTunnelPing`), а не TCP-оценку.
+                //
+                // Пороги у двух шкал разные, и это не опечатка. TCP/TLS-стук
+                // меряет один обмен пакетами с сервером — там нормой считаются
+                // десятки миллисекунд. URLTest ядра меряет полный HTTP-запрос
+                // через VLESS: рукопожатие, прокси, ответ сайта, — и 150-400 мс
+                // там обычное дело. Ровно те же числа показывает Hiddify.
                 final isCurrentlyConnected =
                     _tunnel.isConnected && id == _tunnel.connectedServerName.value;
                 String pingLabel;
@@ -1112,10 +1120,10 @@ class _ServersScreenState extends State<ServersScreen> {
                   if (tunnelPing == null) {
                     pingLabel = tr('измеряю через VLESS...');
                     pingColor = AppColors.textDim;
-                  } else if (tunnelPing < 80) {
+                  } else if (tunnelPing < 150) {
                     pingLabel = '$tunnelPing ${tr('мс · отлично (через VLESS)')}';
                     pingColor = AppColors.success;
-                  } else if (tunnelPing < 180) {
+                  } else if (tunnelPing < 400) {
                     pingLabel = '$tunnelPing ${tr('мс · через VLESS')}';
                     pingColor = AppColors.warning;
                   } else {
