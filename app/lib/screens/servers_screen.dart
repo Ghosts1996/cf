@@ -58,7 +58,15 @@ class _ServersScreenState extends State<ServersScreen> {
   // получить, пингуем реальный адрес каждой локации — тот же, на который
   // идёт трафик при подключении. Путь через connect_host/subscription_url
   // остаётся запасным.
-  Map<String, ({String host, int port, String security, String? sni})> _realEndpoints = {};
+  Map<
+      String,
+      ({
+        String host,
+        int port,
+        String security,
+        String? sni,
+        String transport
+      })> _realEndpoints = {};
 
   // Пинг обновляется всё время, пока экран смонтирован. Внутри IndexedStack
   // (RootShell) он остаётся смонтированным и при переходе на другую вкладку,
@@ -1103,6 +1111,14 @@ class _ServersScreenState extends State<ServersScreen> {
                 // наравне с рабочими.
                 final isRealityOnly =
                     _realEndpoints[id]?.security == 'reality';
+                // Транспорт показываем, когда он не голый TCP: по подписке
+                // сразу видно, какая локация ходит через XHTTP, а какая нет,
+                // и почему одна из них может быть недоступна текущему ядру.
+                final transport = _realEndpoints[id]?.transport;
+                final transportSuffix =
+                    (transport == null || transport == 'tcp')
+                        ? ''
+                        : ' · $transport';
                 // Для сервера, на котором туннель поднят прямо сейчас, берём настоящий
                 // замер через VLESS (см. `_connectedTunnelPing`), а не TCP-оценку.
                 //
@@ -1183,7 +1199,7 @@ class _ServersScreenState extends State<ServersScreen> {
                 return ServerPill(
                   code: code,
                   name: name,
-                  pingLabel: pingLabel,
+                  pingLabel: '$pingLabel$transportSuffix',
                   pingColor: pingColor,
                   onTap: () => _onServerTapped(id, name),
                   trailing: Row(

@@ -74,7 +74,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final results = await Future.wait([
       _prefs.getBool(PrefKeys.autoConnect, fallback: false),
-      _prefs.getBool(PrefKeys.smartWifi, fallback: true),
+      _prefs.getBool(PrefKeys.smartWifi, fallback: false),
       _prefs.getBool(PrefKeys.killSwitch, fallback: false),
       _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
