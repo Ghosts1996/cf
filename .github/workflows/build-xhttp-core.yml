@@ -19,7 +19,7 @@ on:
   # push, который меняет сам этот файл в ветке с XHTTP. Чтобы пересобрать
   # ядро, достаточно тронуть комментарий ниже и запушить.
   #
-  # Пересборка № 4
+  # Пересборка № 5
   push:
     branches: [ claude/xhttp-support ]
     paths: [ '.github/workflows/build-xhttp-core.yml' ]
@@ -110,15 +110,19 @@ jobs:
       # лишняя архитектура добавляет к .aar примерно четверть его размера, и с
       # четырьмя файл упирается в лимит GitHub на размер файла в репозитории.
       #
-      # Второе: выброшен with_tailscale со свитой ts_omit_*. На ветке extended
-      # подмодуль replace/tailscale отстал от кода ядра, и сборка с этим тегом
-      # падает на `undefined: netns.SetControlFunc`. Приложению tailscale не
-      # нужен: у нас VLESS, а не mesh-сеть.
+      # Второе: выброшены теги протоколов, которых в приложении нет.
+      # with_tailscale со свитой ts_omit_* — на ветке extended подмодуль
+      # replace/tailscale отстал от кода ядра, и сборка с ним падает на
+      # `undefined: netns.SetControlFunc`. with_naive_outbound тянет cronet:
+      # это статическая библиотека на сотню с лишним мегабайт под каждую
+      # архитектуру, из-за неё сборка идёт часами, а .aar заведомо не влезает
+      # в лимит GitHub. Ни tailscale, ни naive приложению не нужны — у нас
+      # VLESS с его транспортами.
       - name: Build libbox.aar
         working-directory: core
         run: |
           export PATH="$PATH:$(go env GOPATH)/bin"
-          TAGS='with_gvisor,with_quic,with_wireguard,with_utls,with_naive_outbound,with_clash_api,badlinkname,tfogo_checklinkname0'
+          TAGS='with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0'
           gomobile bind -v \
             -o libbox.aar \
             -target "${{ inputs.abis || 'android/arm64,android/arm' }}" \
