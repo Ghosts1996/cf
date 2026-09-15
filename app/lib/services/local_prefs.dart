@@ -122,6 +122,20 @@ class PrefKeys {
   static const dnsProtection = 'settings.dns_protection';
   static const blockAds = 'settings.block_ads';
   static const dpiBypass = 'settings.dpi_bypass';
+  // «Быстрый пинг»: включает в конфиге experimental.unified_delay — ядро
+  // форка меряет задержку вторым запросом по уже поднятому соединению
+  // (один круговой путь вместо рукопожатия плюс запрос). Число выходит
+  // вдвое меньше и совпадает с тем, что показывает Hiddify.
+  //
+  // По умолчанию выключено, и это не перестраховка на пустом месте. Если
+  // адрес проверки закрывает соединение после первого ответа
+  // (`Connection: close`), второй запрос идти некуда — ядро считает outbound
+  // недоступным и отдаёт 65535 вместо задержки. Проверено на настоящем ядре
+  // форка: цель с keep-alive — 102 мс вместо 153, цель с `Connection: close`
+  // — вообще ни одного результата. Поэтому режим включается вручную и сам
+  // выключается, если ядро дважды подряд не отдало ни одной задержки
+  // (см. TunnelService._runLatencyProbe).
+  static const fastPing = 'settings.fast_ping';
   // Переключает NetworkMode пакета flutter_singbox_client между 'vpn'
   // (системный туннель) и 'proxy' (локальные SOCKS/HTTP-порты без запроса
   // VPN-разрешения). См. tunnel_service.dart и settings_screen.dart.

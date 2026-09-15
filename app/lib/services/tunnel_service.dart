@@ -134,6 +134,12 @@ class TunnelService {
   // список означает сессию с одним outbound'ом — тогда мгновенное
   // переключение недоступно и switchPreferredHost() идёт через разрыв.
   List<_ParsedVless> _sessionOutboundOrder = const <_ParsedVless>[];
+  // Собрана ли текущая сессия с «быстрым пингом» (experimental.unified_delay)
+  // и сколько раз подряд ядро после этого не отдало ни одной задержки. Нужно,
+  // чтобы режим сам выключился, если на этой сети он не работает, — иначе
+  // пользователь остался бы без пинга вообще и без единой подсказки почему.
+  bool _sessionFastPing = false;
+  int _emptyLatencyRuns = 0;
   // Гасится до перезапуска приложения, если ядро отвергло конфиг с
   // группой-селектором: дальше собираем сессию одним outbound'ом.
   bool _selectorSupported = true;
@@ -1126,9 +1132,31 @@ class TunnelService {
       // текущий сервер сами. Число будет завышено — свой замер включает
       // рукопожатие, — но лучше так, чем пустой экран.
       final currentName = connectedServerName.value;
-      if (smoothed.isEmpty && currentName != null && currentName.isNotEmpty) {
+      // Запоминаем до запасного замера: он дописывает в smoothed своё число, и
+      // после него «ядро молчит» уже не отличить от «ядро ответило».
+      final coreSilent = smoothed.isEmpty;
+      if (coreSilent && currentName != null && currentName.isNotEmpty) {
         final warm = await connectedDelayMs();
         if (warm != null && warm > 0) smoothed[currentName] = warm;
+      }
+      // Ядро не отдало ни одной задержки, хотя туннель поднят. Если сессия
+      // собрана с «быстрым пингом», виноват скорее всего он: на адресе
+      // проверки, который закрывает соединение после первого ответа, второму
+      // запросу идти некуда, и ядро помечает outbound недоступным. Выключаем
+      // режим сами — следующее подключение соберётся без него и пинг вернётся.
+      if (coreSilent) {
+        _emptyLatencyRuns++;
+        if (_sessionFastPing && _emptyLatencyRuns >= 2) {
+          _sessionFastPing = false;
+          _emptyLatencyRuns = 0;
+          await LocalPrefs.instance.setBool(PrefKeys.fastPing, false);
+          unawaited(AppLogService.instance.log(
+              'Быстрый пинг выключен сам: ядро дважды подряд не отдало ни одной '
+              'задержки. Похоже, адрес проверки закрывает соединение после '
+              'первого ответа. Переподключись — пинг считается обычным способом.'));
+        }
+      } else {
+        _emptyLatencyRuns = 0;
       }
       latencyByRemark.value = smoothed;
       // Результат замера в журнал: если ядро не достучалось ни до одной
@@ -1641,6 +1669,16 @@ class TunnelService {
   /// спрашиваем ядро пробным конфигом — как про транспорты и tls_fragment.
   bool? _unifiedDelaySupport;
 
+  /// Включён ли «быстрый пинг» и умеет ли его установленное ядро. Оба
+  /// условия сразу: настройка сама по себе ничего не значит на ядре без
+  /// поддержки опции — конфиг с неизвестным полем такое ядро отвергает целиком.
+  Future<bool> _fastPingEnabled() async {
+    final enabled =
+        await LocalPrefs.instance.getBool(PrefKeys.fastPing, fallback: false);
+    if (!enabled) return false;
+    return _coreSupportsUnifiedDelay();
+  }
+
   Future<bool> _coreSupportsUnifiedDelay() async {
     final cached = _unifiedDelaySupport;
     if (cached != null) return cached;
@@ -1866,10 +1904,16 @@ class TunnelService {
     // правилом маршрутизации.
     final tlsFragmentSupported =
         dpiBypass ? await _coreSupportsTlsFragment() : false;
-    // Спрашиваем тем же способом: умеет ли ядро «единую задержку». От ответа
-    // зависит только то, какое число пользователь увидит как пинг, — на сам
-    // туннель опция не влияет.
-    final unifiedDelaySupported = await _coreSupportsUnifiedDelay();
+    // «Быстрый пинг» (experimental.unified_delay) — только если пользователь
+    // включил его сам. По умолчанию выключен: на адресе проверки, который
+    // закрывает соединение после первого ответа, второму запросу идти некуда,
+    // и ядро вместо задержки отдаёт код отказа — пинг пропадает совсем.
+    // Подробности и замеры — в PrefKeys.fastPing.
+    final fastPing =
+        await LocalPrefs.instance.getBool(PrefKeys.fastPing, fallback: false);
+    final unifiedDelaySupported =
+        fastPing ? await _coreSupportsUnifiedDelay() : false;
+    _sessionFastPing = unifiedDelaySupported;
     // См. PrefKeys.excludeAppFromTunnel. При fallback false список исключений
     // ниже остаётся пустым и конфиг собирается ровно такой же, как без этой
     // настройки.
@@ -2218,7 +2262,7 @@ class TunnelService {
       // полученным через живой туннель. Считаться они обязаны одинаково,
       // иначе один и тот же сервер показывал бы 60 мс при включённом VPN и
       // 300 мс при выключенном.
-      unifiedDelaySupported: await _coreSupportsUnifiedDelay(),
+      unifiedDelaySupported: await _fastPingEnabled(),
     );
 
     _probeInProgress = true;
@@ -2382,7 +2426,7 @@ class TunnelService {
       selectedPackages: const [],
       proxyOnly: true,
       muxEnabled: false,
-      unifiedDelaySupported: await _coreSupportsUnifiedDelay(),
+      unifiedDelaySupported: await _fastPingEnabled(),
       alternates: usable.skip(1).toList(),
     );
 
