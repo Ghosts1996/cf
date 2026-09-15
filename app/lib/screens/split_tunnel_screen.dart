@@ -8,27 +8,14 @@ import '../widgets/neon.dart';
 import '../services/local_prefs.dart';
 import '../services/locale_service.dart';
 
-/// Split-туннелирование — сведено по SCREEN 8 макета (.app-toggle-row).
+/// Split-туннелирование: какие приложения идут мимо VPN, а какие через него.
 ///
-/// [ИСПРАВЛЕНО] Раньше здесь был фиксированный демо-список из 5 названий
-/// ('Банк Онлайн', 'Карты', ...) — не имел отношения к реальному
-/// устройству. Теперь список реально читается через пакет `installed_apps`
-/// (Android-only, требует QUERY_ALL_PACKAGES — см. NATIVE_SETUP.md).
-///
-/// [ИСПРАВЛЕНО] Раньше выбор здесь сохранялся в LocalPrefs, но реального
-/// эффекта на трафик не было — TunnelService его не читал. Теперь при
-/// каждом `connect()` (см. tunnel_service.dart) сохранённая карта
-/// пакетов читается и передаётся в конфиг sing-box как `exclude_package`
-/// на tun-инбаунде — приложения, отмеченные здесь как "в обход VPN",
-/// реально не заворачиваются в туннель (Android VpnService на уровне
-/// ядра sing-box). Чтобы применить изменение к уже запущенному туннелю,
-/// нужно переподключиться — на лету (без разрыва сессии) список не
-/// обновляется.
-///
-/// [ИСПРАВЛЕНО] Выбор ("_bypassed") раньше был обычным `Map` полем State —
-/// сбрасывался при уходе с экрана/перезапуске приложения (то же семейство
-/// багов, что и остальные тумблеры — см. services/local_prefs.dart).
-/// Теперь читается/пишется в LocalPrefs при каждом переключении.
+/// Список установленных приложений читается пакетом `installed_apps`
+/// (только Android, нужен QUERY_ALL_PACKAGES — см. NATIVE_SETUP.md), выбор
+/// хранится в LocalPrefs. При каждом connect() сохранённая карта пакетов
+/// уходит в конфиг sing-box как include_package/exclude_package на
+/// tun-инбаунде. К уже поднятому туннелю изменения применяются только после
+/// переподключения.
 class SplitTunnelScreen extends StatefulWidget {
   const SplitTunnelScreen({super.key});
   @override
@@ -39,10 +26,9 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
   final _prefs = LocalPrefs.instance;
   List<AppInfo> _apps = [];
   final Map<String, bool> _bypassed = {}; // packageName -> "отмечено в списке"
-  // [НОВОЕ] Режим — см. PrefKeys.splitTunnelMode.
-  // 'exclude' — отмеченные приложения идут В ОБХОД VPN (как раньше).
-  // 'include' — ТОЛЬКО отмеченные приложения идут через VPN (режим Hiddify
-  // "разрешить VPN только для выбранных приложений").
+  // Режим (см. PrefKeys.splitTunnelMode):
+  // 'exclude' — отмеченные приложения идут в обход VPN;
+  // 'include' — через VPN идут только отмеченные.
   String _mode = 'exclude';
   bool _loading = true;
   String? _error;
@@ -54,15 +40,10 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
   }
 
   Future<void> _load() async {
-    // [НОВОЕ] Восстанавливаем ранее сохранённый выбор ДО показа списка —
-    // иначе первая отрисовка на секунду показала бы все тумблеры выключенными
-    // (значения по умолчанию), а потом "дёрнулась" бы после чтения из
-    // хранилища. Загружаем оба источника параллельно и объединяем один раз.
+    // Восстанавливаем сохранённый выбор до показа списка, иначе первый кадр
+    // покажет все тумблеры выключенными и дёрнется после чтения хранилища.
     final savedBypassed = await _prefs.getBoolMap(PrefKeys.splitTunnelBypass);
     final savedMode = await _prefs.getString(PrefKeys.splitTunnelMode);
-    // [ИСПРАВЛЕНО] Проверка `mounted` после `await` — без неё уход с
-    // экрана до завершения чтения LocalPrefs приводил к падению
-    // "setState() called after dispose()".
     if (!mounted) return;
     if (savedMode == 'include' || savedMode == 'exclude') _mode = savedMode!;
     if (!Platform.isAndroid) {
@@ -74,21 +55,13 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
       return;
     }
     try {
-      // [ИСПРАВЛЕНО — критично] У пакета installed_apps ^2.0.0 параметр
-      // withIcon по умолчанию false (проверено по официальному README
-      // пакета на pub.dev) — без него app.icon всегда null, и UI ниже
-      // молча уходил в ветку с эмодзи-заглушкой 📱 для АБСОЛЮТНО ВСЕХ
-      // приложений, на любом телефоне. Это не было связано с конкретным
-      // устройством — баг был в самом вызове API, иконки не запрашивались
-      // вообще.
+      // withIcon по умолчанию false — без него app.icon всегда null и список
+      // уходит в ветку с эмодзи-заглушкой для всех приложений подряд.
       final apps = await InstalledApps.getInstalledApps(
         excludeSystemApps: true,
         excludeNonLaunchableApps: true,
         withIcon: true,
       );
-      // [ИСПРАВЛЕНО] Та же проверка после второго `await` — чтение списка
-      // установленных приложений на слабом устройстве может занять
-      // заметное время, и уход с экрана за это время — реальный сценарий.
       if (!mounted) return;
       apps.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       setState(() {
@@ -107,10 +80,8 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
     }
   }
 
-  /// [НОВОЕ] Переключение режима 'exclude' <-> 'include' — реально
-  /// прокидывается в tunnel_service.dart::_buildSingBoxConfig
-  /// (include_package/exclude_package на tun-инбаунде) при следующем
-  /// подключении.
+  /// Переключение режима 'exclude' <-> 'include'. Применяется при следующем
+  /// подключении — см. tunnel_service.dart::_buildSingBoxConfig.
   Future<void> _setMode(String mode) async {
     if (mode == _mode) return;
     setState(() => _mode = mode);
@@ -134,8 +105,6 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
                   AppHeader(trailing: Icons.arrow_back_rounded, onTrailingTap: () => Navigator.pop(context)),
                   Text(tr('Split-туннелирование'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 10),
-                  // [НОВОЕ] Сегментированный переключатель режима — как
-                  // "VPN для всех / выбранных приложений" в Hiddify.
                   Container(
                     padding: const EdgeInsets.all(3),
                     decoration: BoxDecoration(
@@ -237,8 +206,7 @@ class _SplitTunnelScreenState extends State<SplitTunnelScreen> {
   }
 }
 
-/// [НОВОЕ] Один сегмент переключателя режима 'exclude'/'include' на
-/// экране Split-туннелирования — простая кнопка-таб без внешних зависимостей.
+/// Один сегмент переключателя режима на экране split-туннелирования.
 class _ModeSegment extends StatelessWidget {
   const _ModeSegment({required this.label, required this.selected, required this.onTap});
   final String label;

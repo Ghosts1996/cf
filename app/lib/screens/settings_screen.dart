@@ -7,43 +7,21 @@ import '../services/tunnel_service.dart';
 import '../services/locale_service.dart';
 import '../l10n/app_language.dart';
 
-/// Настройки — сведено по SCREEN 7 макета (.settings-row + .toggle).
+/// Настройки приложения.
 ///
-/// [ИСПРАВЛЕНО] Раньше все три тумблера были обычным `bool` полем State —
-/// значение "забывалось" при выходе с экрана и при перезапуске приложения
-/// (подробный разбор причины — см. services/local_prefs.dart). Теперь
-/// каждый тумблер читает стартовое значение из `LocalPrefs` при открытии
-/// экрана и сразу пишет туда же при каждом переключении — значение
-/// переживает и уход с экрана, и полный перезапуск приложения.
+/// Каждый тумблер читает стартовое значение из LocalPrefs при открытии
+/// экрана и пишет туда же при переключении, поэтому переживает и уход с
+/// экрана, и перезапуск приложения.
 ///
-/// [ИСПРАВЛЕНО] Кнопка "Выйти из аккаунта" была `onPressed: () {}` —
-/// не делала вообще ничего. Теперь реально чистит токен и возвращает на
-/// экран входа (тот же путь, что и кнопка выхода в MenuScreen).
-///
-/// [ИСПРАВЛЕНО] Все три тумблера из предупреждения внизу экрана ("Автопод-
-/// ключение при запуске", "Умное подключение на Wi-Fi", Kill Switch) теперь
-/// реально работают, а не только сохраняют значение:
-///  - Kill Switch — переподключение туннеля при обрыве уже было реализовано
-///    в tunnel_service.dart.
-///  - "Автоподключение при запуске" уже было реализовано в
-///    connect_screen.dart (_loadKeyState) — при старте приложения реально
-///    поднимает туннель, если тумблер включён и есть ключ.
-///  - "Умное подключение на Wi-Fi" раньше было чисто декоративным — теперь
-///    connect_screen.dart слушает смену сети через connectivity_plus и при
-///    переходе на Wi-Fi запускает подключение (см. _onConnectivityChanged).
-///    Честное ограничение: ОС не даёт приложению отличить "публичный" Wi-Fi
-///    от домашнего/рабочего без спецправ, поэтому срабатывает на любой Wi-Fi.
-///
-/// [ИСПРАВЛЕНО] Выключение Kill Switch отсюда не сбрасывало "Строгий режим"
-/// (тумблер на экране "Безопасность", тот же persist-ключ security_screen
-/// требует для себя, что строгий режим не бывает включён без обычного Kill
-/// Switch) — теперь оба экрана сбрасывают строгий режим одинаково, см.
-/// _setKillSwitch ниже.
-///
-/// [НОВОЕ] У каждого пункта настроек теперь есть короткая подсказка под
-/// названием — что конкретно делает переключатель и когда применяется
-/// (сразу или при следующем подключении), а не только три общих
-/// предупреждения одним блоком внизу экрана.
+/// Что стоит за переключателями:
+///  - Kill Switch — переподключение туннеля при обрыве (tunnel_service.dart).
+///    Выключение отсюда сбрасывает и "строгий режим" с экрана
+///    "Безопасность": строгий режим не бывает включён без обычного.
+///  - "Автоподключение при запуске" — connect_screen.dart (_loadKeyState).
+///  - "Умное подключение на Wi-Fi" — connect_screen.dart слушает смену сети
+///    через connectivity_plus (_onConnectivityChanged). ОС не позволяет
+///    отличить публичный Wi-Fi от домашнего без спецправ, так что
+///    срабатывает на любой Wi-Fi.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, required this.onLoggedOut});
   final VoidCallback onLoggedOut;
@@ -55,28 +33,24 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _prefs = LocalPrefs.instance;
 
-  // [ИЗМЕНЕНО] Дефолты подогнаны под макет: автоподключение/Kill Switch/
-  // режим прокси — выключены; Умное подключение на публичном Wi-Fi и Обход
-  // DPI — включены по умолчанию.
+  // Дефолты: автоподключение, Kill Switch и режим прокси выключены; умное
+  // подключение на Wi-Fi и обход DPI — включены.
   bool _autoConnect = false;
   bool _smartWifi = true;
   bool _killSwitch = false;
-  // [НОВОЕ] Не показывается на этом экране отдельным пунктом (сам тумблер
-  // строгого режима живёт на экране "Безопасность"), но нужен здесь, чтобы
-  // при выключении Kill Switch с этого экрана можно было честно сбросить
-  // и его — см. _setKillSwitch ниже.
-  bool _strictKillSwitch = false;
   bool _dpiBypass = true;
   bool _proxyOnly = false;
-  // [НОВОЕ] Выбор DNS-over-HTTPS резолвера. Реально прокидывается в конфиг
-  // sing-box через TunnelService.connect()/_buildSingBoxConfig, а не
-  // просто хранится "для галочки" — см. tunnel_service.dart.
+  // «Быстрый пинг» (experimental.unified_delay). Выключен по умолчанию —
+  // почему именно так, подробно в PrefKeys.fastPing.
+  bool _fastPing = false;
+  // Выбор DNS-over-HTTPS резолвера. Прокидывается в конфиг sing-box через
+  // TunnelService.connect()/_buildSingBoxConfig.
   String _dnsProvider = 'cloudflare';
-  // [НОВОЕ] Свой DNS-сервер (см. PrefKeys.customDnsServer) — как "Custom DNS"
-  // в Hiddify. Используется, когда _dnsProvider == 'custom'.
+  // Свой DNS-сервер (PrefKeys.customDnsServer), используется при
+  // _dnsProvider == 'custom'.
   final _customDnsController = TextEditingController();
-  // [НОВОЕ] Разрешить IPv6 в туннеле — см. PrefKeys.ipv6Enabled и
-  // подробный докстринг в tunnel_service.dart::_buildSingBoxConfig.
+  // IPv6 в туннеле — см. PrefKeys.ipv6Enabled и
+  // tunnel_service.dart::_buildSingBoxConfig.
   bool _ipv6Enabled = false;
   bool _loaded = false;
 
@@ -103,16 +77,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final results = await Future.wait([
       _prefs.getBool(PrefKeys.autoConnect, fallback: false),
-      _prefs.getBool(PrefKeys.smartWifi, fallback: true),
+      _prefs.getBool(PrefKeys.smartWifi, fallback: false),
       _prefs.getBool(PrefKeys.killSwitch, fallback: false),
-      // [ИЗМЕНЕНО] fallback приведён в соответствие с макетом — включено
-      // по умолчанию (совпадает со стартовым полем _dpiBypass выше).
-      _prefs.getBool(PrefKeys.dpiBypass, fallback: true),
+      _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
       _prefs.getBool(PrefKeys.ipv6Enabled, fallback: false),
-      // [НОВОЕ] См. поле _strictKillSwitch выше — нужно знать текущее
-      // значение до первого переключения Kill Switch на этом экране.
-      _prefs.getBool(PrefKeys.strictKillSwitch, fallback: false),
+      _prefs.getBool(PrefKeys.fastPing, fallback: false),
     ]);
     final savedDnsProvider = await _prefs.getString(PrefKeys.dnsServerProvider);
     final savedCustomDns = await _prefs.getString(PrefKeys.customDnsServer);
@@ -124,7 +94,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _dpiBypass = results[3];
       _proxyOnly = results[4];
       _ipv6Enabled = results[5];
-      _strictKillSwitch = results[6];
+      _fastPing = results[6];
       _dnsProvider = (savedDnsProvider != null && _dnsProviderLabels.containsKey(savedDnsProvider))
           ? savedDnsProvider
           : 'cloudflare';
@@ -133,11 +103,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
-  // [НОВОЕ] Обход DPI — реальная настройка (см. tunnel_service.dart ->
-  // _hardenConfig -> sockopt.fragment), не декоративный тумблер. Влияет
-  // только на СЛЕДУЮЩЕЕ подключение — на уже поднятый туннель повлиять
-  // нельзя, поэтому если турннель сейчас активен, честно предупреждаем,
-  // что нужно переподключиться, а не создаём иллюзию мгновенного эффекта.
+  /// «Быстрый пинг»: ядро меряет задержку вторым запросом по уже поднятому
+  /// соединению — один круговой путь вместо рукопожатия плюс запроса. Число
+  /// выходит примерно вдвое меньше, чем при обычном замере.
+  ///
+  /// Работает не везде: если адрес проверки закрывает соединение после первого
+  /// ответа, второму запросу идти некуда и ядро вместо задержки отдаёт код
+  /// отказа. На такой сети приложение выключит режим само — см.
+  /// TunnelService._runLatencyProbe.
+  Future<void> _setFastPing(bool v) async {
+    setState(() => _fastPing = v);
+    await _prefs.setBool(PrefKeys.fastPing, v);
+    if (mounted && TunnelService.instance.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(tr('Изменение применится при следующем подключении — переподключись, чтобы включить сейчас'))),
+      );
+    }
+  }
+
+  // Обход DPI — sockopt.fragment, см. tunnel_service.dart::_hardenConfig.
+  // Влияет только на следующее подключение, поэтому при активном туннеле
+  // предупреждаем, что нужно переподключиться.
   Future<void> _setDpiBypass(bool v) async {
     setState(() => _dpiBypass = v);
     await _prefs.setBool(PrefKeys.dpiBypass, v);
@@ -153,21 +139,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.autoConnect, v);
   }
 
-  // [НОВОЕ] "Режим прокси" — переключает флаттеровский пакет между
-  // NetworkMode.vpn (системный туннель, как сейчас) и NetworkMode.proxy
-  // (только локальные SOCKS5+HTTP порты на 127.0.0.1:2080, БЕЗ запроса
-  // VPN-разрешения — подтверждено официальным README flutter_singbox_client:
-  // "Use NetworkMode.proxy when you only need HTTP/SOCKS proxy ports
-  // without requesting VPN permission").
+  // Режим прокси переключает пакет между NetworkMode.vpn (системный
+  // туннель) и NetworkMode.proxy — только локальные SOCKS5/HTTP порты на
+  // 127.0.0.1:2080, без запроса VPN-разрешения.
   //
-  // [ЧЕСТНО] Это НЕ системный прокси на весь телефон — Android не даёт
-  // обычному приложению (без прав администратора устройства) незаметно
-  // подменить прокси во всех сетевых настройках. Это локальный порт,
-  // который нужно вручную указать в конкретном приложении/браузере,
-  // умеющем работать через SOCKS5/HTTP-прокси. Kill Switch и
-  // split-tunneling (эксклюзия приложений) физически не могут работать в
-  // этом режиме — они завязаны на системный VPN-интерфейс, которого тут
-  // нет, поэтому тумблер отключает их несовместимость честно, а не молча.
+  // Это не системный прокси на весь телефон: порт нужно вручную указать в
+  // приложении или браузере, умеющем работать через SOCKS5/HTTP. Kill Switch
+  // и split-tunneling в этом режиме невозможны — они завязаны на системный
+  // VPN-интерфейс, которого здесь нет, поэтому тумблер их отключает.
   Future<void> _setProxyOnly(bool v) async {
     setState(() => _proxyOnly = v);
     await _prefs.setBool(PrefKeys.proxyOnlyMode, v);
@@ -183,11 +162,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.smartWifi, v);
   }
 
-  /// [НОВОЕ] Реальная настройка — сохраняет провайдера DNS-over-HTTPS и
-  /// применяется при следующем подключении (см. _buildSingBoxConfig в
-  /// tunnel_service.dart). Если туннель сейчас активен, честно
-  /// предупреждаем, что нужно переподключиться, а не создаём иллюзию
-  /// мгновенного эффекта (та же логика, что у _setDpiBypass выше).
+  /// Сохраняет провайдера DNS-over-HTTPS; применяется при следующем
+  /// подключении (_buildSingBoxConfig). При активном туннеле предупреждаем о
+  /// необходимости переподключиться, как и в _setDpiBypass.
   Future<void> _setDnsProvider(String? v) async {
     if (v == null) return;
     setState(() => _dnsProvider = v);
@@ -199,10 +176,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  /// [НОВОЕ] Сохраняет пользовательский DNS-адрес по мере ввода (когда
-  /// выбран провайдер 'custom') — реально прокидывается в конфиг sing-box
-  /// на следующем подключении, см. tunnel_service.dart::_buildSingBoxConfig
-  /// (resolvedDnsServer).
+  /// Сохраняет пользовательский DNS-адрес по мере ввода (когда выбран
+  /// провайдер 'custom') — уходит в конфиг sing-box на следующем
+  /// подключении, см. _buildSingBoxConfig (resolvedDnsServer).
   Future<void> _setCustomDnsServer(String v) async {
     await _prefs.setString(PrefKeys.customDnsServer, v);
     if (mounted && TunnelService.instance.isConnected) {
@@ -212,7 +188,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  /// [НОВОЕ] IPv6 в туннеле — см. PrefKeys.ipv6Enabled.
+  /// IPv6 в туннеле — см. PrefKeys.ipv6Enabled.
   Future<void> _setIpv6Enabled(bool v) async {
     setState(() => _ipv6Enabled = v);
     await _prefs.setBool(PrefKeys.ipv6Enabled, v);
@@ -223,23 +199,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // [ИСПРАВЛЕНО] Выключение Kill Switch отсюда не трогало
-  // security.strict_kill_switch — если пользователь включал "Строгий
-  // режим" на экране "Безопасность", а потом выключал обычный Kill Switch
-  // здесь, в настройках, в хранилище оставалась пара killSwitch=false +
-  // strictKillSwitch=true. TunnelService это не ломало (строгий режим
-  // всё равно не запускается без обычного — см. tunnel_service.dart:435),
-  // но при следующем открытии экрана "Безопасность" тумблер "Строгий
-  // режим" показывался включённым вопреки собственному правилу этого же
-  // экрана ("строгий режим не может быть включён без обычного Kill
-  // Switch"). Теперь оба переключателя одного и того же экрана
-  // "Безопасность" синхронизированы вне зависимости от того, с какого
-  // экрана их меняли — см. security_screen.dart::_killSwitch onChanged.
+  // Выключение Kill Switch сбрасывает и strict_kill_switch. Иначе в
+  // хранилище оставалась бы пара killSwitch=false + strictKillSwitch=true:
+  // туннелю это не мешает (строгий режим и так не запускается без обычного),
+  // но экран "Безопасность" показывал бы строгий режим включённым вопреки
+  // собственному правилу.
   Future<void> _setKillSwitch(bool v) async {
-    setState(() {
-      _killSwitch = v;
-      if (!v) _strictKillSwitch = false;
-    });
+    setState(() => _killSwitch = v);
     await _prefs.setBool(PrefKeys.killSwitch, v);
     if (!v) await _prefs.setBool(PrefKeys.strictKillSwitch, false);
   }
@@ -262,10 +228,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
     if (confirmed != true) return;
-    // [НОВОЕ] Раньше пункт вообще ничего не делал (просто chevron без
-    // onTap). Чистим только клиентский кэш-стейт (избранные сервера,
-    // выбор split-tunnel) — токен входа НЕ трогаем, это не "выход",
-    // а именно очистка локального кэша.
+    // Чистим только клиентский кэш-стейт (избранные сервера, выбор
+    // split-tunnel). Токен входа не трогаем — это очистка кэша, а не выход.
     await Future.wait([
       _prefs.setStringSet(PrefKeys.favoriteServers, {}),
       _prefs.setBool(PrefKeys.autoBalance, false),
@@ -301,11 +265,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // [НОВОЕ] Модуль переводчика — кнопка "Язык". Раньше строка была просто
-  // текстом ('Русский') без onTap — теперь открывает список языков из
-  // AppLanguage (см. lib/l10n/app_language.dart) и переключает через
-  // LocaleService.setLanguage. Список экрана перерисовывается сам —
-  // build() ниже обёрнут в AnimatedBuilder, слушающий LocaleService.
+  // Открывает список языков из AppLanguage и переключает через
+  // LocaleService.setLanguage. Экран перерисуется сам — build() обёрнут в
+  // AnimatedBuilder, слушающий LocaleService.
   Future<void> _pickLanguage() async {
     final chosen = await showDialog<AppLanguage>(
       context: context,
@@ -337,12 +299,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ] Модуль переводчика — этот экран слушает LocaleService
-    // напрямую (а не только через глобальный AnimatedBuilder в main.dart),
-    // потому что именно тут находится кнопка "Язык": пользователь должен
-    // увидеть результат выбора мгновенно, на этом же экране, не выходя из
-    // него — иначе после выбора языка строка "Язык" продолжала бы
-    // показывать старое название до следующего открытия экрана.
+    // Экран слушает LocaleService напрямую, а не только через глобальный
+    // AnimatedBuilder в main.dart: здесь находится кнопка "Язык", и результат
+    // выбора должен быть виден сразу, не выходя с экрана.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(
@@ -385,6 +344,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   trailing: NeonToggle(value: _dpiBypass, onChanged: _setDpiBypass),
                 ),
                 _SettingsRow(
+                  label: tr('Быстрый пинг'),
+                  hint: tr('Ядро меряет задержку вторым запросом по уже поднятому '
+                      'соединению — число выходит примерно вдвое меньше. Работает не на '
+                      'всех сетях; если пинг пропадёт, приложение вернёт обычный замер '
+                      'само. Применится при следующем подключении'),
+                  trailing: NeonToggle(value: _fastPing, onChanged: _setFastPing),
+                ),
+                _SettingsRow(
                   label: tr('Режим прокси (без VPN-разрешения)'),
                   hint: tr('Локальный SOCKS5/HTTP-порт на телефоне вместо системного VPN — Kill '
                       'Switch и split-tunnel в этом режиме не работают'),
@@ -405,12 +372,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 _SettingsRow(
                   label: tr('Язык'),
-                  // [ИСПРАВЛЕНО] Раньше строка выглядела как настройка (с
-                  // активным видом), но выбора языка в приложении не
-                  // существовало — локализации в коде не было вообще, весь
-                  // интерфейс жёстко на русском. Теперь кнопка реально
-                  // работает — см. _pickLanguage выше и модуль переводчика
-                  // в lib/l10n/ + lib/services/locale_service.dart.
                   hint: tr('Меняет язык интерфейса приложения'),
                   onTap: _pickLanguage,
                   trailing: Row(
@@ -438,8 +399,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onChanged: _setDnsProvider,
                   ),
                 ),
-                // [НОВОЕ] Поле для своего DNS-адреса, показывается только
-                // когда выбран 'custom' в списке выше.
+                // Поле для своего DNS-адреса — только когда выбран 'custom'.
                 if (_dnsProvider == 'custom')
                   Padding(
                     padding: const EdgeInsets.only(bottom: 10),
@@ -461,7 +421,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                   ),
-                // [НОВОЕ] IPv6 — см. _setIpv6Enabled выше.
                 _SettingsRow(
                   label: tr('Разрешить IPv6 в туннеле'),
                   hint: tr('Пропускает IPv6-трафик через VPN в дополнение к IPv4. Применится при '
@@ -499,11 +458,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 }
 
 class _SettingsRow extends StatelessWidget {
-  // [НОВОЕ] Необязательная подсказка под названием пункта — раньше у
-  // строк на этом экране (в отличие от security_screen.dart) не было
-  // никакого объяснения, что конкретно делает переключатель, только три
-  // общих предупреждения внизу экрана. Теперь у каждого пункта — короткое
-  // честное описание того, что он реально делает.
+  // Короткая подсказка под названием пункта: что именно делает
+  // переключатель и когда применяется.
   const _SettingsRow({required this.label, required this.trailing, this.onTap, this.hint});
   final String label;
   final Widget trailing;

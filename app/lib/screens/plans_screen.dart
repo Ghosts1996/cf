@@ -7,20 +7,13 @@ import 'topup_screen.dart';
 
 /// Экран оформления подписки.
 ///
-/// [ИСПРАВЛЕНО — архитектурная ошибка, не только вид]
-/// Предыдущая версия давала выбрать "способ оплаты" (ЮKassa/CryptoBot)
-/// прямо на этом экране и передавала его в несуществующий /orders.
-/// В реальном API (`api.py`) покупка/продление ключа (`/key/create`,
-/// `/key/extend`) вообще не принимает способ оплаты — они просто проверяют
-/// и атомарно списывают БАЛАНС аккаунта. Способ оплаты (ЮKassa/CryptoBot)
-/// нужен только на отдельном шаге — пополнении баланса (`/billing/topup`).
-/// Поэтому: если баланса хватает — кнопка сразу выдаёт ключ; если не
-/// хватает — показываем понятную ошибку и предлагаем пополнить баланс, а
-/// не тихо ведём на несуществующий платёж.
+/// Способ оплаты здесь не выбирается: `/key/create` и `/key/extend` только
+/// списывают баланс аккаунта. ЮKassa/CryptoBot нужны на отдельном шаге —
+/// пополнении баланса (`/billing/topup`). Не хватает денег — показываем
+/// ошибку и предлагаем пополнить.
 ///
-/// Раньше также не было разницы между "купить новый ключ" и "продлить
-/// существующий" — теперь это разные вызовы API (`createKey` /
-/// `extendKey`), выбираемые параметром [extendKeyId].
+/// Покупка нового ключа и продление существующего — разные вызовы API,
+/// выбираются параметром [extendKeyId].
 class PlansScreen extends StatefulWidget {
   const PlansScreen({super.key, this.extendKeyId});
 
@@ -59,9 +52,6 @@ class _PlansScreenState extends State<PlansScreen> {
       // (см. api.py: api_plans() и то, как /key/create всегда использует
       // host_name="GLOBAL").
       final plansByHost = await _api.getPlans();
-      // [ИСПРАВЛЕНО] Проверка `mounted` после `await` — без неё уход с
-      // экрана до ответа `/plans` приводил к падению `setState()` на уже
-      // отключённом виджете.
       if (!mounted) return;
       final globalPlans = (plansByHost['GLOBAL'] as List<dynamic>?) ?? [];
       globalPlans.sort((a, b) =>
@@ -72,9 +62,6 @@ class _PlansScreenState extends State<PlansScreen> {
         _loading = false;
       });
     } on ApiException catch (e) {
-      // [ИСПРАВЛЕНО] Не было проверки `mounted` после `await` — уход с
-      // экрана (Navigator.pop) до ответа `/plans` приводил к падению
-      // "setState() called after dispose()", особенно на медленной сети.
       if (!mounted) return;
       setState(() { _error = e.message; _loading = false; });
     } catch (e) {
@@ -83,21 +70,11 @@ class _PlansScreenState extends State<PlansScreen> {
     }
   }
 
-  // [ИСПРАВЛЕНО] Поле `months` в реальном тарифе (`plans.months` в БД,
-  // `/plans` в api.py) называется "months", но фактически используется
-  // бэкендом как ДНИ — проверено по самому коду начисления:
-  // `api.py` -> `api_create_key()`:
-  //   expiry_ms = int((datetime.now().timestamp() + (months * 86400)) * 1000)
-  // 86400 — число секунд В ОДНИХ СУТКАХ, не в месяце (было бы ~2 592 000
-  // для 30-дневного месяца). То же самое в `api_extend_key()`:
-  //   new_expiry = current_expiry + timedelta(days=months)
-  // — `months` передаётся именно в параметр `days=`. Название поля в БД
-  // вводит в заблуждение (это исторический артефакт схемы), но по факту
-  // тариф "7" — это 7 ДНЕЙ, а не 7 месяцев. Здесь это никак не лечится —
-  // сама схема/имя колонки `plans.months` не менялись (это уже правка
-  // бэкенда, не приложения, и она никак не влияла бы на уже проданные
-  // тарифы с их текущими значениями), поменяно только подписанное на
-  // экране слово, чтобы оно совпадало с реальным смыслом числа.
+  // Поле `months` в тарифе на деле хранит ДНИ — так его считает бэкенд:
+  //   api_create_key(): expiry_ms = ... + months * 86400
+  //   api_extend_key(): new_expiry = current_expiry + timedelta(days=months)
+  // 86400 — секунд в сутках, не в месяце. Имя колонки в БД историческое,
+  // здесь подписываем число правильным словом.
   String _pluralDays(int n) {
     final mod100 = n % 100;
     final mod10 = n % 10;
@@ -145,9 +122,6 @@ class _PlansScreenState extends State<PlansScreen> {
             action: insufficientBalance
                 ? SnackBarAction(
                     label: tr('Пополнить'),
-                    // [ИСПРАВЛЕНО] pushNamed('/topup') вёл на несуществующий
-                    // именованный маршрут — крэш при нажатии. Ведём на
-                    // реальный TopUpScreen (см. topup_screen.dart).
                     onPressed: () => Navigator.of(context).push(
                       MaterialPageRoute(builder: (_) => const TopUpScreen()),
                     ),
@@ -169,14 +143,10 @@ class _PlansScreenState extends State<PlansScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ] Модуль переводчика.
-    // [ИСПРАВЛЕНО — Material-иерархия] Тот же баг, что и в KeysScreen:
-    // экран открывается отдельным MaterialPageRoute (из меню, баланса,
-    // "Купить новый ключ" на "Мои ключи" и т.д.) без своего Scaffold —
-    // текст оставался без Material-предка (аварийное жёлтое двойное
-    // подчёркивание). Добавлен собственный Scaffold; используется и как
-    // часть RootShell (там уже есть внешний Scaffold) — вложенный Scaffold
-    // безопасен, AppBar тут не задействован.
+    // Свой Scaffold: экран открывается и отдельным MaterialPageRoute (из меню,
+    // баланса, "Купить новый ключ"), где Material-предка иначе нет и текст
+    // рисуется с аварийным жёлтым подчёркиванием. Внутри RootShell вложенный
+    // Scaffold безопасен — AppBar тут не используется.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(
@@ -193,10 +163,6 @@ class _PlansScreenState extends State<PlansScreen> {
             'Оплата — с баланса аккаунта.'),
             style: const TextStyle(color: AppColors.textDim, fontSize: 11),
           ),
-          // [ИСПРАВЛЕНО] Раньше здесь не было отступа вообще — карточки
-          // тарифов рисовались вплотную к описанию сверху и на некоторых
-          // экранах/масштабах шрифта визуально наезжали на последнюю
-          // строку текста.
           const SizedBox(height: 18),
           if (_loading) const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator())),
           if (_error != null)

@@ -89,12 +89,12 @@ limit_req_zone $binary_remote_addr zone=vpnonline_api:10m rate=20r/s;
 ```bash
 curl https://api.vpnonline.su/health
 curl https://api.vpnonline.su/v1/servers        # должны прийти все 6 хостов
-curl https://api.vpnonline.su/v1/plans          # 4 тарифа из твоей таблицы plans
+curl https://api.vpnonline.su/v1/plans          # 4 тарифа из таблицы plans
 ```
 
 Затем — **вручную, на одном хосте**, проверь `create_client`/`extend_client`
 в `xui_client.py` (это единственное место, помеченное как непроверенное
-предположение по формату API 3x-ui — см. CHANGELOG_v3.md). Только после
+предположение по формату API 3x-ui — см. CHANGELOG.md). Только после
 этого подключай вебхуки YooKassa/CryptoBot к продовым ключам.
 
 ## 8. Webhook URL у провайдеров

@@ -1,0 +1,200 @@
+name: Build sing-box core with XHTTP
+
+# Собирает libbox.aar из форка hiddify/hiddify-sing-box — того самого ядра, на
+# котором работает Hiddify и которое, в отличие от апстримного sing-box,
+# понимает транспорт XHTTP (он же splithttp).
+#
+# Результат не просто выкладывается артефактом: workflow кладёт собранное ядро
+# в отдельную ветку плагина (по умолчанию `ccurecc_singbox_xhttp`), собранную
+# из рабочей `ccurecc_singbox_dns` заменой одного файла. На эту ветку и
+# ссылается pubspec.yaml в ветке приложения с XHTTP. Рабочая ветка плагина при
+# этом не трогается — старое ядро остаётся на месте, откатиться можно одной
+# строкой в pubspec.
+#
+# Запускается только вручную: штатную сборку приложения не затрагивает.
+
+on:
+  # workflow_dispatch недоступен, пока файл не попал в ветку по умолчанию, —
+  # так устроен GitHub. Поэтому основной способ запуска здесь второй: любой
+  # push, который меняет сам этот файл в ветке с XHTTP. Чтобы пересобрать
+  # ядро, достаточно тронуть комментарий ниже и запушить.
+  #
+  # Пересборка № 7
+  push:
+    branches: [ claude/xhttp-support ]
+    paths: [ '.github/workflows/build-xhttp-core.yml' ]
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: 'Коммит, ветка или тег hiddify/hiddify-sing-box'
+        required: true
+        # Ветка по умолчанию у форка называется `extended`, не `main`.
+        # Прибит конкретный коммит: в нём XHTTP проверен глазами.
+        default: '8d94f445c72dfb704f2ed4d2984dcefc79362e66'
+      abis:
+        description: 'Архитектуры для gomobile bind'
+        required: true
+        default: 'android/arm64,android/arm,android/amd64,android/386'
+      plugin_branch:
+        description: 'Ветка плагина, куда положить собранное ядро'
+        required: true
+        default: 'ccurecc_singbox_xhttp'
+      base_branch:
+        description: 'Ветка плагина, от которой берутся исходники'
+        required: true
+        default: 'ccurecc_singbox_dns_vpndns'
+      publish:
+        description: 'Записать ядро в ветку плагина (нет — только артефакт)'
+        required: true
+        default: 'true'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: gomobile bind ./experimental/libbox
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Часть зависимостей ядра подключена подмодулями (psiphon-tls,
+      # wireguard-go, tailscale), и go.mod ссылается на них через replace на
+      # локальные пути. Без подмодулей сборка падает на чтении их go.mod.
+      # В .gitmodules адреса записаны через SSH — в CI ключа нет, поэтому
+      # переписываем их на https.
+      - name: Clone core
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git clone https://github.com/hiddify/hiddify-sing-box.git core
+          cd core
+          git checkout "${{ inputs.core_ref || '8d94f445c72dfb704f2ed4d2984dcefc79362e66' }}"
+          git submodule update --init --recursive --depth 1
+          echo "CORE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          grep -q 'V2RayTransportTypeXHTTP' constant/v2ray.go \
+            || { echo "::error::в этой ревизии ядра нет XHTTP"; exit 1; }
+          for m in psiphon-tls wireguard-go tailscale psiphon-quic-go; do
+            test -f "replace/$m/go.mod" || { echo "::error::подмодуль replace/$m не выкачался"; exit 1; }
+          done
+
+      # Версию Go берём из go.mod самого ядра: там она опережает стабильную в
+      # образе раннера, а сборка с более старой падает на этапе разбора модуля.
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache: false
+
+      # Ядро и плагин собираются под Java 17 (minSdk 23, jvmTarget 17).
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Locate Android NDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          ls "$ANDROID_NDK_LATEST_HOME/source.properties"
+
+      - name: Install gomobile
+        run: |
+          go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
+          go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.12
+
+      # Флаги и теги — те же, что в cmd/internal/build_libbox самого ядра
+      # (вариант libbox.aar, androidapi 23), с двумя отличиями.
+      #
+      # Первое: список архитектур задаётся входным параметром. По умолчанию
+      # собираются все четыре, как и в штатном ядре проекта, — чтобы ядро с
+      # XHTTP было равноценной заменой, а не урезанной. Если из-за новых
+      # протоколов .aar перестанет влезать в лимит GitHub на размер файла,
+      # лишние архитектуры (android/386 и следом android/amd64 — это только
+      # эмуляторы) убираются этим же параметром.
+      #
+      # Второе: выброшены теги протоколов, которых в приложении нет.
+      # with_tailscale со свитой ts_omit_* — на ветке extended подмодуль
+      # replace/tailscale отстал от кода ядра, и сборка с ним падает на
+      # `undefined: netns.SetControlFunc`. with_naive_outbound тянет cronet:
+      # это статическая библиотека на сотню с лишним мегабайт под каждую
+      # архитектуру, из-за неё сборка идёт часами, а .aar заведомо не влезает
+      # в лимит GitHub. Ни tailscale, ни naive приложению не нужны — у нас
+      # VLESS с его транспортами.
+      - name: Build libbox.aar
+        working-directory: core
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          TAGS='with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,badlinkname,tfogo_checklinkname0'
+          gomobile bind -v \
+            -o libbox.aar \
+            -target "${{ inputs.abis || 'android/arm64,android/arm,android/amd64,android/386' }}" \
+            -androidapi 23 \
+            -javapkg=io.nekohasekai \
+            -libname=box \
+            -trimpath -buildvcs=false \
+            -ldflags "-X github.com/sagernet/sing-box/constant.Version=xhttp-${CORE_SHA} -X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0" \
+            -tags "$TAGS" \
+            ./experimental/libbox
+          ls -la libbox.aar
+
+      # Проверяем ровно то, ради чего всё затевалось, и ровно там, где это
+      # видно без запуска: имя транспорта внутри нативной библиотеки.
+      - name: Verify XHTTP in the built core
+        working-directory: core
+        run: |
+          mkdir -p /tmp/aar && unzip -o -q libbox.aar -d /tmp/aar
+          SO=$(find /tmp/aar/jni -name libbox.so | head -1)
+          echo "проверяем $SO"
+          strings -a "$SO" | grep -q 'stream-one' \
+            || { echo "::error::в собранном ядре нет режимов XHTTP"; exit 1; }
+          echo "XHTTP на месте"
+
+      # GitHub отклоняет push с файлом больше 100 МБ. Останавливаемся раньше и
+      # с внятным текстом, а не на середине git push.
+      - name: Check size
+        working-directory: core
+        run: |
+          SIZE=$(stat -c%s libbox.aar)
+          echo "libbox.aar: $((SIZE / 1024 / 1024)) МБ"
+          if [ "$SIZE" -gt 94371840 ]; then
+            echo "::error::ядро больше 90 МБ — убери архитектуру из параметра abis"
+            exit 1
+          fi
+
+      - name: Publish to plugin branch
+        if: ${{ (inputs.publish || 'true') == 'true' }}
+        env:
+          PLUGIN_BRANCH: ${{ inputs.plugin_branch || 'ccurecc_singbox_xhttp' }}
+          # База — ветка плагина с исправленной публикацией DNS на
+          # VPN-интерфейсе. Ядро с XHTTP должно нести её тоже, иначе
+          # переключение на него вернуло бы «подключено, но ничего не
+          # работает».
+          BASE_BRANCH: ${{ inputs.base_branch || 'ccurecc_singbox_dns_vpndns' }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git fetch origin "$BASE_BRANCH"
+          git checkout -B "$PLUGIN_BRANCH" "origin/$BASE_BRANCH"
+          cp core/libbox.aar app/third_party/flutter_singbox_client/android/libs/libbox.aar
+          git add app/third_party/flutter_singbox_client/android/libs/libbox.aar
+          git commit -m "Ядро sing-box с поддержкой XHTTP
+
+          Собрано из hiddify/hiddify-sing-box @ ${CORE_SHA}
+          архитектуры: ${{ inputs.abis || 'android/arm64,android/arm,android/amd64,android/386' }}
+
+          Ветка отличается от ${BASE_BRANCH} ровно одним файлом —
+          android/libs/libbox.aar. Исходники плагина те же."
+          git push --force origin "$PLUGIN_BRANCH"
+          echo "ядро записано в ветку $PLUGIN_BRANCH"
+
+      - name: Upload core
+        uses: actions/upload-artifact@v4
+        with:
+          name: libbox-xhttp-${{ inputs.core_ref || '8d94f44' }}
+          path: core/libbox.aar
+          if-no-files-found: error
+          retention-days: 30

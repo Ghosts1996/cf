@@ -8,28 +8,12 @@ import '../services/api_client.dart';
 import '../services/locale_service.dart';
 import 'support_screen.dart' show websiteUrl, telegramBotUrl;
 
-/// Пополнение баланса — [НОВОЕ].
+/// Пополнение баланса через POST /billing/topup.
 ///
-/// [ИСПРАВЛЕНО — реальная дыра в функционале, не косметика] `ApiClient`
-/// уже содержал рабочий метод `billingTopup()` (POST /billing/topup,
-/// реальный эндпоинт из api.py), но ни один экран его не вызывал: пункт
-/// меню "Пополнить баланс" ошибочно вёл на PlansScreen — экран ПОКУПКИ
-/// КЛЮЧА за баланс, а не пополнения самого баланса. Получалось, что
-/// пополнить баланс в приложении было физически невозможно — только через
-/// сайт/бота. Плюс `plans_screen.dart` вызывал несуществующий
-/// `Navigator.pushNamed('/topup')` при ошибке "недостаточно средств" — тоже
-/// приводило в никуда (крэш при нажатии). Оба места теперь ведут сюда.
-///
-/// [ИСПРАВЛЕНО — App Store Guideline 3.1.1] На iOS этот экран НЕ должен
-/// открывать `billingTopup()` (ЮKassa/CryptoBot) — это сторонняя оплата
-/// цифровых услуг внутри приложения, гарантированная причина отклонения на
-/// review (и на обычном App Store, и на TestFlight Beta Review). Apple
-/// требует либо свой In-App Purchase, либо отсутствие любого UI оплаты в
-/// приложении. Реализовывать StoreKit не просили, поэтому на iOS этот экран
-/// работает в "read-only" режиме: вместо формы суммы/способа оплаты — две
-/// внешние ссылки (сайт и Telegram-бот), где пользователь оформляет и
-/// оплачивает подписку сам, вне приложения. `billingTopup()` на iOS не
-/// вызывается вообще ни при каких условиях.
+/// На iOS форма оплаты не показывается: сторонняя оплата цифровых услуг
+/// внутри приложения нарушает App Store Guideline 3.1.1. Вместо неё — две
+/// внешние ссылки (сайт и Telegram-бот); `billingTopup()` на iOS не
+/// вызывается вообще.
 class TopUpScreen extends StatefulWidget {
   const TopUpScreen({super.key});
   @override
@@ -58,9 +42,24 @@ class _TopUpScreenState extends State<TopUpScreen> {
   bool get _isIosBuild => !kIsWeb && Platform.isIOS;
 
   Future<void> _openExternal(String url) async {
+    // canLaunchUrl на Android 11+ отвечает false и для схем, которые на
+    // деле открываются (видимость пакетов), поэтому его отрицательный ответ
+    // — не повод не пробовать. Молча ничего не делать нельзя: пользователь
+    // жмёт кнопку и не понимает, почему ничего не произошло.
     final uri = Uri.parse(url);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    try {
+      final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!opened && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${tr('Не удалось открыть ссылку:')} $url')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${tr('Не удалось открыть ссылку:')} $url')),
+        );
+      }
     }
   }
 
@@ -77,8 +76,7 @@ class _TopUpScreenState extends State<TopUpScreen> {
     try {
       final payUrl = await _api.billingTopup(amount: amount, method: _method);
       final uri = Uri.parse(payUrl);
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (await launchUrl(uri, mode: LaunchMode.externalApplication)) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(tr('Открыта страница оплаты — после оплаты баланс обновится автоматически'))),
@@ -89,9 +87,11 @@ class _TopUpScreenState extends State<TopUpScreen> {
         setState(() => _error = tr('Не удалось открыть страницу оплаты'));
       }
     } on ApiException catch (e) {
-      setState(() => _error = e.message);
+      // Экран мог закрыться, пока шёл запрос: без проверки следующий setState
+      // упал бы с "setState() called after dispose()".
+      if (mounted) setState(() => _error = e.message);
     } catch (e) {
-      setState(() => _error = '${tr('Не удалось создать платёж:')} $e');
+      if (mounted) setState(() => _error = '${tr('Не удалось создать платёж:')} $e');
     } finally {
       if (mounted) setState(() => _submitting = false);
     }

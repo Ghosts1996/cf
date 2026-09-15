@@ -10,18 +10,11 @@ import 'plans_screen.dart';
 
 /// Экран «Мои ключи».
 ///
-/// [ИСПРАВЛЕНО — по факту чтения реального кода, не по виду]
-/// Предыдущая версия (v4-ci) ожидала поля `id`, `vless_uri`, `devices_used`,
-/// `group_id` и группировала строки как "одна покупка = несколько строк по
-/// локациям". Ничего из этого не совпадает с реальным API:
-/// `GET /user/keys` (см. api.py/database.py в бэкапе) отдаёт список
-/// объектов `vpn_keys` как есть — один купленный ключ = ОДНА строка с
-/// полями `key_id`, `host_name` (после покупки всегда `"GLOBAL"` — единая
-/// подписка на все локации живёт на уровне ссылки-подписки, не отдельных
-/// строк в БД), `key_email`, `expiry_date`, `devices_limit`,
-/// `connection_string` (добавляется самим API-роутом поверх данных БД).
-/// Группировка по `group_id` была лишней сложностью под несуществующие
-/// данные — убрана.
+/// `GET /user/keys` отдаёт строки таблицы vpn_keys как есть: один купленный
+/// ключ = одна строка с полями `key_id`, `host_name` (после покупки всегда
+/// "GLOBAL" — единая подписка на все локации живёт на уровне
+/// ссылки-подписки), `key_email`, `expiry_date`, `devices_limit` и
+/// `connection_string`, который добавляет сам роут поверх данных БД.
 class KeysScreen extends StatefulWidget {
   const KeysScreen({super.key});
   @override
@@ -34,14 +27,11 @@ class _KeysScreenState extends State<KeysScreen> {
   String? _error;
   bool _loading = true;
 
-  // [НОВОЕ] Поле "свой ключ" — по прямому требованию: возможность вставить
-  // ссылку на подписку/vless:// вручную, в обход ключей из личного
-  // кабинета.
-  // Хранится через ManualKeyStore (services/local_prefs.dart) — оттуда её
-  // читает ConnectScreen при подключении, см. connect_screen.dart.
+  // Поле "свой ключ": ссылку на подписку или vless:// можно вставить
+  // вручную, в обход ключей из личного кабинета. Хранится в ManualKeyStore
+  // (services/local_prefs.dart), оттуда её читает ConnectScreen.
   final _manualKeyController = TextEditingController();
   bool _manualKeySaving = false;
-  // [НОВОЕ] Флаг загрузки для кнопки "Проверить ключ" — см. _validateManualKey.
   bool _manualKeyValidating = false;
 
   @override
@@ -85,14 +75,10 @@ class _KeysScreenState extends State<KeysScreen> {
     }
   }
 
-  /// [НОВОЕ] "Проверить ключ" — реально скачивает и расшифровывает
-  /// подписку/ссылку из поля (тем же кодом, что и подключение — см.
-  /// TunnelService.checkSubscription()) и честно показывает, сколько
-  /// рабочих серверов в ней нашлось, БЕЗ подъёма самого туннеля. Нужно
-  /// именно для того, чтобы проверять формат ссылок вроде
-  /// `https://.../sub/<uuid>` до того, как жать "Подключить" на главном
-  /// экране — если тут ключ не распознаётся, туннель тоже не поднимется,
-  /// и это будет видно сразу, с понятным списком причин.
+  /// Скачивает и расшифровывает подписку тем же кодом, что и подключение
+  /// (TunnelService.checkSubscription), и показывает, сколько рабочих
+  /// серверов в ней нашлось, не поднимая туннель. Нужно, чтобы проверить
+  /// формат ссылки вида `https://.../sub/<uuid>` до нажатия "Подключить".
   Future<void> _validateManualKey() async {
     final text = _manualKeyController.text.trim();
     if (text.isEmpty) {
@@ -115,18 +101,39 @@ class _KeysScreenState extends State<KeysScreen> {
             width: double.maxFinite,
             child: ListView(
               shrinkWrap: true,
-              children: result.serverNames
-                  .map((name) => Padding(
+              children: [
+                ...result.serverNames.map((name) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.check_circle_rounded, size: 16, color: AppColors.success),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(name, style: const TextStyle(fontSize: 13))),
+                        ],
+                      ),
+                    )),
+                // Локации, чей транспорт ядро не поддерживает, показываем
+                // отдельно: они есть в подписке, но подключение к ним не
+                // поднимется, и молчать об этом хуже, чем показать причину.
+                if (result.unsupportedServerNames.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    tr('Ядро не поддерживает транспорт этих локаций — подключиться к ним не получится:'),
+                    style: const TextStyle(fontSize: 12, color: AppColors.textDim),
+                  ),
+                  const SizedBox(height: 6),
+                  ...result.unsupportedServerNames.map((name) => Padding(
                         padding: const EdgeInsets.symmetric(vertical: 4),
                         child: Row(
                           children: [
-                            const Icon(Icons.check_circle_rounded, size: 16, color: AppColors.success),
+                            const Icon(Icons.error_outline_rounded, size: 16, color: AppColors.danger),
                             const SizedBox(width: 8),
                             Expanded(child: Text(name, style: const TextStyle(fontSize: 13))),
                           ],
                         ),
-                      ))
-                  .toList(),
+                      )),
+                ],
+              ],
             ),
           ),
           actions: [
@@ -158,10 +165,6 @@ class _KeysScreenState extends State<KeysScreen> {
     });
     try {
       final keys = await _api.getKeys();
-      // [ИСПРАВЛЕНО] Без проверки `mounted` после `await` уход с экрана
-      // (например, назад в меню) до ответа сервера приводил к падению
-      // `setState() called after dispose()` — особенно вероятно именно на
-      // медленной мобильной сети, где запрос идёт дольше обычного.
       if (!mounted) return;
       setState(() {
         _keys = keys;
@@ -176,7 +179,7 @@ class _KeysScreenState extends State<KeysScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '${tr('Не удалось загрузить ключи:')} \$e';
+        _error = '${tr('Не удалось загрузить ключи:')} $e';
         _loading = false;
       });
     }
@@ -220,15 +223,9 @@ class _KeysScreenState extends State<KeysScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ] Модуль переводчика.
-    // [ИСПРАВЛЕНО — Material-иерархия] Экран открывается и как вкладка
-    // нижней навигации (там Scaffold уже есть у RootShell), и отдельным
-    // MaterialPageRoute из меню/баланса (menu_screen.dart::_go,
-    // balance_screen.dart::_go) — во втором случае без собственного
-    // Scaffold текст оставался без Material-предка и Flutter показывал
-    // аварийное жёлтое двойное подчёркивание. Вложенный Scaffold внутри
-    // Scaffold — стандартный и безопасный паттерн Flutter, лишнего AppBar
-    // здесь нет, так что для вкладки ничего не меняется.
+    // Свой Scaffold: экран работает и как вкладка нижней навигации (Scaffold
+    // есть у RootShell), и отдельным MaterialPageRoute из меню/баланса — во
+    // втором случае без него текст остаётся без Material-предка.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(
@@ -399,11 +396,8 @@ class _KeyCard extends StatelessWidget {
   }
 }
 
-/// [НОВОЕ] Карточка "свой ключ" на экране "Мои ключи" — по прямому
-/// требованию: пользователь может вставить готовую ссылку (vless:// или
-/// http(s)-подписку) вручную, вместо/поверх ключей из личного кабинета.
-/// Полезно, например, когда есть ключ, который уже работает в другом
-/// VPN-клиенте, и его нужно использовать именно так, как есть.
+/// Карточка "свой ключ": готовая ссылка (vless:// или http(s)-подписка),
+/// вставленная вручную вместо ключей из личного кабинета.
 class _ManualKeyCard extends StatelessWidget {
   const _ManualKeyCard({
     required this.controller,
@@ -487,11 +481,6 @@ class _ManualKeyCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          // [НОВОЕ] Проверяет ссылку прямо сейчас — реально скачивает и
-          // расшифровывает подписку (тот же код, что и подключение, см.
-          // TunnelService.checkSubscription) и показывает список найденных
-          // серверов, БЕЗ подъёма туннеля. Полезно именно для диагностики
-          // ссылок вида https://.../sub/<uuid> до нажатия "Подключить".
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(

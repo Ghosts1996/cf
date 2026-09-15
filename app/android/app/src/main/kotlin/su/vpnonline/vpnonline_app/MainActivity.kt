@@ -12,35 +12,19 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-/// [ИСПРАВЛЕНО — реальный баг со скриншота "нет VPN-уведомления в шторке,
-/// не показывает приём/отдачу"]
+/// Нативная часть канала MethodChannel("vpnonline/native_stats"), который
+/// дёргает services/tunnel_service.dart:
 ///
-/// У Dart-стороны (services/tunnel_service.dart) уже давно есть код,
-/// который дёргает MethodChannel("vpnonline/native_stats") с методами
-/// `requestNotificationPermission` (вызывается из connect() перед подъёмом
-/// туннеля) и `getUidTraffic` (фолбэк-поллинг RX/TX в _pollNativeTraffic()).
-/// Но здесь, на нативной Kotlin-стороне, этот канал НИКОГДА не был
-/// реализован — раньше MainActivity была пустым
-/// `class MainActivity : FlutterActivity()` без единой строчки обработки
-/// метод-каналов. Любой вызов на этом канале падал с
-/// MissingPluginException, которую Dart-сторона молча проглатывает (см.
-/// комментарий в connect() — "разрешение на уведомления влияет только на
-/// видимость статус-бара, а не на безопасность туннеля", поэтому VPN
-/// формально продолжал работать). Из-за этого:
+/// 1. `requestNotificationPermission` — на Android 13+ (API 33+) одного
+///    объявления POST_NOTIFICATIONS в манифесте мало, нужен ещё системный
+///    диалог. Без выданного разрешения ОС прячет постоянное уведомление
+///    foreground VPN-сервиса из шторки, хотя сам туннель работает.
+/// 2. `getUidTraffic` — фолбэк-счётчики RX/TX для _pollNativeTraffic().
+/// 3. `getPackageName` — имя пакета для исключения самого приложения из
+///    туннеля.
 ///
-/// 1. На Android 13+ (API 33+) runtime-разрешение POST_NOTIFICATIONS
-///    никогда реально не запрашивалось — объявления в AndroidManifest.xml
-///    для "опасных" runtime-разрешений недостаточно, начиная с API 33 нужен
-///    ещё и системный диалог. Без выданного разрешения Android скрывает
-///    ПОСТОЯННОЕ уведомление foreground VPN-сервиса из шторки, хотя сам
-///    сервис/туннель работает нормально — ровно то, что видно на
-///    скриншоте (шторка пустая, "Нет уведомлений").
-/// 2. Нативный fallback для RX/TX (_pollNativeTraffic()) тоже всегда молча
-///    падал и никогда не подставлял реальные счётчики трафика.
-///
-/// Здесь оба метода реализованы по стандартному Android API — без
-/// сторонних зависимостей, androidx.core уже транзитивно тянется самим
-/// Flutter embedding v2.
+/// Всё на стандартном Android API: androidx.core уже транзитивно приходит
+/// с Flutter embedding v2.
 class MainActivity : FlutterActivity() {
     private val channelName = "vpnonline/native_stats"
     private val notificationPermissionRequestCode = 4771
@@ -60,15 +44,11 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "requestNotificationPermission" -> requestNotificationPermission(result)
                     "getUidTraffic" -> result.success(getUidTraffic())
-                    // [НОВОЕ] Имя пакета этой сборки. Нужно Dart-стороне,
-                    // чтобы исключить САМО приложение из туннеля (см.
-                    // tunnel_service.dart::_resolveSelfPackageName). Берём
-                    // именно у системы, а не константой в коде: если ты
-                    // когда-нибудь добавишь applicationIdSuffix для debug/
-                    // flavor-сборок, константа станет неверной и Android
-                    // отвергнет addDisallowedApplication с
-                    // NameNotFoundException — то есть VPN перестанет
-                    // подниматься. У системы имя правильное всегда.
+                    // Имя пакета берём у системы, а не константой: с
+                    // applicationIdSuffix для debug- или flavor-сборок
+                    // константа станет неверной, и Android отвергнет
+                    // addDisallowedApplication с NameNotFoundException —
+                    // VPN перестанет подниматься.
                     "getPackageName" -> result.success(packageName)
                     else -> result.notImplemented()
                 }
