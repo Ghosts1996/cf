@@ -1118,10 +1118,13 @@ class TunnelService {
     _latencyProbeTimer?.cancel();
     _latencyProbeTimer = null;
     if (!shouldRun) {
+      // Историю окна сбрасываем: следующая сессия — другие соединения, и
+      // мешать замеры разных сессий в одном минимуме нельзя.
       _latencySamples.clear();
-      if (latencyByRemark.value.isNotEmpty) {
-        latencyByRemark.value = const <String, int>{};
-      }
+      // А сами числа оставляем. Они получены настоящим замером и остаются
+      // осмысленными: за минуту сеть не меняется. Раньше их стирали, и после
+      // каждого переподключения экран «Серверы» показывал «измеряю через
+      // VLESS…» на каждой карточке, пока не отработает первый прогон.
       return;
     }
     if (_sessionOutboundOrder.isEmpty) return; // старый конфиг без группы
@@ -1130,7 +1133,7 @@ class TunnelService {
     // которые всё это время ждали сети. Свой замер в эту же секунду добавлял
     // к десяткам рукопожатий ещё столько же — подключение заметно тормозило.
     // Даём туннелю встать и отдать первые байты.
-    _latencyProbeTimer = Timer(const Duration(seconds: 20), () {
+    _latencyProbeTimer = Timer(const Duration(seconds: 8), () {
       unawaited(_runLatencyProbe());
       _latencyProbeTimer =
           Timer.periodic(_latencyProbeInterval, (_) => unawaited(_runLatencyProbe()));
@@ -1151,15 +1154,22 @@ class TunnelService {
     return latencyByRemark.value;
   }
 
+  // Сколько циклов подряд замер пропущен из-за трафика. Если пользователь
+  // смотрит видео, «следующий раз» не наступает никогда, и число на экране
+  // застывает навсегда. После двух пропусков меряем несмотря на нагрузку.
+  int _latencyProbeSkips = 0;
+
   Future<void> _runLatencyProbe({bool force = false}) async {
     if (_latencyProbeRunning || !isConnected) return;
     final current = status.value;
-    if (!force &&
-        current != null &&
+    final busy = current != null &&
         (current.download > _latencyProbeBusyBps ||
-            current.upload > _latencyProbeBusyBps)) {
-      return; // идёт трафик — измерим в следующий раз, а не очередь
+            current.upload > _latencyProbeBusyBps);
+    if (!force && busy && _latencyProbeSkips < 2) {
+      _latencyProbeSkips++;
+      return; // идёт трафик — измерим в следующий раз, а не в очередь
     }
+    _latencyProbeSkips = 0;
     _latencyProbeRunning = true;
     try {
       // Один прогон за цикл. Раньше их было два подряд — ради устойчивости
@@ -1305,7 +1315,7 @@ class TunnelService {
   /// Пустой результат означает, что замер невозможен: туннель не поднят,
   /// сессия собрана без группы или платформа не Android.
   Future<Map<String, int>> measureLatenciesThroughTunnel({
-    Duration timeout = const Duration(seconds: 12),
+    Duration timeout = const Duration(seconds: 25),
   }) async {
     final order = _sessionOutboundOrder;
     if (order.isEmpty || !isConnected) return const <String, int>{};
@@ -1321,7 +1331,12 @@ class TunnelService {
   /// outbound'ов там передаётся снаружи.
   Future<Map<String, int>> _collectGroupDelays(
     List<_ParsedVless> order, {
-    Duration timeout = const Duration(seconds: 12),
+    // Окно сбора рассчитано на всю подписку целиком. Ядро проверяет
+    // участников группы пачками по десять, на каждую даёт до пяти секунд.
+    // На четырнадцати нодах вторая пачка просто не успевала отчитаться за
+    // прежние двенадцать секунд, и локации из неё объявлялись неработающими,
+    // хотя ядро их даже не дотестировало.
+    Duration timeout = const Duration(seconds: 25),
   }) async {
     if (order.isEmpty) return const <String, int>{};
 
@@ -2623,16 +2638,12 @@ class TunnelService {
         return results;
       }
 
-      // Два прогона и минимум из них — ровно та же арифметика, что у замера
-      // через боевой туннель, иначе одна и та же локация давала бы разные
-      // числа при включённом и выключенном VPN.
-      final first = await _collectGroupDelays(usable);
-      final second = await _collectGroupDelays(usable);
-      final best = <String, int>{...first};
-      second.forEach((remark, delay) {
-        final known = best[remark];
-        if (known == null || delay < known) best[remark] = delay;
-      });
+      // Один прогон, но с полным окном. Раньше их было два подряд ради
+      // минимума, и проверка всей подписки растягивалась на минуту — «долго
+      // прям грузятся». Точность здесь важнее сотой доли: главное, что
+      // показывает эта проверка, — работает локация или нет, а число по
+      // текущей сессии всё равно уточняет живой замер через туннель.
+      final best = await _collectGroupDelays(usable);
 
       for (final profile in usable) {
         if (profile.remark.isEmpty) continue;
