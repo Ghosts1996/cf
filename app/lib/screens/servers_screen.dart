@@ -476,7 +476,8 @@ class _ServersScreenState extends State<ServersScreen> {
       // подписки: 3x-ui дописывает в remark название сервиса. Раскладывая по
       // remark'у, экран потом не находил ни адрес, ни транспорт своей же
       // локации и молча откатывался на запасной замер по домену подписки.
-      final key = _hostNameFor(remark) ?? remark;
+      final ownHostName = _hostNameFor(remark);
+      final key = ownHostName ?? remark;
       if (location.supported && location.host != null && location.port != null) {
         endpoints[key] = (
           host: location.host!,
@@ -489,8 +490,11 @@ class _ServersScreenState extends State<ServersScreen> {
         unsupported[key] = location.protocol;
       }
       // Локацию, которая уже есть в списке собственных панелей, второй
-      // карточкой не показываем.
-      if (key == remark) {
+      // карточкой не показываем. Сверяем именно по факту «нашлась в /hosts»:
+      // у собственных локаций host_name и remark часто совпадают слово в
+      // слово, и проверка `key == remark` пропускала их в список ещё раз —
+      // на экране Германия, Англия и Нидерланды дублировались.
+      if (ownHostName == null) {
         extra.add(<String, dynamic>{'host_name': remark, 'from_subscription': true});
       }
     }

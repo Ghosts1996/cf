@@ -1579,10 +1579,17 @@ class TunnelService {
       case 'ws':
       case 'httpupgrade':
       case 'grpc':
-      case 'http':
+        // Здесь ALPN обязателен и не зависит от ссылки: ровно те же значения
+        // подставляет Hiddify (ray2sing/common.go — транспорт сам прописывает
+        // alpn, а getTLSOptions разворачивает ws/httpupgrade/grpc в эту пару).
         return const ['h2', 'http/1.1'];
       case 'quic':
         return const ['h3'];
+      case 'http':
+        // А вот для http-транспорта Hiddify ALPN не навязывает. Мы навязывали,
+        // и на сервере, который согласовывал h2, обычная HTTP-маскировка
+        // ломалась. Берём только то, что явно указано в ссылке.
+        break;
     }
     if (alpn == null || alpn.trim().isEmpty) return null;
     final parts = alpn
@@ -1730,6 +1737,57 @@ class TunnelService {
         await LocalPrefs.instance.getBool(PrefKeys.fastPing, fallback: false);
     if (!enabled) return false;
     return _coreSupportsUnifiedDelay();
+  }
+
+  /// Умеет ли ядро DNS-сервер типа `multi` — тот, что опрашивает несколько
+  /// резолверов и отдаёт первый удачный ответ.
+  ///
+  /// Ради него всё и затевается: адрес самого VLESS-сервера, заданный
+  /// доменом, приложение резолвило единственным способом — UDP-запросом к
+  /// 1.1.1.1. На мобильных сетях, где UDP на 53-й порт к чужому резолверу
+  /// закрыт, домен не разворачивался вовсе: туннель поднимался, а трафик не
+  /// шёл — «подключено, 0 МБ». Проверено на настоящем ядре: с единственным
+  /// недоступным резолвером соединение падает с `lookup ...: connection
+  /// refused`, а с `multi` из того же резолвера и системного — проходит.
+  ///
+  /// Hiddify резолвит адрес сервера ровно так же: его
+  /// `route.default_domain_resolver` указывает на составной резолвер
+  /// (hiddify-core/v2/config/builder.go, DNSMultiDirectTag).
+  ///
+  /// Тип `multi` есть только в форке hiddify-sing-box, поэтому спрашиваем
+  /// ядро пробным конфигом.
+  bool? _multiDnsSupport;
+
+  Future<bool> _coreSupportsMultiDns() async {
+    final cached = _multiDnsSupport;
+    if (cached != null) return cached;
+    try {
+      await _ensureInitialized();
+      final supported = await _checkConfigQuietly(jsonEncode({
+        'log': {'level': 'error'},
+        'dns': {
+          'servers': [
+            {'tag': 'probe-direct', 'type': 'udp', 'server': '1.1.1.1'},
+            {'tag': 'probe-local', 'type': 'local'},
+            {
+              'tag': 'probe-multi',
+              'type': 'multi',
+              'servers': ['probe-direct', 'probe-local'],
+              'parallel': true,
+            },
+          ],
+          'final': 'probe-multi',
+        },
+        'outbounds': [
+          {'type': 'direct', 'tag': 'direct'}
+        ],
+      }));
+      _multiDnsSupport = supported;
+      return supported;
+    } catch (_) {
+      _multiDnsSupport = false;
+      return false;
+    }
   }
 
   Future<bool> _coreSupportsUnifiedDelay() async {
@@ -1967,6 +2025,9 @@ class TunnelService {
     final unifiedDelaySupported =
         fastPing ? await _coreSupportsUnifiedDelay() : false;
     _sessionFastPing = unifiedDelaySupported;
+    // Составной резолвер для адреса сервера спрашиваем всегда: он ничего не
+    // меняет там, где 1.1.1.1 и так доступен, и спасает там, где нет.
+    final multiDnsSupported = await _coreSupportsMultiDns();
     // См. PrefKeys.excludeAppFromTunnel. При fallback false список исключений
     // ниже остаётся пустым и конфиг собирается ровно такой же, как без этой
     // настройки.
@@ -2074,6 +2135,7 @@ class TunnelService {
           ipv6Enabled: ipv6Enabled,
           tlsFragmentSupported: tlsFragmentSupported,
           unifiedDelaySupported: unifiedDelaySupported,
+          multiDnsSupported: multiDnsSupported,
           alternates: alternates,
         );
         // Если сборка ядра не переваривает группу-селектор, конфиг отвергается
@@ -2105,6 +2167,7 @@ class TunnelService {
             ipv6Enabled: ipv6Enabled,
             tlsFragmentSupported: tlsFragmentSupported,
             unifiedDelaySupported: unifiedDelaySupported,
+            multiDnsSupported: multiDnsSupported,
           );
           await _client.checkConfig(config);
         }
@@ -2316,6 +2379,7 @@ class TunnelService {
       // иначе один и тот же сервер показывал бы 60 мс при включённом VPN и
       // 300 мс при выключенном.
       unifiedDelaySupported: await _fastPingEnabled(),
+      multiDnsSupported: await _coreSupportsMultiDns(),
     );
 
     _probeInProgress = true;
@@ -2480,6 +2544,7 @@ class TunnelService {
       proxyOnly: true,
       muxEnabled: false,
       unifiedDelaySupported: await _fastPingEnabled(),
+      multiDnsSupported: await _coreSupportsMultiDns(),
       alternates: usable.skip(1).toList(),
     );
 
@@ -2794,6 +2859,9 @@ class TunnelService {
     // Умеет ли ядро «единую задержку» (см. _coreSupportsUnifiedDelay). От
     // этого зависит, какое число показывается пользователю как пинг.
     bool unifiedDelaySupported = false,
+    // Умеет ли ядро составной DNS-резолвер (см. _coreSupportsMultiDns). От
+    // этого зависит, чем разрешается доменное имя самого VLESS-сервера.
+    bool multiDnsSupported = false,
     // Остальные локации подписки. Пустой список означает один outbound и
     // никакой группы — см. построение `outbounds` ниже.
     List<_ParsedVless> alternates = const <_ParsedVless>[],
@@ -2977,6 +3045,23 @@ class TunnelService {
         'domain_resolver': 'dns-local',
       },
       {'type': 'local', 'tag': 'dns-local'},
+      // Составной резолвер для адреса самого VLESS-сервера, если он задан
+      // доменом. Спрашивает 1.1.1.1 и системный резолвер одновременно и
+      // берёт первый ответ.
+      //
+      // Без него домен сервера разворачивался единственным способом — UDP к
+      // 1.1.1.1. На мобильных сетях, где такой запрос не проходит, домен не
+      // резолвился вовсе: туннель поднимался, счётчики стояли на нуле, и со
+      // стороны это выглядело как «сервер не работает» — при том, что в
+      // Hiddify тот же ключ работал. Hiddify резолвит адрес сервера ровно так
+      // же, составным резолвером (hiddify-core: DNSMultiDirectTag).
+      if (multiDnsSupported)
+        {
+          'type': 'multi',
+          'tag': 'dns-server-address',
+          'servers': ['dns-direct', 'dns-local'],
+          'parallel': true,
+        },
       // Fake IP (PrefKeys.fakeIpDns): домены резолвятся в адреса из служебных
       // диапазонов мгновенно, без запроса наружу, а настоящий домен ядро
       // подставляет обратно по своей таблице. Таблица обязана переживать
@@ -3210,7 +3295,9 @@ class TunnelService {
         // нужно зарезолвить домен, а резолвер ходит через тот же ещё не
         // поднятый туннель. На сервере, заданном IP, это незаметно, а на
         // домене подключение висит до таймаута.
-        'default_domain_resolver': {'server': 'dns-direct'},
+        'default_domain_resolver': {
+          'server': multiDnsSupported ? 'dns-server-address' : 'dns-direct',
+        },
         'rules': routeRules,
       },
       // Файл состояния ядра. Без него таблица Fake IP живёт только в памяти
@@ -3266,6 +3353,7 @@ class TunnelService {
     bool ipv6Enabled = false,
     bool tlsFragmentSupported = false,
     bool unifiedDelaySupported = false,
+    bool multiDnsSupported = false,
     bool dnsProtection = true,
     String dnsProvider = 'cloudflare',
     String? customDns,
@@ -3302,6 +3390,7 @@ class TunnelService {
       ipv6Enabled: ipv6Enabled,
       tlsFragmentSupported: tlsFragmentSupported,
       unifiedDelaySupported: unifiedDelaySupported,
+      multiDnsSupported: multiDnsSupported,
       alternates: alternates,
     );
   }

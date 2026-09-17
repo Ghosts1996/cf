@@ -206,6 +206,35 @@ void main() {
       expect(selector['default'], 'out-0');
     });
 
+    test('адрес сервера резолвится с запасным системным резолвером', () {
+      // Домен самого VLESS-сервера раньше разворачивался единственным
+      // способом — UDP к 1.1.1.1. Где такой запрос не проходит, туннель
+      // поднимался, а трафик не шёл. Проверено на настоящем ядре: с одним
+      // недоступным резолвером соединение падает на lookup, с составным —
+      // проходит.
+      final config = TunnelService.instance
+          .buildConfigFromUri(reality, multiDnsSupported: true);
+      final decoded = jsonDecode(config) as Map<String, dynamic>;
+      final servers =
+          (decoded['dns']['servers'] as List).cast<Map<String, dynamic>>();
+      final multi = servers.firstWhere((s) => s['type'] == 'multi');
+      expect(multi['servers'], ['dns-direct', 'dns-local']);
+      expect(multi['parallel'], true);
+      expect(decoded['route']['default_domain_resolver']['server'],
+          multi['tag']);
+    });
+
+    test('на штатном ядре составного резолвера нет — оно его не знает', () {
+      final config = TunnelService.instance
+          .buildConfigFromUri(reality, multiDnsSupported: false);
+      final decoded = jsonDecode(config) as Map<String, dynamic>;
+      final servers =
+          (decoded['dns']['servers'] as List).cast<Map<String, dynamic>>();
+      expect(servers.any((s) => s['type'] == 'multi'), isFalse);
+      expect(decoded['route']['default_domain_resolver']['server'],
+          'dns-direct');
+    });
+
     test('группа latency меряет по тому же адресу, что и Hiddify', () {
       final config = TunnelService.instance.buildConfigFromUri(reality);
       final group = latencyGroupOf(config);
