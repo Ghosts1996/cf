@@ -224,6 +224,31 @@ void main() {
           multi['tag']);
     });
 
+    test('прямой DNS идёт через составной резолвер', () {
+      // Одного UDP-запроса к 1.1.1.1 мало: на сети, где он не проходит, не
+      // резолвится вообще ничего. Проверено на настоящем ядре — запрос через
+      // прокси с единственным недоступным резолвером отдаёт 502 и
+      // «lookup ...: connection refused», с составным — 204.
+      final config = TunnelService.instance.buildConfigFromUri(reality,
+          multiDnsSupported: true, dnsProtection: false);
+      final decoded = jsonDecode(config) as Map<String, dynamic>;
+      expect(decoded['dns']['final'], 'dns-direct-multi');
+    });
+
+    test('с защитой от протечек DNS по-прежнему уходит в туннель', () {
+      final config = TunnelService.instance.buildConfigFromUri(reality,
+          multiDnsSupported: true, dnsProtection: true);
+      final decoded = jsonDecode(config) as Map<String, dynamic>;
+      expect(decoded['dns']['final'], 'dns-remote');
+    });
+
+    test('проверка связи не зависит от DNS', () {
+      // Первый адрес проверки задан по IP. Пока здесь были только домены,
+      // сломанный резолв проваливал проверку у всех серверов подряд, включая
+      // заведомо живые.
+      expect(Uri.parse(TunnelService.probeUrls.first).host, '1.1.1.1');
+    });
+
     test('на штатном ядре составного резолвера нет — оно его не знает', () {
       final config = TunnelService.instance
           .buildConfigFromUri(reality, multiDnsSupported: false);
