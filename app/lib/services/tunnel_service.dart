@@ -137,6 +137,15 @@ class TunnelService {
   // список означает сессию с одним outbound'ом — тогда мгновенное
   // переключение недоступно и switchPreferredHost() идёт через разрыв.
   List<_ParsedVless> _sessionOutboundOrder = const <_ParsedVless>[];
+  // Те же локации, но только именами и только по порядку: индекс равен цифре
+  // в теге outbound'а. Отдельный список нужен потому, что он переживает
+  // перезапуск приложения — сохраняется рядом с маршрутом сессии.
+  //
+  // Без этого выходило так: пользователь закрывал приложение, открывал его на
+  // живом туннеле, и замер задержки больше не запускался никогда — список
+  // локаций сессии жил только в памяти и оказывался пустым. На экране
+  // «Серверы» все карточки навсегда оставались с «измеряю через VLESS…».
+  List<String> _sessionOutboundRemarks = const <String>[];
   // Собрана ли текущая сессия с «быстрым пингом» (experimental.unified_delay)
   // и сколько раз подряд ядро после этого не отдало ни одной задержки. Нужно,
   // чтобы режим сам выключился, если на этой сети он не работает, — иначе
@@ -369,6 +378,13 @@ class TunnelService {
           savedServerName is String && savedServerName.isNotEmpty
               ? savedServerName
               : null;
+      final savedRemarks = decoded['outbound_remarks'];
+      if (savedRemarks is List) {
+        _sessionOutboundRemarks = savedRemarks
+            .whereType<String>()
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false);
+      }
     } catch (_) {
       // Значения остаются нулевыми/null — восстановления просто не будет.
     }
@@ -441,13 +457,15 @@ class TunnelService {
     _persistedConnectionString = _lastConnectionString;
     _persistedPreferredHost = _lastPreferredHostName;
     _persistedServerName = connectedServerName.value;
-    final payload = <String, String>{
+    final payload = <String, dynamic>{
       if (_lastConnectionString != null)
         'connection_string': _lastConnectionString!,
       if (_lastPreferredHostName != null)
         'preferred_host': _lastPreferredHostName!,
       if (connectedServerName.value != null)
         'server_name': connectedServerName.value!,
+      if (_sessionOutboundRemarks.isNotEmpty)
+        'outbound_remarks': _sessionOutboundRemarks,
     };
     unawaited(LocalPrefs.instance
         .setString(PrefKeys.tunnelSessionRouteJson, jsonEncode(payload)));
@@ -1152,7 +1170,7 @@ class TunnelService {
       // VLESS…» на каждой карточке, пока не отработает первый прогон.
       return;
     }
-    if (_sessionOutboundOrder.isEmpty) return; // старый конфиг без группы
+    if (_sessionOutboundRemarks.isEmpty) return; // старый конфиг без группы
     // Первый прогон с задержкой: сразу после подключения ядро само проверяет
     // участников группы, поднимает соединения и отдаёт трафик приложениям,
     // которые всё это время ждали сети. Свой замер в эту же секунду добавлял
@@ -1270,6 +1288,22 @@ class TunnelService {
   // трафик. Два подряд — это уже минуты без связи.
   int _activeOutboundSilentRuns = 0;
 
+  /// Имя локации из списка сессии, соответствующее показанному имени.
+  /// Сопоставление по вхождению — той же логикой, что _matchProfile: панель
+  /// 3x-ui дописывает в remark название сервиса.
+  static String? _matchRemark(List<String> remarks, String name) {
+    final needle = name.trim().toLowerCase();
+    if (needle.isEmpty) return null;
+    for (final remark in remarks) {
+      if (remark.trim().toLowerCase() == needle) return remark;
+    }
+    for (final remark in remarks) {
+      final hay = remark.trim().toLowerCase();
+      if (hay.contains(needle) || needle.contains(hay)) return remark;
+    }
+    return null;
+  }
+
   /// Самовосстановление: если активная локация перестала отвечать, а соседние
   /// по группе отвечают, переключаем селектор на живую.
   ///
@@ -1281,17 +1315,20 @@ class TunnelService {
   /// опускается, уведомление не моргает, уже открытые соединения доживают на
   /// прежнем сервере.
   Future<void> _recoverIfActiveOutboundIsDead(Map<String, int> measured) async {
-    final order = _sessionOutboundOrder;
+    // По именам, а не по разобранным профилям: этот список переживает
+    // перезапуск приложения, и восстановление работает и на сессии, которую
+    // подняли до запуска.
+    final order = _sessionOutboundRemarks;
     if (order.length < 2 || !isConnected) return;
     if (_switchInProgress || _connectInProgress || isBusy) return;
 
     final activeName = connectedServerName.value;
     if (activeName == null || activeName.isEmpty) return;
-    final active = _matchProfile(order, activeName);
+    final active = _matchRemark(order, activeName);
     if (active == null) return;
 
     // Активная локация ответила — всё в порядке.
-    if (measured[active.remark] != null) {
+    if (measured[active] != null) {
       _activeOutboundSilentRuns = 0;
       return;
     }
@@ -1316,7 +1353,7 @@ class TunnelService {
       }
     });
     if (bestRemark == null) return;
-    final index = order.indexWhere((e) => e.remark == bestRemark);
+    final index = order.indexOf(bestRemark!);
     if (index < 0) return;
 
     try {
@@ -1325,7 +1362,7 @@ class TunnelService {
       _lastPreferredHostName = bestRemark;
       _persistSessionRoute();
       unawaited(AppLogService.instance.log(
-          'Локация "${active.remark}" перестала отвечать — сам переключился на '
+          'Локация "$active" перестала отвечать — сам переключился на '
           '"$bestRemark" ($bestDelay мс) без разрыва туннеля',
           level: AppLogLevel.warning));
     } catch (_) {
@@ -1412,9 +1449,9 @@ class TunnelService {
   Future<Map<String, int>> measureLatenciesThroughTunnel({
     Duration timeout = const Duration(seconds: 25),
   }) async {
-    final order = _sessionOutboundOrder;
-    if (order.isEmpty || !isConnected) return const <String, int>{};
-    return _collectGroupDelays(order, timeout: timeout);
+    final remarks = _sessionOutboundRemarks;
+    if (remarks.isEmpty || !isConnected) return const <String, int>{};
+    return _collectGroupDelays(remarks, timeout: timeout);
   }
 
   /// Сам сбор задержек по группе `latency`: просит ядро прогнать URLTest и
@@ -1425,7 +1462,7 @@ class TunnelService {
   /// туннеля нет и `_sessionOutboundOrder` ещё не заполнен — порядок
   /// outbound'ов там передаётся снаружи.
   Future<Map<String, int>> _collectGroupDelays(
-    List<_ParsedVless> order, {
+    List<String> order, {
     // Окно сбора рассчитано на всю подписку целиком. Ядро проверяет
     // участников группы пачками по десять, на каждую даёт до пяти секунд.
     // На четырнадцати нодах вторая пачка просто не успевала отчитаться за
@@ -1468,7 +1505,7 @@ class TunnelService {
             // Он не совпадает с host_name из /hosts ("🇩🇪 Германия — Франкфурт"):
             // панель 3x-ui дописывает в remark название сервиса. Сопоставление имён —
             // забота вызывающего, здесь отдаём как есть.
-            final remark = order[index].remark;
+            final remark = order[index];
             if (remark.isEmpty) continue;
             // Это честный URLTest ядра: время полного запроса к
             // http://cp.cloudflare.com/ через VLESS — ровно то же число, что
@@ -2355,7 +2392,18 @@ class TunnelService {
           // ещё раз, прежде чем переходить к следующему.
           if (e.code != 'CONNECT_FAILED') rethrow;
           await _settleAfterDisconnect();
-          await startSession();
+          try {
+            await startSession();
+          } on PlatformException catch (retry) {
+            if (retry.code != 'CONNECT_FAILED') rethrow;
+            // Второй отказ подряд — дело не в сервере, а в том, что Android не
+            // даёт поднять VpnService вообще. Перебирать из-за этого всю
+            // подписку бессмысленно: каждая локация упрётся в то же самое, а
+            // пользователь увидит «не удалось подключиться ни к одному
+            // серверу» и решит, что виноваты серверы.
+            throw _VpnServiceStartException(
+                _vpnServiceStartFailureHint(retry));
+          }
         }
 
         final reallyConnected = await _waitForConnected(Duration(seconds: 12));
@@ -2449,6 +2497,8 @@ class TunnelService {
             proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
 
         _sessionOutboundOrder = sessionOrder;
+        _sessionOutboundRemarks =
+            sessionOrder.map((e) => e.remark).toList(growable: false);
         // Порядок outbound'ов известен только здесь: тикер, запущенный событием
         // "connected" чуть раньше, не мог знать, есть ли группа.
         _restartLatencyProbe(true);
@@ -2461,6 +2511,11 @@ class TunnelService {
         _userInitiatedDisconnect = false;
         killSwitchBlocking.value = false;
         return connectedName;
+      } on _VpnServiceStartException catch (e) {
+        // Отказ Android поднять VpnService — не про сервер. Перебирать
+        // остальные локации бессмысленно: каждая упрётся в то же самое.
+        await _settleAfterDisconnect();
+        throw TunnelException(e.message);
       } catch (e) {
         lastFailure = e;
         await _settleAfterDisconnect();
@@ -2777,7 +2832,8 @@ class TunnelService {
       // прям грузятся». Точность здесь важнее сотой доли: главное, что
       // показывает эта проверка, — работает локация или нет, а число по
       // текущей сессии всё равно уточняет живой замер через туннель.
-      final best = await _collectGroupDelays(usable);
+      final best = await _collectGroupDelays(
+          usable.map((e) => e.remark).toList(growable: false));
 
       for (final profile in usable) {
         if (profile.remark.isEmpty) continue;
@@ -2804,6 +2860,21 @@ class TunnelService {
       });
       _probeInProgress = false;
     }
+  }
+
+  /// Понятное объяснение отказа Android поднять VpnService.
+  ///
+  /// Нативное сообщение («Service failed to start») пользователю не говорит
+  /// ничего, а причина почти всегда одна из трёх бытовых. Чаще всего это
+  /// другой включённый VPN: Android отдаёт туннель только одному приложению.
+  static String _vpnServiceStartFailureHint(Object error) {
+    return 'Android не дал поднять VPN. Обычно причина одна из трёх:\n'
+        '• включён другой VPN (Hiddify, v2rayNG и т. п.) — Android отдаёт '
+        'туннель только одному приложению, выключите второй;\n'
+        '• приложению не выдано разрешение на VPN — откройте его и разрешите;\n'
+        '• система усыпила приложение — откройте его и нажмите «Подключить» '
+        'ещё раз.\n'
+        'Серверы здесь ни при чём: до них дело не дошло.';
   }
 
   /// Останавливает текущую сессию и ждёт, пока сервис реально перейдёт в
@@ -4023,6 +4094,7 @@ class TunnelService {
       // туннеля для switchPreferredHost() формально уже нет, а status ещё
       // "connected".
       _sessionOutboundOrder = const <_ParsedVless>[];
+      _sessionOutboundRemarks = const <String>[];
       _lastConnectionString = null;
       _lastPreferredHostName = null;
       _connectStartedAt = null;
@@ -4068,6 +4140,8 @@ class TunnelService {
       // переподключения.
       if (!_switchInProgress) {
         _sessionOutboundOrder = const <_ParsedVless>[];
+        _sessionOutboundRemarks = const <String>[];
+      _sessionOutboundRemarks = const <String>[];
         _lastConnectionString = null;
         _lastPreferredHostName = null;
         _connectStartedAt = null;
@@ -4303,6 +4377,16 @@ class SubscriptionLocation {
   final String? security;
   final String? sni;
   final String? transport;
+}
+
+/// Android отказался поднимать VpnService. Отдельный тип нужен, чтобы цикл
+/// перебора локаций отличил это от «сервер не подошёл» и не пытался поднять
+/// туннель ещё тринадцать раз подряд с тем же результатом.
+class _VpnServiceStartException implements Exception {
+  const _VpnServiceStartException(this.message);
+  final String message;
+  @override
+  String toString() => message;
 }
 
 class _ParsedVless {
