@@ -2286,8 +2286,43 @@ class TunnelService {
         // например). Оставлять пользователя без связи из-за собственной
         // проверки нельзя — принимаем последнюю поднявшуюся сессию и честно
         // пишем в журнал, что связь не подтверждена.
-        final internetReachable =
+        var internetReachable =
             await _verifyInternetReachable(proxyOnly: proxyOnly);
+
+        // Связь не подтвердилась, но все локации подписки уже лежат в этой же
+        // сессии отдельными outbound'ами под группой-селектором. Гасить ядро и
+        // поднимать заново ради соседнего сервера не нужно: просим ядро
+        // переключить активный участник группы и проверяем снова. Перезапуск
+        // сессии стоит секунд десять на попытку, переключение — доли секунды;
+        // именно из этих перезапусков и складывалось «очень долго грузится».
+        var activeProfile = profile;
+        if (!internetReachable && sessionOrder.length > 1) {
+          // Не больше трёх соседей: если четыре сервера подряд молчат, дело
+          // не в серверах, и перебирать всю подписку — только терять время.
+          final limit =
+              sessionOrder.length < 4 ? sessionOrder.length : 4;
+          for (var next = 1; next < limit; next++) {
+            if (!isConnected) break;
+            final candidate = sessionOrder[next];
+            try {
+              await _client
+                  .selectOutbound('proxy', 'out-$next')
+                  .timeout(_nativeCallTimeout);
+            } catch (_) {
+              break; // селектор не отвечает — уходим на обычный путь ниже
+            }
+            unawaited(AppLogService.instance.log(
+                'Локация "${activeProfile.remark}" не ответила — переключаюсь '
+                'внутри поднятой сессии на "${candidate.remark}"'));
+            if (await _verifyInternetReachable(proxyOnly: proxyOnly)) {
+              internetReachable = true;
+              activeProfile = candidate;
+              break;
+            }
+            activeProfile = candidate;
+          }
+        }
+
         final isLastCandidate = identical(profile, usable.last);
         if (!internetReachable && !isLastCandidate) {
           await _settleAfterDisconnect();
@@ -2307,8 +2342,11 @@ class TunnelService {
               level: AppLogLevel.error));
         }
 
-        final connectedName = profile.remark.isNotEmpty
-            ? profile.remark
+        // Имя берём у той локации, на которой сессия реально осталась: при
+        // переключении внутри группы это уже не тот профиль, с которого
+        // начинали.
+        final connectedName = activeProfile.remark.isNotEmpty
+            ? activeProfile.remark
             : (preferredHostName ?? 'VPNOnline');
         connectedServerName.value = connectedName;
         localProxyAddress.value =
@@ -3769,7 +3807,11 @@ class TunnelService {
   Future<Uri?> _reachableProbeUrl({required bool proxyOnly}) async {
     // В VPN-режиме окно шире: там к моменту проверки ядро ещё поднимает
     // маршруты и первые соединения идут медленнее.
-    final timeout = Duration(seconds: proxyOnly ? 8 : 12);
+    // Окно на один заход. Раньше было 8/12 секунд — с запасом на то, что все
+    // проверочные адреса были доменами и ждали резолва. Теперь первым идёт
+    // адрес по IP, и живой туннель отвечает за доли секунды; длинное окно
+    // теперь только затягивает перебор при мёртвом сервере.
+    final timeout = Duration(seconds: proxyOnly ? 6 : 8);
     // Адреса проверяются одновременно, а не по очереди: последовательный
     // перебор означал, что один недоступный адрес стоит целого таймаута, и
     // проверка честного сервера растягивалась на десяток секунд. Побеждает

@@ -509,6 +509,20 @@ class _ServersScreenState extends State<ServersScreen> {
       _subscriptionOnlyHosts = extra;
       _unsupportedProtocols = unsupported;
     });
+
+    // Выбранной могла остаться локация, которой в подписке нет (например,
+    // «Каскадное соединение» из /hosts). Подключение по ней уходит в долгий
+    // перебор, поэтому молча переводим выбор на первую рабочую.
+    final selected = _selectedId;
+    if (selected != null &&
+        endpoints.isNotEmpty &&
+        !endpoints.containsKey(selected) &&
+        !unsupported.containsKey(selected)) {
+      final replacement = endpoints.keys.first;
+      setState(() => _selectedId = replacement);
+      SelectedServer.select(replacement, replacement);
+      _prefs.setString(PrefKeys.selectedServerId, replacement);
+    }
   }
 
   /// Имя локации из `GET /hosts`, соответствующее remark'у подписки, или null,
@@ -895,6 +909,25 @@ class _ServersScreenState extends State<ServersScreen> {
           content: Text(
               '${tr('Эта локация работает по протоколу')} $unsupportedProtocol'
               ' — ${tr('приложение его пока не поддерживает. Выбери другую.')}'),
+        ));
+      }
+      return;
+    }
+    // Локации, которой нет в подписке, в конфиге не существует. Выбрать её
+    // означает обречь подключение на долгий перебор: ядро поднимется на
+    // первом попавшемся сервере, проверка не сойдётся с ожиданием, и всё это
+    // видно пользователю как «очень долго грузится». Проверяем только когда
+    // подписка уже разобрана, иначе до её загрузки нельзя было бы выбрать
+    // вообще ничего.
+    final subscriptionKnown =
+        _realEndpoints.isNotEmpty || _unsupportedProtocols.isNotEmpty;
+    if (subscriptionKnown &&
+        !_realEndpoints.containsKey(id) &&
+        !_unsupportedProtocols.containsKey(id)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(tr(
+              'Этой локации нет в твоей подписке — выбери другую из списка.')),
         ));
       }
       return;
