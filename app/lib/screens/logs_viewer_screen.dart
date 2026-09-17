@@ -1,20 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
 import '../services/app_log_service.dart';
 import '../services/locale_service.dart';
 
-/// [НОВОЕ] Просмотр локальных логов приложения — отдельный экран, на который
-/// ведёт кнопка "Просмотреть логи" в разделе "Хранение логов" на экране
-/// "Безопасность" (см. security_screen.dart). Никакой новой логики хранения
-/// не добавляет — читает те же записи через AppLogService.instance.getAll(),
-/// которые уже пишутся туда остальным приложением, и просто показывает их
-/// списком, в стиле остальных экранов (AppHeader/NeonCard/SectionTitle).
+/// Просмотр локальных логов приложения. Открывается кнопкой
+/// "Просмотреть логи" в разделе "Хранение логов" на экране
+/// "Безопасность", читает записи через AppLogService.instance.getAll().
 ///
-/// Загрузка — по требованию (при открытии экрана и по свайпу вниз), без
-/// подписки на поток: список логов меняется нечасто, а
-/// AppLogService.entryCount уже даёт живой счётчик записей на экране
-/// "Безопасность" — здесь достаточно перечитывать при обновлении.
+/// Загрузка по требованию — при открытии и по свайпу вниз: список меняется
+/// нечасто, а живой счётчик записей уже есть на экране "Безопасность".
 class LogsViewerScreen extends StatefulWidget {
   const LogsViewerScreen({super.key});
 
@@ -70,6 +66,21 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
     );
   }
 
+  /// Копирует весь журнал текстом. Нужно, чтобы отправить его в поддержку:
+  /// сообщения ядра ("Ядро: ...") — единственный источник настоящей причины,
+  /// когда туннель поднят, а трафика нет.
+  Future<void> _copyAllLogs() async {
+    final text = _entries
+        .map((e) => '${_formatTimestamp(e.timestamp)}  '
+            '[${e.level.name.toUpperCase()}] ${e.message}')
+        .join('\n');
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(tr('Журнал скопирован'))),
+    );
+  }
+
   Color _levelColor(AppLogLevel level) {
     switch (level) {
       case AppLogLevel.error:
@@ -99,7 +110,6 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ] Модуль переводчика.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(
@@ -115,12 +125,28 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
                 children: [
                   Text(tr('Логи приложения'), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   if (_entries.isNotEmpty)
-                    GestureDetector(
-                      onTap: _deleteAllLogs,
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-                        child: Icon(Icons.delete_forever_rounded, size: 20, color: AppColors.danger),
-                      ),
+                    Row(
+                      children: [
+                        GestureDetector(
+                          onTap: _copyAllLogs,
+                          child: const Padding(
+                            padding:
+                                EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                            child: Icon(Icons.copy_all_rounded,
+                                size: 20, color: AppColors.textDim),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        GestureDetector(
+                          onTap: _deleteAllLogs,
+                          child: const Padding(
+                            padding:
+                                EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                            child: Icon(Icons.delete_forever_rounded,
+                                size: 20, color: AppColors.danger),
+                          ),
+                        ),
+                      ],
                     ),
                 ],
               ),

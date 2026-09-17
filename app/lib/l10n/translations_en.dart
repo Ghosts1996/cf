@@ -1,13 +1,10 @@
-/// [НОВОЕ] Модуль переводчика — карта переводов "русский текст из кода" ->
-/// "английский перевод". Ключи — ТОЧНЫЕ русские строки, как они написаны в
-/// виджетах (см. lib/services/locale_service.dart::translate). Если строка
-/// вызывается через `tr('...')`, но её здесь нет — пользователь просто
-/// увидит русский оригинал (безопасный fallback, не пустая строка и не
-/// ключ-заглушка).
+/// Карта переводов: ключ — точная русская строка из кода, значение —
+/// английский перевод (см. locale_service.dart::translate). Если строка
+/// вызывается через `tr('...')`, но её здесь нет, пользователь увидит
+/// русский оригинал.
 ///
-/// Покрытие на данный момент (см. REPORT_TRANSLATOR.md за полным списком):
-/// main.dart, settings_screen.dart — переведены полностью. Остальные экраны
-/// — postponed, вернуться к ним по запросу.
+/// Переведены main.dart и settings_screen.dart целиком, остальные экраны —
+/// частично.
 const Map<String, String> translationsEn = {
   // ── main.dart — нижняя навигация + сессия ──────────────────────────────
   'Главная': 'Home',
@@ -201,6 +198,7 @@ const Map<String, String> translationsEn = {
       'The apps checked below bypass the VPN — for example a bank app or local services. This list is the real apps on this device.',
 
   // ── support_screen.dart ─────────────────────────────────────────────────
+  'Не удалось открыть ссылку:': 'Could not open the link:',
   'Сайт': 'Website',
   'Бот Telegram': 'Telegram bot',
   'Бот MAX': 'MAX bot',
@@ -232,6 +230,8 @@ const Map<String, String> translationsEn = {
   'Пополнить': 'Top up',
 
   // ── keys_screen.dart ────────────────────────────────────────────────────
+  'Ядро не поддерживает транспорт этих локаций — подключиться к ним не получится:':
+      'The core does not support the transport of these locations — you will not be able to connect to them:',
   'Похоже на неверную ссылку — жду vless://... или http(s)://ссылку на подписку':
       'That looks like an invalid link — expected a vless://... link or an http(s):// subscription link',
   'Ручной ключ удалён': 'Manual key removed',
@@ -291,6 +291,8 @@ const Map<String, String> translationsEn = {
   'Локальный журнал событий приложения (подключения, ошибки) будет удалён полностью. Действие необратимо.':
       'The app\'s local event log (connections, errors) will be deleted completely. This can\'t be undone.',
   'Логи удалены': 'Logs deleted',
+  'Журнал скопирован': 'Log copied',
+  'работает (проверено)': 'works (verified)',
   'Kill Switch включён автоматически — строгий режим работает поверх него':
       'Kill Switch was turned on automatically — strict mode works on top of it',
   'Безопасность': 'Security',

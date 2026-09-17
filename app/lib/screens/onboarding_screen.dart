@@ -3,10 +3,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../theme.dart';
 import '../services/locale_service.dart';
 
-/// [НОВОЕ] Раньше приложение открывалось сразу на боевом экране без единого
-/// слова о том, что это, зачем платить и чем протокол лучше конкурентов —
-/// прямой удар по конверсии в первую покупку. Показывается один раз,
-/// флаг хранится в SharedPreferences (переживает перезапуск приложения).
+/// Приветственный экран: что это за приложение и чем протокол лучше
+/// конкурентов. Показывается один раз, флаг хранится в SharedPreferences.
 class OnboardingScreen extends StatefulWidget {
   final VoidCallback onDone;
   const OnboardingScreen({super.key, required this.onDone});
@@ -52,9 +50,6 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ] Модуль переводчика — язык обычно ещё не выбран на этом самом
-    // первом экране, но подписка на LocaleService всё равно добавлена для
-    // единообразия со всеми остальными экранами модуля.
     return AnimatedBuilder(
       animation: LocaleService.instance,
       builder: (context, _) => Scaffold(
