@@ -3207,7 +3207,12 @@ class TunnelService {
         // поэтому с большим интервалом ядро на старте её просто берёт из кэша.
         'interval': '1h',
         'tolerance': 50,
-        'idle_timeout': '30m',
+        // Обязано быть НЕ МЕНЬШЕ interval: иначе ядро отказывается стартовать
+        // с «interval must be less or equal than idle_timeout», и приложение
+        // сообщает «Ядро sing-box не запустилось» по каждой локации. Проверка
+        // конфига (`check`) этого не ловит — ограничение проверяется при
+        // запуске группы, а не при разборе схемы.
+        'idle_timeout': '3h',
       });
     }
     outbounds.add({'type': 'direct', 'tag': 'direct'});

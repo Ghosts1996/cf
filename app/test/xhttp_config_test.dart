@@ -260,6 +260,35 @@ void main() {
           'dns-direct');
     });
 
+    test('idle_timeout группы не меньше interval — иначе ядро не стартует', () {
+      // Проверка конфига (`sing-box check`) это ограничение не ловит: оно
+      // проверяется при запуске группы, а не при разборе схемы. Один раз это
+      // уже стоило сборки, в которой ядро падало с «interval must be less or
+      // equal than idle_timeout», и приложение писало «Ядро sing-box не
+      // запустилось» по каждой локации. Воспроизведено и исправлено на
+      // настоящем ядре.
+      Duration parse(String value) {
+        final match = RegExp(r'^(\d+)([smh])$').firstMatch(value);
+        expect(match, isNotNull, reason: 'не разобрал длительность $value');
+        final amount = int.parse(match!.group(1)!);
+        switch (match.group(2)) {
+          case 's':
+            return Duration(seconds: amount);
+          case 'm':
+            return Duration(minutes: amount);
+          default:
+            return Duration(hours: amount);
+        }
+      }
+
+      final group = latencyGroupOf(
+          TunnelService.instance.buildConfigFromUri(reality));
+      final interval = parse(group['interval'] as String);
+      final idleTimeout = parse(group['idle_timeout'] as String);
+      expect(idleTimeout >= interval, isTrue,
+          reason: 'idle_timeout ($idleTimeout) меньше interval ($interval)');
+    });
+
     test('группа latency меряет по тому же адресу, что и Hiddify', () {
       final config = TunnelService.instance.buildConfigFromUri(reality);
       final group = latencyGroupOf(config);
