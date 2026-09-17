@@ -73,6 +73,9 @@ class TunnelService {
   int _uploadTotalBytes = 0;
   int _displayDownloadBytes = 0;
   int _displayUploadBytes = 0;
+  // Отдаёт ли ядро накопленные итоги (`*TotalBytes`). Часть сборок libbox их
+  // не заполняет, и тогда — и только тогда — приложение считает объём само.
+  bool _coreReportsTotals = false;
   DateTime? _lastTrafficAt;
   int? _lastNativeRxBytes;
   int? _lastNativeTxBytes;
@@ -562,16 +565,38 @@ class TunnelService {
     final now = DateTime.now();
     final nextDownloadTotal = stats.downlinkTotalBytes as int;
     final nextUploadTotal = stats.uplinkTotalBytes as int;
-    // На части версий libbox total остаётся нулевым, хотя каждый тик
-    // содержит throughput. Накапливаем его сами, чтобы UI не сбрасывался.
-    final reportedDownload = nextDownloadTotal > _displayDownloadBytes
-        ? nextDownloadTotal
-        : _displayDownloadBytes +
-            ((stats.downlinkBps as num).toDouble().clamp(0, 1e12)).round();
-    final reportedUpload = nextUploadTotal > _displayUploadBytes
-        ? nextUploadTotal
-        : _displayUploadBytes +
-            ((stats.uplinkBps as num).toDouble().clamp(0, 1e12)).round();
+    if (nextDownloadTotal > 0 || nextUploadTotal > 0) _coreReportsTotals = true;
+    final elapsedForTotals = _lastTrafficAt == null
+        ? 0.0
+        : now.difference(_lastTrafficAt!).inMilliseconds / 1000.0;
+    // Пока ядро отдаёт итоги само — берём их как есть.
+    //
+    // Раньше здесь стояло `next > показанного ? next : показанное + скорость`,
+    // и это был храповик в одну сторону. Достаточно одного тика, где итог
+    // ядра оказался не больше показанного (а это нормально: ядро обновляет
+    // итоги реже, чем присылает мгновенную скорость), — и дальше условие
+    // навсегда оставалось ложным. Приложение начинало прибавлять скорость к
+    // своему же числу каждый тик и больше никогда не возвращалось к правде.
+    // Так «отдача» и вырастала до 86 МБ за пять минут при 8 МБ приёма.
+    //
+    // Вторая ошибка была в самой прибавке: скорость в байтах в секунду
+    // прибавлялась как объём за тик, без учёта того, сколько времени прошло.
+    // Тики приходят чаще раза в секунду — число росло кратно.
+    final int reportedDownload;
+    final int reportedUpload;
+    if (_coreReportsTotals) {
+      reportedDownload = nextDownloadTotal;
+      reportedUpload = nextUploadTotal;
+    } else {
+      reportedDownload = _displayDownloadBytes +
+          ((stats.downlinkBps as num).toDouble().clamp(0, 1e12) *
+                  elapsedForTotals)
+              .round();
+      reportedUpload = _displayUploadBytes +
+          ((stats.uplinkBps as num).toDouble().clamp(0, 1e12) *
+                  elapsedForTotals)
+              .round();
+    }
     _displayDownloadBytes = reportedDownload;
     _displayUploadBytes = reportedUpload;
     final elapsedSeconds = _lastTrafficAt == null
@@ -1234,8 +1259,78 @@ class TunnelService {
       unawaited(AppLogService.instance.log(
           'Задержка через туннель: '
           '${smoothed.entries.map((e) => '${e.key} — ${e.value} мс').join('; ')}'));
+      await _recoverIfActiveOutboundIsDead(raw);
     } finally {
       _latencyProbeRunning = false;
+    }
+  }
+
+  // Сколько прогонов подряд активная локация молчала. Одного мало: замер
+  // может не сойтись и на живом сервере, если в этот момент шёл тяжёлый
+  // трафик. Два подряд — это уже минуты без связи.
+  int _activeOutboundSilentRuns = 0;
+
+  /// Самовосстановление: если активная локация перестала отвечать, а соседние
+  /// по группе отвечают, переключаем селектор на живую.
+  ///
+  /// Ровно тот случай, который выглядит как «поработал и перестал»: туннель
+  /// поднят, значок горит, а трафик не идёт. Раньше из этого состояния можно
+  /// было выйти только руками — переподключением или сменой сервера.
+  ///
+  /// Переключение идёт внутри поднятой сессии, командой ядру: TUN не
+  /// опускается, уведомление не моргает, уже открытые соединения доживают на
+  /// прежнем сервере.
+  Future<void> _recoverIfActiveOutboundIsDead(Map<String, int> measured) async {
+    final order = _sessionOutboundOrder;
+    if (order.length < 2 || !isConnected) return;
+    if (_switchInProgress || _connectInProgress || isBusy) return;
+
+    final activeName = connectedServerName.value;
+    if (activeName == null || activeName.isEmpty) return;
+    final active = _matchProfile(order, activeName);
+    if (active == null) return;
+
+    // Активная локация ответила — всё в порядке.
+    if (measured[active.remark] != null) {
+      _activeOutboundSilentRuns = 0;
+      return;
+    }
+    // Не отвечает вообще никто — дело не в сервере, а в сети телефона.
+    // Переключаться некуда и незачем.
+    if (measured.isEmpty) {
+      _activeOutboundSilentRuns = 0;
+      return;
+    }
+
+    _activeOutboundSilentRuns++;
+    if (_activeOutboundSilentRuns < 2) return;
+    _activeOutboundSilentRuns = 0;
+
+    // Самая быстрая из ответивших.
+    String? bestRemark;
+    int? bestDelay;
+    measured.forEach((remark, delay) {
+      if (bestDelay == null || delay < bestDelay!) {
+        bestDelay = delay;
+        bestRemark = remark;
+      }
+    });
+    if (bestRemark == null) return;
+    final index = order.indexWhere((e) => e.remark == bestRemark);
+    if (index < 0) return;
+
+    try {
+      await _client.selectOutbound('proxy', 'out-$index').timeout(_nativeCallTimeout);
+      connectedServerName.value = bestRemark!;
+      _lastPreferredHostName = bestRemark;
+      _persistSessionRoute();
+      unawaited(AppLogService.instance.log(
+          'Локация "${active.remark}" перестала отвечать — сам переключился на '
+          '"$bestRemark" ($bestDelay мс) без разрыва туннеля',
+          level: AppLogLevel.warning));
+    } catch (_) {
+      // Ядро не приняло команду — ничего не делаем: обычное переподключение
+      // остаётся за пользователем.
     }
   }
 
@@ -1982,6 +2077,7 @@ class TunnelService {
       _uploadTotalBytes = 0;
       _displayDownloadBytes = 0;
       _displayUploadBytes = 0;
+      _coreReportsTotals = false;
     }
     _lastTrafficAt = null;
     _lastNativeRxBytes = null;
