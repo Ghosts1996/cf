@@ -38,6 +38,27 @@ class _ServersScreenState extends State<ServersScreen> {
   final _prefs = LocalPrefs.instance;
   final _tunnel = TunnelService.instance;
   List<dynamic>? _hosts;
+  // Локации, которые есть в подписке, но которых нет в ответе `GET /hosts`.
+  //
+  // `/hosts` отдаёт только собственные панели 3x-ui. С тех пор как в подписку
+  // каждого клиента стали дописываться внешние ноды, этого списка перестало
+  // хватать: в других клиентах видно полтора десятка стран, а здесь было
+  // четыре, и все с подписью «Локация не найдена в подписке». Здесь лежат
+  // те самые недостающие, собранные из самой подписки.
+  List<Map<String, dynamic>> _subscriptionOnlyHosts = const [];
+  // Протоколы локаций подписки, которые приложение подключить не умеет:
+  // имя локации -> протокол ('hysteria2', 'ss'...). Такие карточки
+  // показываются, но помечены честно.
+  Map<String, String> _unsupportedProtocols = const {};
+
+  /// Список локаций для экрана: собственные панели плюс то, что пришло из
+  /// подписки сверх них. Порядок сохраняется: сначала свои, потом внешние.
+  List<dynamic>? get _allHosts {
+    final own = _hosts;
+    if (own == null) return null;
+    if (_subscriptionOnlyHosts.isEmpty) return own;
+    return <dynamic>[...own, ..._subscriptionOnlyHosts];
+  }
   String? _error;
   bool _loading = true;
   String? _selectedId;
@@ -320,7 +341,7 @@ class _ServersScreenState extends State<ServersScreen> {
     // собственным ключам ответа ни один не совпал бы с именем локации.
     // Сопоставляем по вхождению — той же логикой, что TunnelService._matchProfile.
     final byHostName = <String, int>{};
-    for (final host in (_hosts ?? const <dynamic>[])) {
+    for (final host in (_allHosts ?? const <dynamic>[])) {
       final hostName = (host as Map<String, dynamic>)['host_name'] as String?;
       if (hostName == null || hostName.isEmpty) continue;
       final needle = hostName.toLowerCase().trim();
@@ -427,6 +448,80 @@ class _ServersScreenState extends State<ServersScreen> {
   /// разбираемая подписка: бэкенд (api_user_keys) на ошибке запроса к
   /// конкретной панели молча пишет `connection_string: ''`, и опора только на
   /// самый свежий ключ обрывала бы поиск на первом же таком случае.
+  /// Раскладывает разобранную подписку по состоянию экрана: адреса для
+  /// замера, локации сверх `GET /hosts` и протоколы, которые приложение
+  /// подключить не умеет.
+  ///
+  /// Адреса мержим, а не заменяем карту целиком: метод вызывается на каждом
+  /// цикле замера, и один неудачный прогон (сеть моргнула, подписка не
+  /// отдалась) стирал бы уже найденные — экран откатывался на общий запасной.
+  void _applySubscriptionLocations(List<SubscriptionLocation> locations) {
+    final endpoints = <String,
+        ({
+          String host,
+          int port,
+          String security,
+          String? sni,
+          String transport
+        })>{};
+    final unsupported = <String, String>{};
+    final extra = <Map<String, dynamic>>[];
+    final seen = <String>{};
+
+    for (final location in locations) {
+      final remark = location.remark.trim();
+      if (remark.isEmpty || !seen.add(remark.toLowerCase())) continue;
+      // Ключ — то имя, под которым локация показана на экране. У собственных
+      // панелей это host_name из /hosts, и он не совпадает с remark'ом
+      // подписки: 3x-ui дописывает в remark название сервиса. Раскладывая по
+      // remark'у, экран потом не находил ни адрес, ни транспорт своей же
+      // локации и молча откатывался на запасной замер по домену подписки.
+      final key = _hostNameFor(remark) ?? remark;
+      if (location.supported && location.host != null && location.port != null) {
+        endpoints[key] = (
+          host: location.host!,
+          port: location.port!,
+          security: location.security ?? 'none',
+          sni: location.sni,
+          transport: location.transport ?? 'tcp',
+        );
+      } else {
+        unsupported[key] = location.protocol;
+      }
+      // Локацию, которая уже есть в списке собственных панелей, второй
+      // карточкой не показываем.
+      if (key == remark) {
+        extra.add(<String, dynamic>{'host_name': remark, 'from_subscription': true});
+      }
+    }
+
+    setState(() {
+      _realEndpoints = {..._realEndpoints, ...endpoints};
+      _subscriptionOnlyHosts = extra;
+      _unsupportedProtocols = unsupported;
+    });
+  }
+
+  /// Имя локации из `GET /hosts`, соответствующее remark'у подписки, или null,
+  /// если такой локации среди собственных панелей нет. Сопоставление по
+  /// вхождению — той же логикой, что TunnelService._matchProfile: панель
+  /// 3x-ui дописывает в remark название сервиса ("VPNonLine | 🇩🇪 Германия").
+  String? _hostNameFor(String remark) {
+    final hosts = _hosts;
+    if (hosts == null) return null;
+    final needle = remark.trim().toLowerCase();
+    if (needle.isEmpty) return null;
+    for (final raw in hosts) {
+      final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
+      if (id.isEmpty) continue;
+      final hay = id.trim().toLowerCase();
+      if (hay == needle || needle.contains(hay) || hay.contains(needle)) {
+        return id;
+      }
+    }
+    return null;
+  }
+
   Future<void> _loadActiveConnectionString() async {
     // Ручной ключ приоритетнее — именно по нему подключается ConnectScreen,
     // если он задан. `ensureLoaded()` идемпотентен, поэтому зовём его здесь, не
@@ -435,14 +530,10 @@ class _ServersScreenState extends State<ServersScreen> {
     await ManualKeyStore.instance.ensureLoaded();
     final manual = ManualKeyStore.instance.value?.trim();
     if (manual != null && manual.isNotEmpty) {
-      final endpoints = await _tunnel.listProfileEndpoints(manual);
-      debugPrint('[servers] ручной ключ: найдено ${endpoints.length} '
-          'локаций -> ${endpoints.entries.map((e) => '${e.key}=${e.value.host}:${e.value.port}').join(', ')}');
-      if (mounted && endpoints.isNotEmpty) {
-        // Мержим, а не заменяем карту целиком: функция вызывается на каждом цикле
-        // замера, и один неудачный прогон (сеть моргнула, подписка не отдалась)
-        // стирал бы уже найденные адреса — экран откатывался на общий запасной.
-        setState(() => _realEndpoints = {..._realEndpoints, ...endpoints});
+      final locations = await _tunnel.listSubscriptionLocations(manual);
+      debugPrint('[servers] ручной ключ: найдено ${locations.length} локаций');
+      if (mounted && locations.isNotEmpty) {
+        _applySubscriptionLocations(locations);
         return;
       }
       // Ручной ключ задан, но подписка не распарсилась. Не переходим молча на
@@ -469,15 +560,12 @@ class _ServersScreenState extends State<ServersScreen> {
       for (final key in active) {
         final connectionString = key['connection_string'] as String?;
         if (connectionString == null || connectionString.isEmpty) continue;
-        final endpoints = await _tunnel.listProfileEndpoints(connectionString);
-        if (endpoints.isEmpty) continue;
+        final locations =
+            await _tunnel.listSubscriptionLocations(connectionString);
+        if (locations.isEmpty) continue;
         debugPrint('[servers] ключ ${key['key_id']}: найдено '
-            '${endpoints.length} локаций -> ${endpoints.entries.map((e) => '${e.key}=${e.value.host}:${e.value.port}').join(', ')}');
-        // См. комментарий у аналогичной правки в ветке ручного ключа
-        // выше — мержим, а не затираем целиком.
-        if (mounted) {
-          setState(() => _realEndpoints = {..._realEndpoints, ...endpoints});
-        }
+            '${locations.length} локаций');
+        if (mounted) _applySubscriptionLocations(locations);
         return;
       }
       debugPrint('[servers] ни у одного активного ключа не нашлось '
@@ -537,7 +625,7 @@ class _ServersScreenState extends State<ServersScreen> {
   /// Общий флаг `_switching` не даёт авто-балансировке и ручному тапу по
   /// серверу тронуть тот же нативный клиент во время проверки.
   Future<void> _realCheckAll({bool silent = false}) async {
-    if (_realChecking || _switching || _hosts == null || _hosts!.isEmpty) {
+    if (_realChecking || _switching || _allHosts == null || _allHosts!.isEmpty) {
       return;
     }
 
@@ -594,7 +682,7 @@ class _ServersScreenState extends State<ServersScreen> {
       final byRemark = await _tunnel.realCheckAllProfiles(connectionString);
       if (!mounted) return;
       final mapped = <String, RealCheckResult>{};
-      for (final raw in _hosts!) {
+      for (final raw in _allHosts!) {
         final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
         if (id.isEmpty) continue;
         mapped[id] = _resultForHostName(byRemark, id) ??
@@ -652,6 +740,9 @@ class _ServersScreenState extends State<ServersScreen> {
   /// Reality — все локации, и без результатов реальной проверки сравнивать
   /// было бы нечего.
   int? _autoBalanceScore(String id) {
+    // Локация на протоколе, которого приложение не умеет, в сравнении не
+    // участвует: переключиться на неё всё равно нельзя.
+    if (_unsupportedProtocols.containsKey(id)) return null;
     final realCheck = _realCheckResults[id];
     if (realCheck != null && _isRealCheckFresh) {
       if (!realCheck.ok) return null; // подтверждённо мёртвая локация
@@ -684,7 +775,7 @@ class _ServersScreenState extends State<ServersScreen> {
   /// считала, что текущего сервера нет в списке. Сопоставляем по вхождению —
   /// той же логикой, что TunnelService._matchProfile и latencyForHostName.
   String? _hostIdForConnectedName(String? connectedName) {
-    final hosts = _hosts;
+    final hosts = _allHosts;
     if (hosts == null || connectedName == null || connectedName.isEmpty) {
       return null;
     }
@@ -705,10 +796,10 @@ class _ServersScreenState extends State<ServersScreen> {
   }
 
   void _maybeApplyAutoBalance() {
-    if (!_autoBalance || _hosts == null || _hosts!.isEmpty) return;
+    if (!_autoBalance || _allHosts == null || _allHosts!.isEmpty) return;
     String? bestId;
     int? bestPing;
-    for (final s in _hosts!) {
+    for (final s in _allHosts!) {
       final host = s as Map<String, dynamic>;
       final id = host['host_name'] as String? ?? '';
       if (id.isEmpty) continue;
@@ -784,6 +875,21 @@ class _ServersScreenState extends State<ServersScreen> {
   /// мало: VLESS-сессия продолжала бы висеть на прежнем сервере до ручного
   /// переподключения.
   Future<void> _onServerTapped(String id, String name) async {
+    // Локацию на неподдерживаемом протоколе выбрать нельзя: подключение по
+    // ней всё равно не соберётся, а выбранной она бы осталась — и главный
+    // экран отказывался бы подключаться, пока пользователь не вернётся сюда
+    // и не выберет другую.
+    final unsupportedProtocol = _unsupportedProtocols[id];
+    if (unsupportedProtocol != null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              '${tr('Эта локация работает по протоколу')} $unsupportedProtocol'
+              ' — ${tr('приложение его пока не поддерживает. Выбери другую.')}'),
+        ));
+      }
+      return;
+    }
     // Предпочтение обновляем сразу в любом случае: даже если переключение
     // ниже не понадобится или не удастся, экран "Подключение" должен
     // показывать актуальный выбор.
@@ -824,8 +930,9 @@ class _ServersScreenState extends State<ServersScreen> {
     unawaited(_restoreRealCheckResults());
     _load();
     _pingRefreshTimer = Timer.periodic(_pingRefreshInterval, (_) {
-      if (_hosts == null || _hosts!.isEmpty) return;
-      _measureAllPings(_hosts!);
+      final hosts = _allHosts;
+      if (hosts == null || hosts.isEmpty) return;
+      _measureAllPings(hosts);
     });
     // Обновляет реальный пинг текущего сервера сразу при
     // подключении/отключении, а не раз в 25 секунд по таймеру.
@@ -914,7 +1021,7 @@ class _ServersScreenState extends State<ServersScreen> {
   void _maybeAutoRealCheck() {
     if (_realChecking || _switching) return;
     if (_tunnel.isConnected || _tunnel.isBusy) return;
-    if (_hosts == null || _hosts!.isEmpty) return;
+    if (_allHosts == null || _allHosts!.isEmpty) return;
     final last = _lastRealCheckAt;
     if (last != null && DateTime.now().difference(last) < _realCheckCooldown) {
       return;
@@ -952,9 +1059,16 @@ class _ServersScreenState extends State<ServersScreen> {
           // Сохранённый `_selectedId` может больше не встречаться в свежем списке
           // хостов (сервер удалили или переименовали) — тогда выбираем первый
           // доступный, а не указываем на несуществующий host_name.
+          //
+          // Локации из подписки проверяем наравне с панельными: выбранную
+          // внешнюю ноду нельзя сбрасывать только потому, что её нет в
+          // /hosts, — иначе каждое обновление списка перекидывало бы выбор
+          // обратно на первую собственную локацию.
           final stillExists = _selectedId != null &&
-              hosts.any((h) =>
-                  (h as Map<String, dynamic>)['host_name'] == _selectedId);
+              (hosts.any((h) =>
+                      (h as Map<String, dynamic>)['host_name'] == _selectedId) ||
+                  _subscriptionOnlyHosts
+                      .any((h) => h['host_name'] == _selectedId));
           if (!stillExists) {
             final first = hosts.first as Map<String, dynamic>;
             _selectedId = first['host_name'] as String?;
@@ -1109,14 +1223,14 @@ class _ServersScreenState extends State<ServersScreen> {
                     style:
                         const TextStyle(color: AppColors.danger, fontSize: 12)),
               ),
-            if (_hosts != null && _hosts!.isEmpty)
+            if (_allHosts != null && _allHosts!.isEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 20),
                 child: Text(tr('В панелях 3x-ui пока нет активных локаций.'),
                     style: const TextStyle(color: AppColors.textDim)),
               ),
-            if (_hosts != null)
-              ..._hosts!.map((s) {
+            if (_allHosts != null)
+              ..._allHosts!.map((s) {
                 final host = s as Map<String, dynamic>;
                 final id = host['host_name'] as String? ?? '';
                 final name = id.isEmpty ? tr('Без названия') : id;
@@ -1159,9 +1273,19 @@ class _ServersScreenState extends State<ServersScreen> {
                     ? _tunnel.latencyForHostName(id)
                     : (realCheck != null && realCheck.ok ? realCheck.latencyMs : null);
 
+                // Локация есть в подписке, но написана на протоколе, который
+                // приложение в конфиг не собирает. Показываем её — в других
+                // клиентах она видна, и молча прятать её нечестно, — но прямо
+                // говорим, почему подключиться нельзя.
+                final unsupportedProtocol = _unsupportedProtocols[id];
+
                 String pingLabel;
                 Color pingColor;
-                if (_realChecking) {
+                if (unsupportedProtocol != null) {
+                  pingLabel =
+                      '${tr('протокол')} $unsupportedProtocol · ${tr('приложение его пока не поддерживает')}';
+                  pingColor = AppColors.textDim;
+                } else if (_realChecking) {
                   pingLabel = tr('проверяю по-настоящему...');
                   pingColor = AppColors.textDim;
                 } else if (corePing != null && corePing > 0) {
@@ -1314,8 +1438,8 @@ class _ServersScreenState extends State<ServersScreen> {
                       // Таймер замера работает всегда (см. `_pingRefreshTimer`); тумблер только
                       // решает, будет ли `_maybeApplyAutoBalance` переключать туннель по уже
                       // идущим замерам.
-                      if (v && _hosts != null && _hosts!.isNotEmpty) {
-                        _measureAllPings(_hosts!);
+                      if (v && _allHosts != null && _allHosts!.isNotEmpty) {
+                        _measureAllPings(_allHosts!);
                       }
                     },
                   ),

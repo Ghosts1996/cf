@@ -210,6 +210,14 @@ class TunnelService {
 
   String? _cachedSource;
   List<_ParsedVless>? _cachedProfiles;
+  // Локации подписки, которые приложение подключить не может: строки не с
+  // vless://, а с каким-то другим протоколом (hysteria2, ss, trojan...).
+  // Раньше они просто выбрасывались при разборе, и на экране «Серверы» от
+  // подписки из 14 нод оставалось 4. Храним их рядом с профилями, чтобы
+  // показать список целиком, как это делает Hiddify, и честно подписать,
+  // почему такая локация недоступна.
+  List<({String remark, String protocol})> _cachedOthers =
+      const <({String remark, String protocol})>[];
   DateTime? _cachedAt;
   static const _cacheTtl = Duration(seconds: 45);
 
@@ -1052,6 +1060,51 @@ class TunnelService {
       return result;
     } catch (_) {
       return const {};
+    }
+  }
+
+  /// Все локации подписки — и те, к которым приложение умеет подключаться, и
+  /// те, к которым нет.
+  ///
+  /// Экрану «Серверы» этого списка раньше не хватало: он строился только по
+  /// `GET /hosts`, то есть по локациям собственных панелей 3x-ui. Когда в
+  /// подписку стали дописываться внешние ноды, в других клиентах их стало
+  /// видно полтора десятка, а здесь по-прежнему четыре. Теперь экран
+  /// показывает подписку целиком, как Hiddify.
+  ///
+  /// `supported: false` означает, что строка подписки написана на протоколе,
+  /// который приложение не собирает в конфиг (hysteria2, ss, trojan...).
+  /// Такая локация видна, но подключиться к ней нельзя — и на карточке это
+  /// написано прямо, а не скрыто.
+  Future<List<SubscriptionLocation>> listSubscriptionLocations(
+      String connectionString) async {
+    try {
+      final profiles = await _loadProfiles(connectionString);
+      final result = <SubscriptionLocation>[];
+      for (final p in profiles) {
+        if (p.remark.isEmpty) continue;
+        result.add(SubscriptionLocation(
+          remark: p.remark,
+          protocol: 'vless',
+          supported: true,
+          host: p.host,
+          port: p.port,
+          security: p.security,
+          sni: p.sni,
+          transport: p.transportType ?? 'tcp',
+        ));
+      }
+      for (final other in _cachedOthers) {
+        if (other.remark.isEmpty) continue;
+        result.add(SubscriptionLocation(
+          remark: other.remark,
+          protocol: other.protocol,
+          supported: false,
+        ));
+      }
+      return result;
+    } catch (_) {
+      return const <SubscriptionLocation>[];
     }
   }
 
@@ -3294,7 +3347,14 @@ class TunnelService {
     }
 
     String body;
-    if (source.startsWith('vless://')) {
+    // Ссылкой считаем только то, что действительно ей является. Всё
+    // остальное — уже само содержимое подписки: одна vless://-ссылка,
+    // несколько строк или base64-блок. Раньше проверка была на `vless://`, и
+    // вставленное целиком тело подписки уходило в http.get, который
+    // предсказуемо падал.
+    final isUrl =
+        source.startsWith('http://') || source.startsWith('https://');
+    if (!isUrl) {
       body = source;
     } else {
       try {
@@ -3336,6 +3396,9 @@ class TunnelService {
 
   List<_ParsedVless> _parseSubscriptionBody(String body) {
     String text = body.trim();
+    // Сбрасываем на каждый разбор: иначе после подписки с hysteria2-нодой
+    // следующая, где её уже нет, всё равно показывала бы её на экране.
+    _cachedOthers = const <({String remark, String protocol})>[];
 
     // Некоторые панели отдают не base64-список vless://-ссылок, а готовый
     // JSON-конфиг sing-box: полный объект с "outbounds" либо просто массив
@@ -3356,18 +3419,47 @@ class TunnelService {
       } catch (_) {}
     }
 
-    final lines = text
+    final allLines = text
         .split(RegExp(r'[\r\n]+'))
         .map((line) => line.trim())
-        .where((line) => line.startsWith('vless://'))
+        .where((line) => line.isNotEmpty)
         .toList();
 
+    // Строки не с vless:// запоминаем отдельно: подключиться к ним нечем, но
+    // и молча выкидывать их нельзя — в подписке с внешними нодами они
+    // попадаются, и пользователь видит их в других клиентах.
+    final others = <({String remark, String protocol})>[];
+    for (final line in allLines) {
+      if (line.startsWith('vless://')) continue;
+      final match = RegExp(r'^([a-z][a-z0-9+.\-]*)://').firstMatch(line);
+      if (match == null) continue;
+      final protocol = match.group(1)!;
+      // Схемы, которые заведомо не являются узлом подписки.
+      if (protocol == 'http' || protocol == 'https') continue;
+      others.add((remark: _remarkOfLink(line), protocol: protocol));
+    }
+    _cachedOthers = others;
+
     final result = <_ParsedVless>[];
-    for (final line in lines) {
+    for (final line in allLines) {
+      if (!line.startsWith('vless://')) continue;
       final parsed = _ParsedVless.tryParse(line);
       if (parsed != null) result.add(parsed);
     }
     return result;
+  }
+
+  /// Имя узла из ссылки — то, что стоит после `#`. Панели пишут туда название
+  /// локации, и именно его показывают все клиенты.
+  static String _remarkOfLink(String line) {
+    final hash = line.indexOf('#');
+    if (hash < 0 || hash + 1 >= line.length) return '';
+    final raw = line.substring(hash + 1).trim();
+    try {
+      return Uri.decodeComponent(raw);
+    } catch (_) {
+      return raw;
+    }
   }
 
   /// Достаёт vless-профили из JSON-конфига sing-box — из `{"outbounds":[...]}`
@@ -3898,6 +3990,36 @@ class TunnelStatus {
   final num upload;
   final int downloadTotalBytes;
   final int uploadTotalBytes;
+}
+
+/// Локация из подписки для экрана «Серверы». Отдаётся
+/// [TunnelService.listSubscriptionLocations].
+class SubscriptionLocation {
+  const SubscriptionLocation({
+    required this.remark,
+    required this.protocol,
+    required this.supported,
+    this.host,
+    this.port,
+    this.security,
+    this.sni,
+    this.transport,
+  });
+
+  /// Имя узла из подписки — то, что стоит после `#` в ссылке.
+  final String remark;
+
+  /// Протокол ссылки: 'vless', 'hysteria2', 'ss'...
+  final String protocol;
+
+  /// Умеет ли приложение собрать конфиг для этой локации.
+  final bool supported;
+
+  final String? host;
+  final int? port;
+  final String? security;
+  final String? sni;
+  final String? transport;
 }
 
 class _ParsedVless {
