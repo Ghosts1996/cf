@@ -202,6 +202,17 @@ class TunnelService {
   /// Сколько последних замеров участвует в выборе минимума. Больше окно —
   /// устойчивее число, но дольше реакция на реальное ухудшение канала.
   static const int _latencySampleWindow = 5;
+  /// Сколько прогонов подряд делаем сразу после подключения, чтобы окно
+  /// минимума набралось не за десять минут, а за полминуты.
+  ///
+  /// Число на экране — минимум по окну, и пока в окне один замер, показан
+  /// именно он: самый первый, самый холодный и самый высокий. Первый прогон
+  /// платит за установку соединения до адреса проверки, дальше оно уже
+  /// прогрето, и честный круговой путь оказывается заметно короче. Раньше
+  /// второй замер приходил через две минуты, третий — через четыре, и всё
+  /// это время пользователь смотрел на завышенное число.
+  static const int _latencyWarmupRuns = 3;
+  static const Duration _latencyWarmupSpacing = Duration(seconds: 6);
   // Выше этой скорости (байт/с в любую сторону) прогон пропускается —
   // пробник встанет в очередь за реальными данными и измерит не сеть.
   static const int _latencyProbeBusyBps = 300 * 1024;
@@ -1177,10 +1188,30 @@ class TunnelService {
     // к десяткам рукопожатий ещё столько же — подключение заметно тормозило.
     // Даём туннелю встать и отдать первые байты.
     _latencyProbeTimer = Timer(const Duration(seconds: 8), () {
-      unawaited(_runLatencyProbe());
-      _latencyProbeTimer =
-          Timer.periodic(_latencyProbeInterval, (_) => unawaited(_runLatencyProbe()));
+      unawaited(_runLatencyWarmup());
     });
+  }
+
+  /// Короткая серия прогонов сразу после подключения, потом обычный цикл.
+  ///
+  /// Серия конечная и бывает один раз за сессию — это не возврат к замеру раз
+  /// в двадцать пять секунд, из-за которого приложение когда-то «дико лагало»
+  /// на мобильном канале.
+  Future<void> _runLatencyWarmup() async {
+    for (var run = 0; run < _latencyWarmupRuns; run++) {
+      if (!isConnected) return;
+      // force: разгон имеет смысл только пока он идёт подряд. Пропустить его
+      // из-за трафика значит остаться с единственным холодным замером до
+      // конца сессии.
+      await _runLatencyProbe(force: true);
+      if (run + 1 < _latencyWarmupRuns) {
+        await Future<void>.delayed(_latencyWarmupSpacing);
+      }
+    }
+    if (!isConnected) return;
+    _latencyProbeTimer?.cancel();
+    _latencyProbeTimer =
+        Timer.periodic(_latencyProbeInterval, (_) => unawaited(_runLatencyProbe()));
   }
 
   /// Немедленный замер задержки по всем локациям поднятого туннеля.
@@ -1193,6 +1224,12 @@ class TunnelService {
   /// Возвращает то, что получилось: имя локации из подписки -> задержка в мс.
   Future<Map<String, int>> refreshLatencyNow() async {
     if (!isConnected) return const <String, int>{};
+    // Два прогона подряд, а не один. Пользователь нажал кнопку и ждёт ответа,
+    // так что лишние секунды здесь дешевле завышенного числа: второй прогон
+    // идёт по уже прогретым соединениям и добавляет в окно минимума замер
+    // без платы за установку соединения.
+    await _runLatencyProbe(force: true);
+    if (!isConnected) return latencyByRemark.value;
     await _runLatencyProbe(force: true);
     return latencyByRemark.value;
   }
@@ -1259,12 +1296,18 @@ class TunnelService {
       // режим сами — следующее подключение соберётся без него и пинг вернётся.
       if (coreSilent) {
         _emptyLatencyRuns++;
-        if (_sessionFastPing && _emptyLatencyRuns >= 2) {
+        // Порог три, а не два. Прогоны теперь идут не раз в две минуты, а
+        // серией сразу после подключения, и первый из них ядро вполне может
+        // встретить с ещё не поднятыми соединениями. С прежним порогом такой
+        // разгон сам себе выключал быстрый пинг — то есть ровно тот режим,
+        // ради низкого числа и включённый. Три пустых прогона подряд всё
+        // равно ловятся за полминуты вместо прежних шести минут.
+        if (_sessionFastPing && _emptyLatencyRuns >= 3) {
           _sessionFastPing = false;
           _emptyLatencyRuns = 0;
           await LocalPrefs.instance.setBool(PrefKeys.fastPing, false);
           unawaited(AppLogService.instance.log(
-              'Быстрый пинг выключен сам: ядро дважды подряд не отдало ни одной '
+              'Быстрый пинг выключен сам: ядро трижды подряд не отдало ни одной '
               'задержки. Похоже, адрес проверки закрывает соединение после '
               'первого ответа. Переподключись — пинг считается обычным способом.'));
         }
@@ -1469,9 +1512,6 @@ class TunnelService {
     // прежние двенадцать секунд, и локации из неё объявлялись неработающими,
     // хотя ядро их даже не дотестировало.
     Duration? timeout,
-    // Кого ждём. Пусто — всех из `order`; на повторном проходе сюда приходят
-    // только те, кто промолчал, и ждать остальных уже не нужно.
-    Set<String>? only,
   }) async {
     if (order.isEmpty) return const <String, int>{};
     // Окно считаем от числа узлов, а не берём фиксированным. Ядро проверяет
@@ -1479,7 +1519,7 @@ class TunnelService {
     // десятках нод, которые сейчас приходят в подписке, прежние 25 секунд
     // обрывали проверку на последней пачке — и целая её треть объявлялась
     // неработающей, хотя ядро до неё просто не дошло.
-    final expected = only ?? order.toSet();
+    final expected = order.toSet();
     final batches = (order.length + 9) ~/ 10;
     final window = timeout ??
         Duration(seconds: (8 * batches + 12).clamp(25, 90));
@@ -2848,22 +2888,36 @@ class TunnelService {
       final order = usable.map((e) => e.remark).toList(growable: false);
       final best = await _collectGroupDelays(order);
 
-      // Второй проход — только по молчавшим. Одного промаха мало, чтобы
-      // объявить локацию мёртвой: ядро проверяет участников пачками, и узел,
-      // чья пачка не уложилась в окно, молчит ровно так же, как настоящий
-      // труп. Сессия уже поднята, повтор стоит секунды — а цена ошибки это
-      // честно работающий ключ, помеченный на экране как нерабочий.
-      final silent = <String>{
-        for (final remark in order)
-          if (remark.isNotEmpty && best[remark] == null) remark,
-      };
-      if (silent.isNotEmpty) {
-        unawaited(AppLogService.instance.log(
-            'Проверка всех локаций: повторный проход по ${silent.length} '
-            'молчавшим из ${order.length}'));
-        final retry = await _collectGroupDelays(order, only: silent);
-        best.addAll(retry);
+      // Второй проход по всем локациям, и берём из двух меньшее. Он делает
+      // сразу две вещи.
+      //
+      // Первая — число становится честно ниже. Первый проход платит за
+      // установку соединения до адреса проверки; второй идёт по прогретым и
+      // показывает чистый круговой путь. Живой туннель давно так и считает
+      // (минимум по окну замеров), а эта проверка оставалась с единственным
+      // холодным замером — отсюда и разница с тем, что видно на экране после
+      // подключения.
+      //
+      // Вторая — локация перестаёт умирать от одного промаха. Ядро проверяет
+      // участников пачками, и узел, чья пачка не уложилась в окно, молчит
+      // ровно так же, как настоящий труп.
+      final second = await _collectGroupDelays(order);
+      var lowered = 0;
+      var revived = 0;
+      for (final entry in second.entries) {
+        final previous = best[entry.key];
+        if (previous == null) {
+          revived++;
+        } else if (entry.value >= previous) {
+          continue;
+        } else {
+          lowered++;
+        }
+        best[entry.key] = entry.value;
       }
+      unawaited(AppLogService.instance.log(
+          'Проверка всех локаций: второй проход уточнил $lowered '
+          'и оживил $revived из ${order.length}'));
 
       for (final profile in usable) {
         if (profile.remark.isEmpty) continue;

@@ -169,6 +169,12 @@ void main() {
     test('на ядре с поддержкой включается единая задержка', () {
       final config = TunnelService.instance
           .buildConfigFromUri(reality, unifiedDelaySupported: true);
+      // Именно объект, а не `true`. Ядро принимает только эту форму, на
+      // булеве падает целиком: «experimental.unified_delay: json: cannot
+      // unmarshal bool into Go value of type option.UnifiedDelayOptions».
+      // Приведение типом ниже и держит эту границу: если поле когда-нибудь
+      // упростят до булева, тест свалится здесь, а не у пользователя на
+      // экране с пропавшим пингом.
       final unified =
           experimentalOf(config)['unified_delay'] as Map<String, dynamic>;
       expect(unified['enabled'], true);
