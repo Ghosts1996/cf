@@ -129,6 +129,13 @@ class _ServersScreenState extends State<ServersScreen> {
   // и боевой туннель, поэтому обязана быть последовательной и не пересекаться
   // с реальным подключением (см. `_realCheckAll`).
   final Map<String, RealCheckResult> _realCheckResults = {};
+
+  /// Последний ответ «Реальной проверки» как есть — по remark'ам подписки.
+  /// Держим его, чтобы разложить результаты заново, когда список локаций
+  /// пополнится: подписка разбирается своим циклом и новые карточки
+  /// появляются уже после проверки. Без этого они навсегда оставались с
+  /// «измеряю…» — проверка по ним прошла, а разложить её было некуда.
+  Map<String, RealCheckResult> _lastRealCheckByRemark = const {};
   // true, пока идёт последовательный обход всех локаций в _realCheckAll().
   bool _realChecking = false;
   // Когда реальная проверка последний раз доводилась до конца — для паузы
@@ -461,11 +468,27 @@ class _ServersScreenState extends State<ServersScreen> {
   /// Адреса мержим, а не заменяем карту целиком: метод вызывается на каждом
   /// цикле замера, и один неудачный прогон (сеть моргнула, подписка не
   /// отдалась) стирал бы уже найденные — экран откатывался на общий запасной.
-  /// Короткая подпись протокола под именем локации. Разбор хранит протокол
-  /// так, как он называется в конфиге ядра, а на карточке места мало — для
-  /// shadowsocks показываем то же «ss», что стоит в самой ссылке подписки.
-  static String _protocolLabel(String protocol) =>
-      protocol == 'shadowsocks' ? 'ss' : protocol;
+  /// Техническая подпись локации — «VLESS / TCP / REALITY».
+  ///
+  /// Порядок и написание взяты у других клиентов намеренно: пользователь
+  /// сверяет наш список с ними, и подпись должна читаться одинаково. Пустые
+  /// части опускаем: у shadowsocks и hysteria2 нет транспорта, а у узла без
+  /// TLS нечего писать третьим полем.
+  static String _techLabelFor({
+    required String protocol,
+    required String transport,
+    required String security,
+  }) {
+    final parts = <String>[
+      protocol == 'shadowsocks' ? 'SS' : protocol.toUpperCase(),
+      // У shadowsocks и hysteria2 транспорта нет вовсе — у них собственный
+      // канал, и `tcp` там был бы выдумкой.
+      if (protocol != 'shadowsocks' && protocol != 'hysteria2')
+        transport.toUpperCase(),
+      if (security != 'none' && security.isNotEmpty) security.toUpperCase(),
+    ];
+    return parts.join(' / ');
+  }
 
   void _applySubscriptionLocations(List<SubscriptionLocation> locations) {
     final endpoints = <String,
@@ -517,6 +540,15 @@ class _ServersScreenState extends State<ServersScreen> {
       _realEndpoints = {..._realEndpoints, ...endpoints};
       _subscriptionOnlyHosts = extra;
       _unsupportedProtocols = unsupported;
+      // Список локаций только что мог пополниться — раскладываем последнюю
+      // проверку заново, иначе новые карточки останутся с «измеряю…»
+      // навсегда: следующая проверка будет только через минуту, а её
+      // результат по этим узлам уже есть.
+      if (_lastRealCheckByRemark.isNotEmpty) {
+        _realCheckResults
+          ..clear()
+          ..addAll(_mapRealCheckToHosts(_lastRealCheckByRemark));
+      }
     });
 
     // Выбранной могла остаться локация, которой в подписке нет (например,
@@ -713,18 +745,11 @@ class _ServersScreenState extends State<ServersScreen> {
       // другой туннель» на промежутке между двумя сессиями.
       final byRemark = await _tunnel.realCheckAllProfiles(connectionString);
       if (!mounted) return;
-      final mapped = <String, RealCheckResult>{};
-      for (final raw in _allHosts!) {
-        final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
-        if (id.isEmpty) continue;
-        mapped[id] = _resultForHostName(byRemark, id) ??
-            const RealCheckResult(
-                ok: false, error: 'Локация не найдена в подписке.');
-      }
+      _lastRealCheckByRemark = byRemark;
       setState(() {
         _realCheckResults
           ..clear()
-          ..addAll(mapped);
+          ..addAll(_mapRealCheckToHosts(byRemark));
       });
       _saveRealCheckResults();
     } finally {
@@ -736,6 +761,20 @@ class _ServersScreenState extends State<ServersScreen> {
         });
       }
     }
+  }
+
+  /// Раскладывает ответ «Реальной проверки» по локациям экрана.
+  Map<String, RealCheckResult> _mapRealCheckToHosts(
+      Map<String, RealCheckResult> byRemark) {
+    final mapped = <String, RealCheckResult>{};
+    for (final raw in _allHosts ?? const []) {
+      final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
+      if (id.isEmpty) continue;
+      mapped[id] = _resultForHostName(byRemark, id) ??
+          const RealCheckResult(
+              ok: false, error: 'Локация не найдена в подписке.');
+    }
+    return mapped;
   }
 
   /// Результат по имени локации с экрана (`host_name` из /hosts) среди
@@ -750,11 +789,23 @@ class _ServersScreenState extends State<ServersScreen> {
       final remark = entry.key.trim().toLowerCase();
       if (remark == needle) return entry.value;
     }
+    // Точного совпадения нет — ищем по вхождению, но только если кандидат
+    // ровно один. Раньше брался первый попавшийся, и на трёх десятках узлов
+    // с похожими именами («США», «⚡ США», «⚡ США #2», «Нидерланды»,
+    // «Нидерланды | №1») локация регулярно получала чужой результат: живая
+    // подписывалась мёртвой и наоборот. Лучше честно ничего не показать, чем
+    // показать чужое.
+    RealCheckResult? found;
+    var matches = 0;
     for (final entry in byRemark.entries) {
       final remark = entry.key.trim().toLowerCase();
-      if (remark.contains(needle) || needle.contains(remark)) return entry.value;
+      if (remark.contains(needle) || needle.contains(remark)) {
+        found = entry.value;
+        matches++;
+        if (matches > 1) return null;
+      }
     }
-    return null;
+    return found;
   }
 
   /// Оценка локации для авто-балансировки. `null` означает "этой локации в
@@ -1296,23 +1347,18 @@ class _ServersScreenState extends State<ServersScreen> {
                 // наравне с рабочими.
                 final isRealityOnly =
                     _realEndpoints[id]?.security == 'reality';
-                // Протокол и транспорт подписываем прямо под именем
-                // локации. Протокол — всегда: подписка давно перестала быть
-                // однородной, в ней рядом стоят vless, trojan, vmess, ss и
-                // hysteria2, и по одному имени узла не понять, чем он
-                // поднимается. Транспорт — только когда он не голый TCP:
-                // сразу видно, какая локация ходит через XHTTP или gRPC и
-                // почему она может быть недоступна текущему ядру.
+                // Отдельной строкой под пингом — «VLESS / TCP / REALITY»:
+                // протокол, транспорт и шифрование канала. Ровно та же
+                // подпись и в том же порядке, что показывают другие клиенты,
+                // чтобы список можно было сверять с ними не гадая.
                 final endpoint = _realEndpoints[id];
-                final protocol = endpoint?.protocol;
-                final transport = endpoint?.transport;
-                final detailParts = <String>[
-                  if (protocol != null && protocol.isNotEmpty)
-                    _protocolLabel(protocol),
-                  if (transport != null && transport != 'tcp') transport,
-                ];
-                final transportSuffix =
-                    detailParts.isEmpty ? '' : ' · ${detailParts.join(' · ')}';
+                final techLabel = endpoint == null
+                    ? _unsupportedProtocols[id]?.toUpperCase()
+                    : _techLabelFor(
+                        protocol: endpoint.protocol,
+                        transport: endpoint.transport,
+                        security: endpoint.security,
+                      );
                 // Единая шкала для всех чисел на этом экране, потому что
                 // число теперь всегда одно и то же по смыслу: задержка,
                 // измеренная ядром через настоящий VLESS-канал по
@@ -1405,7 +1451,8 @@ class _ServersScreenState extends State<ServersScreen> {
                 return ServerPill(
                   code: code,
                   name: name,
-                  pingLabel: '$pingLabel$transportSuffix',
+                  pingLabel: pingLabel,
+                  techLabel: techLabel,
                   pingColor: pingColor,
                   onTap: () => _onServerTapped(id, name),
                   trailing: Row(

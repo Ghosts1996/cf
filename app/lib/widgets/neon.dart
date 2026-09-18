@@ -365,6 +365,7 @@ class ServerPill extends StatelessWidget {
     required this.code,
     required this.name,
     required this.pingLabel,
+    this.techLabel,
     this.pingColor = AppColors.success,
     this.trailing,
     this.onTap,
@@ -374,6 +375,11 @@ class ServerPill extends StatelessWidget {
   final String code;
   final String name;
   final String pingLabel;
+
+  /// Техническая строка под пингом — «VLESS / TCP / REALITY». Ровно та же
+  /// подпись, что показывают другие клиенты: протокол, транспорт и тип
+  /// шифрования канала. null — подписывать нечем.
+  final String? techLabel;
   final Color pingColor;
   final Widget? trailing;
   final VoidCallback? onTap;
@@ -419,6 +425,16 @@ class ServerPill extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 10, color: pingColor)),
+                if (techLabel != null && techLabel!.isNotEmpty) ...[
+                  const SizedBox(height: 1),
+                  Text(techLabel!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 9,
+                          letterSpacing: 0.4,
+                          color: AppColors.textDim)),
+                ],
               ],
             ),
           ),

@@ -1447,7 +1447,7 @@ class TunnelService {
   /// Пустой результат означает, что замер невозможен: туннель не поднят,
   /// сессия собрана без группы или платформа не Android.
   Future<Map<String, int>> measureLatenciesThroughTunnel({
-    Duration timeout = const Duration(seconds: 25),
+    Duration? timeout,
   }) async {
     final remarks = _sessionOutboundRemarks;
     if (remarks.isEmpty || !isConnected) return const <String, int>{};
@@ -1468,9 +1468,21 @@ class TunnelService {
     // На четырнадцати нодах вторая пачка просто не успевала отчитаться за
     // прежние двенадцать секунд, и локации из неё объявлялись неработающими,
     // хотя ядро их даже не дотестировало.
-    Duration timeout = const Duration(seconds: 25),
+    Duration? timeout,
+    // Кого ждём. Пусто — всех из `order`; на повторном проходе сюда приходят
+    // только те, кто промолчал, и ждать остальных уже не нужно.
+    Set<String>? only,
   }) async {
     if (order.isEmpty) return const <String, int>{};
+    // Окно считаем от числа узлов, а не берём фиксированным. Ядро проверяет
+    // участников пачками по десять и на каждую даёт до пяти секунд; на трёх
+    // десятках нод, которые сейчас приходят в подписке, прежние 25 секунд
+    // обрывали проверку на последней пачке — и целая её треть объявлялась
+    // неработающей, хотя ядро до неё просто не дошло.
+    final expected = only ?? order.toSet();
+    final batches = (order.length + 9) ~/ 10;
+    final window = timeout ??
+        Duration(seconds: (8 * batches + 12).clamp(25, 90));
 
     final completer = Completer<Map<String, int>>();
     StreamSubscription<dynamic>? sub;
@@ -1507,17 +1519,18 @@ class TunnelService {
             // забота вызывающего, здесь отдаём как есть.
             final remark = order[index];
             if (remark.isEmpty) continue;
+            if (!expected.contains(remark)) continue;
             // Это честный URLTest ядра: время полного запроса к
             // http://cp.cloudflare.com/ через VLESS — ровно то же число, что
             // показывает Hiddify.
             collected[remark] = delay;
           }
-          // Все участники ответили — ждать дальше нечего.
-          if (collected.length >= order.length) finish();
+          // Все, кого ждали, ответили — досиживать окно незачем.
+          if (collected.length >= expected.length) finish();
         }
       }, onError: (_) => finish());
 
-      deadline = Timer(timeout, finish);
+      deadline = Timer(window, finish);
       await _client.urlTest(_latencyGroupTag).timeout(_nativeCallTimeout);
       return await completer.future;
     } catch (e) {
@@ -2832,8 +2845,25 @@ class TunnelService {
       // прям грузятся». Точность здесь важнее сотой доли: главное, что
       // показывает эта проверка, — работает локация или нет, а число по
       // текущей сессии всё равно уточняет живой замер через туннель.
-      final best = await _collectGroupDelays(
-          usable.map((e) => e.remark).toList(growable: false));
+      final order = usable.map((e) => e.remark).toList(growable: false);
+      final best = await _collectGroupDelays(order);
+
+      // Второй проход — только по молчавшим. Одного промаха мало, чтобы
+      // объявить локацию мёртвой: ядро проверяет участников пачками, и узел,
+      // чья пачка не уложилась в окно, молчит ровно так же, как настоящий
+      // труп. Сессия уже поднята, повтор стоит секунды — а цена ошибки это
+      // честно работающий ключ, помеченный на экране как нерабочий.
+      final silent = <String>{
+        for (final remark in order)
+          if (remark.isNotEmpty && best[remark] == null) remark,
+      };
+      if (silent.isNotEmpty) {
+        unawaited(AppLogService.instance.log(
+            'Проверка всех локаций: повторный проход по ${silent.length} '
+            'молчавшим из ${order.length}'));
+        final retry = await _collectGroupDelays(order, only: silent);
+        best.addAll(retry);
+      }
 
       for (final profile in usable) {
         if (profile.remark.isEmpty) continue;
@@ -2841,7 +2871,7 @@ class TunnelService {
         results[profile.remark] = delay != null
             ? RealCheckResult(ok: true, latencyMs: delay)
             : const RealCheckResult(
-                ok: false, error: 'VLESS-сервис не отвечает на запрос');
+                ok: false, error: 'не ответил на две проверки подряд');
       }
       unawaited(AppLogService.instance.log(
           'Проверка всех локаций: '
