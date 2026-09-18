@@ -1,10 +1,5 @@
-// [НОВОЕ — Windows real-VPN] См. докстринг в singbox_runtime.dart.
-//
-// Это ровно тот же `SingboxClient`, что вызывался раньше напрямую из
-// tunnel_service.dart, — просто спрятанный за интерфейсом. Каждый метод
-// здесь делает ОДНО: вызывает соответствующий метод настоящего плагина и
-// возвращает результат. Никакой дополнительной логики, никаких изменений
-// поведения на Android.
+// Реализация SingboxRuntimeClient поверх штатного плагина: каждый метод
+// просто форвардит вызов в SingboxClient.
 import 'package:flutter_singbox_client/flutter_singbox_client.dart';
 
 import 'singbox_runtime.dart';
@@ -23,6 +18,9 @@ class AndroidSingboxRuntime implements SingboxRuntimeClient {
 
   @override
   Stream<dynamic> get faultStream => _client.faultStream;
+
+  @override
+  Stream<dynamic> get coreLogStream => _client.coreLogStream;
 
   @override
   Future<dynamic> getServiceState() => _client.getServiceState();

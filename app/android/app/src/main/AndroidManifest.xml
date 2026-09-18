@@ -1,47 +1,28 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-    <!-- [ИСПРАВЛЕНО — критичный баг, ломал ВСЁ приложение в релизе]
-         debug/profile AndroidManifest.xml Flutter-шаблона объявляют
-         INTERNET сами по себе — но ТОЛЬКО для debug/profile сборок ("The
-         INTERNET permission is required for development"). В release-манифесте
-         (этом файле) разрешения не было вообще. Именно release-APK
-         собирает и подписывает GitHub Actions (build-android.yml, шаг
-         "flutter build apk" с флагом release) и именно его получают
-         реальные пользователи —
-         без явного объявления здесь Android НЕ дал бы приложению открыть ни
-         один сокет: ни вход по email/паролю, ни /user/keys, ни сам
-         VLESS-туннель через flutter_singbox_client физически не смогли бы
-         достучаться до сети, при этом само приложение запускалось бы без
-         видимого краша — просто каждый запрос падал бы с сетевой ошибкой. -->
+    <!-- INTERNET объявлен здесь, а не только в debug/profile-манифестах
+         шаблона Flutter: релизная сборка их не использует, и без этой
+         строки приложение в релизе не откроет ни одного сокета — ни вход,
+         ни /user/keys, ни сам VLESS-туннель. -->
     <uses-permission android:name="android.permission.INTERNET"/>
-    <!-- [НОВОЕ] Требуется под capable VpnService/foreground-сервис пакета
-         flutter_singbox_client — без него системный туннель не поднимется
-         на Android (сервис, который держит tun-интерфейс, обязан быть
-         foreground-сервисом с этим типом на Android 14+/API 34+, иначе ОС
-         останавливает такой сервис при уходе приложения в фон). -->
+    <!-- Нужны foreground-сервису flutter_singbox_client, который держит
+         tun-интерфейс: на Android 14+ такой сервис обязан быть foreground с
+         соответствующим типом, иначе ОС останавливает его при уходе
+         приложения в фон. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
-    <!-- [ИСПРАВЛЕНО — причина "PlatformException(CONNECT_FAILED, Service
-         failed to start)"] Начиная с Android 14 (API 34) каждый
-         android:foregroundServiceType требует СВОЁ отдельное разрешение.
-         Для типа "vpn" (его использует нативный foreground-сервис пакета
-         flutter_singbox_client, держащий tun-интерфейс) это разрешение —
-         FOREGROUND_SERVICE_VPN. Без него система отказывает в запуске
-         foreground-сервиса с этим типом ещё до того, как код доходит до
-         поднятия самого VPN — отсюда ошибка сразу на всех серверах, а не
-         на каком-то одном ключе. -->
+    <!-- С Android 14 (API 34) каждый android:foregroundServiceType требует
+         своё разрешение; для типа "vpn" это FOREGROUND_SERVICE_VPN. Без
+         него система отказывает в запуске сервиса ещё до поднятия самого
+         VPN — PlatformException(CONNECT_FAILED) сразу на всех серверах. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_VPN"/>
-    <!-- [НОВОЕ] Android 13+ (API 33+) требует отдельное runtime-разрешение
-         на показ ЛЮБЫХ уведомлений, включая постоянное уведомление туннеля
-         (NotificationConfig в tunnel_service.dart, showTrafficStats/
-         showStopButton) — без объявления этого разрешения в манифесте
-         системное уведомление о статусе VPN не показывалось бы на новых
-         версиях Android, даже если сам туннель работает. -->
+    <!-- Android 13+ (API 33+) требует runtime-разрешение на любые
+         уведомления, включая постоянное уведомление туннеля
+         (NotificationConfig в tunnel_service.dart). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <!-- [ИСПРАВЛЕНО] Указано как обязательный шаг в NATIVE_SETUP.md, но не
-         было добавлено: без этого разрешения InstalledApps.getInstalledApps()
-         на экране split-tunnel (split_tunnel_screen.dart) вернёт пустой
-         список или кинет исключение на Android 11+ (пакетная видимость). -->
+    <!-- Без этого разрешения InstalledApps.getInstalledApps() на экране
+         split-tunnel вернёт пустой список или бросит исключение на
+         Android 11+ (пакетная видимость). -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission"/>
     <application
@@ -86,18 +67,13 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
-        <!-- [НОВОЕ] Нужно для кнопки "Открыть в Hiddify" (connect_screen.dart
-             ::_openInHiddify(), TunnelService.buildHiddifyImportUri()).
-             QUERY_ALL_PACKAGES выше формально уже даёт эту видимость, но это
-             чувствительное разрешение, которое Google Play отдельно
-             проверяет при публикации (нужно обоснование в Play Console на
-             каждое использование) — начиная с Android 11 (API 30) есть
-             более узкий и предпочтительный способ для конкретно этого
-             случая: явно объявить именно ту схему (hiddify://), которую
-             реально запускаем через url_launcher. Без этой записи
-             `launchUrl()`/`canLaunchUrl()` на API 30+ могут не увидеть
-             установленный Hiddify и всегда уходить в фолбэк на Google Play,
-             даже если приложение реально стоит на устройстве. -->
+        <!-- Схема для кнопки "Открыть в Hiddify"
+             (TunnelService.buildHiddifyImportUri). QUERY_ALL_PACKAGES выше
+             эту видимость формально даёт, но узкое объявление схемы
+             предпочтительнее: Google Play отдельно проверяет обоснование
+             QUERY_ALL_PACKAGES, а без этой записи canLaunchUrl() на API 30+
+             может не увидеть установленный Hiddify и уйти в фолбэк на
+             Google Play. -->
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="hiddify"/>

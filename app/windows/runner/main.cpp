@@ -25,18 +25,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
-  // [ИЗМЕНЕНО] Было 1280x720 в углу экрана (10,10) — для приложения с
-  // мобильным (телефонным) UI это выглядело как гигантское почти пустое
-  // окно. Берём компактный "телефонный" размер и центрируем окно на
-  // экране пользователя вместо фиксированного угла.
+  // Интерфейс рассчитан на телефонный экран, поэтому окно компактное и
+  // центрированное, а не 1280x720 в углу экрана.
   const int screen_w = ::GetSystemMetrics(SM_CXSCREEN);
   const int screen_h = ::GetSystemMetrics(SM_CYSCREEN);
   const unsigned int window_w = 420;
-  // [ИЗМЕНЕНО] Было 860 — по просьбе пользователя окно слишком вытянуто по
-  // вертикали на обычном Full HD экране (почти во весь экран по высоте).
-  // 720 по-прежнему укладывает весь UI без внутренней прокрутки контента
-  // ConnectScreen, но оставляет разумные отступы сверху/снизу на типичном
-  // 1080p мониторе. Пользователь всё ещё может вручную растянуть окно.
+  // 720 укладывает весь интерфейс без внутренней прокрутки ConnectScreen и
+  // оставляет отступы сверху и снизу на 1080p мониторе; окно при этом
+  // можно растянуть вручную.
   const unsigned int window_h = 720;
   Win32Window::Point origin(
       screen_w > static_cast<int>(window_w)

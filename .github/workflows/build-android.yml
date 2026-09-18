@@ -35,17 +35,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # [НОВОЕ — исправление сбоя CI "429 Too Many Requests" от Maven
-      # Central/Gradle Plugin Portal] Раньше зависимости Gradle (Kotlin
-      # Gradle Plugin, AGP и т.д.) скачивались с нуля на КАЖДОМ запуске
-      # workflow — ни разу не кэшировались. Тысячи раннеров GitHub Actions
-      # по всему миру одновременно дёргают те же самые зеркала за теми же
-      # версиями плагинов, и repo.maven.apache.org/plugins.gradle.org
-      # иногда отвечают 429 (rate limit) под этой нагрузкой. Кэш не
-      # устраняет 429 полностью (первый запуск после инвалидации кэша
-      # всё равно качает с нуля), но резко снижает частоту сетевых
-      # обращений на последующих запусках — кэш переживает между запусками
-      # workflow, пока не поменяется gradle-wrapper.properties/*.gradle.kts.
+      # Кэш Gradle: без него зависимости (Kotlin Gradle Plugin, AGP) качаются с
+      # нуля на каждом запуске, а под нагрузкой repo.maven.apache.org и
+      # plugins.gradle.org отвечают 429. Кэш не убирает 429 полностью — первый
+      # запуск после инвалидации всё равно качает всё, — но резко снижает число
+      # сетевых обращений.
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -67,12 +61,8 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
-      # [ИСПРАВЛЕНО — реальный баг] pubspec.yaml настраивает
-      # flutter_launcher_icons (генерация mipmap/AppIcon.appiconset и т.д.
-      # из assets/icon/app_icon*.png), но ни один шаг workflow ни разу не
-      # запускал сам генератор — до этой правки CI молча собирал APK со
-      # старой стандартной иконкой Flutter, а не с фирменной, независимо
-      # от того, что лежит в assets/icon/.
+      # pubspec.yaml настраивает flutter_launcher_icons, но генератор нужно
+      # запустить явно: иначе APK собирается со стандартной иконкой Flutter.
       - name: Generate app icons
         run: dart run flutter_launcher_icons
 
@@ -82,31 +72,15 @@ jobs:
       - name: Run tests
         run: flutter test --coverage || true
 
-      # [ИСПРАВЛЕНО — сбой "429 Too Many Requests" от Maven Central при
-      # резолве Kotlin Gradle Plugin] flutter build apk сам ретраит Gradle
-      # один раз при сетевой ошибке (это видно в логе — "Retrying Gradle
-      # Build: #1"), но если внешний репозиторий отвечает 429 два раза
-      # подряд с интервалом в доли секунды, одного повтора недостаточно.
-      # 429 — это ВРЕМЕННЫЙ отказ (rate limit), а не ошибка в проекте:
-      # обёртка nick-fields/retry делает до 3 попыток с паузой 30 секунд
-      # между ними, за которые лимит на стороне Maven Central/Gradle
-      # Plugin Portal успевает сброситься.
-      # [ИСПРАВЛЕНО — реальная причина "приложение будто всё ещё ходит на
-      # старый API" после смены домена api.vpnonline.shop -> api.vpnonline.su]
-      # Раньше сюда передавался --dart-define=API_BASE_URL=${{ secrets.API_BASE_URL }}
-      # — значение секрета ПОЛНОСТЬЮ перекрывает дефолт из кода
-      # (String.fromEnvironment в main.dart), это так и задумано в Dart. Домен
-      # в коде поправили на api.vpnonline.su, а секрет API_BASE_URL в
-      # настройках репозитория остался старым (секреты не меняются сами при
-      # правке кода) — поэтому реально собранный APK всё это время тянул
-      # старый, уже мёртвый api.vpnonline.shop, хотя в исходниках стоял
-      # правильный su-домен. Отсюда и "Сервер не отвечает" на "Серверах":
-      # приложение стучалось не туда физически, а не просто получало
-      # ошибку авторизации, как в предыдущем баге.
-      # Раз этот адрес и так не секрет (см. DOCUMENTATION.md, таблица
-      # переменных), убираем его из --dart-define вовсе: теперь единственный
-      # источник правды — дефолт в main.dart, никакого секрета, который
-      # можно забыть обновить, для домена больше нет.
+      # flutter build apk сам ретраит Gradle один раз при сетевой ошибке, но
+      # при двух 429 подряд этого мало. 429 — временный отказ, а не ошибка
+      # проекта, поэтому обёртка даёт до 3 попыток с паузой 30 секунд.
+      #
+      # Адрес API через --dart-define здесь не передаётся: значение секрета
+      # полностью перекрывает дефолт из main.dart, и забытый в настройках
+      # репозитория старый домен уводил бы сборку на мёртвый адрес. Адрес не
+      # секрет (см. DOCUMENTATION.md), так что единственный источник правды —
+      # дефолт в main.dart.
       - name: Build debug APK
         uses: nick-fields/retry@v3
         with:
@@ -121,11 +95,6 @@ jobs:
           name: app-debug-apk
           path: app/build/app/outputs/flutter-apk/app-debug.apk
 
-      # [ПРОВЕРЕНО ПОЛЬЗОВАТЕЛЕМ] На скриншоте Secrets имя было обрезано
-      # ("ANDROID_KEYSTO…"), и я ошибочно принял его за короткое
-      # ANDROID_KEYSTORE — на самом деле секрет называется
-      # ANDROID_KEYSTORE_BASE64, как и было в исходном workflow. Возвращаю
-      # оригинальное имя.
       - name: Prepare signed release (if keystore provided)
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}

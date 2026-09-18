@@ -17,9 +17,22 @@ const newsChannelUrl = 'https://t.me/vpnonline_info';
 class SupportScreen extends StatelessWidget {
   const SupportScreen({super.key});
 
-  Future<void> _open(String url) async {
+  Future<void> _open(BuildContext context, String url) async {
+    // Пробуем открыть сразу, не спрашивая canLaunchUrl: на Android 11+ он
+    // отвечает false и для ссылок, которые открываются (видимость пакетов).
+    // Если не вышло — говорим об этом, а не оставляем нажатие без ответа.
     final uri = Uri.parse(url);
-    if (await canLaunchUrl(uri)) await launchUrl(uri, mode: LaunchMode.externalApplication);
+    var opened = false;
+    try {
+      opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      opened = false;
+    }
+    if (!opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${tr('Не удалось открыть ссылку:')} $url')),
+      );
+    }
   }
 
   @override
@@ -41,35 +54,35 @@ class SupportScreen extends StatelessWidget {
                 icon: Icons.public_rounded,
                 title: tr('Сайт'),
                 subtitle: 'vpnonline.su',
-                onTap: () => _open(websiteUrl),
+                onTap: () => _open(context, websiteUrl),
               ),
               _ContactCard(
                 color: const Color(0xFF229ED9),
                 icon: Icons.send_rounded,
                 title: tr('Бот Telegram'),
                 subtitle: 't.me/VPNonLineRoBot',
-                onTap: () => _open(telegramBotUrl),
+                onTap: () => _open(context, telegramBotUrl),
               ),
               _ContactCard(
                 gradient: const [Color(0xFF2B6BFF), Color(0xFF00C2FF)],
                 icon: Icons.chat_bubble_rounded,
                 title: tr('Бот MAX'),
                 subtitle: 'max.ru/se13572942_bot',
-                onTap: () => _open(maxBotUrl),
+                onTap: () => _open(context, maxBotUrl),
               ),
               _ContactCard(
                 gradient: const [AppColors.violet, AppColors.violet2],
                 icon: Icons.support_agent_rounded,
                 title: tr('Бот тех. поддержки'),
                 subtitle: 't.me/VPNonLineSupportRoBot',
-                onTap: () => _open(supportBotUrl),
+                onTap: () => _open(context, supportBotUrl),
               ),
               _ContactCard(
                 color: const Color(0xFF229ED9),
                 icon: Icons.campaign_rounded,
                 title: tr('Канал новостей'),
                 subtitle: 't.me/vpnonline_info',
-                onTap: () => _open(newsChannelUrl),
+                onTap: () => _open(context, newsChannelUrl),
               ),
               SectionTitle(tr('О приложении')),
               NeonCard(

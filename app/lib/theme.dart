@@ -1,10 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-/// Токены бренда VPNonLine, сведённые 1:1 по присланному HTML-макету
-/// (vpnonline-app-mockup-2.html): --bg/--bg-card/--violet/--violet-2/
-/// --violet-glow/--violet-dim/--text/--text-dim/--danger/--success,
-/// шрифты Orbitron (display) + Inter (текст).
+/// Токены бренда: цвета фона/акцентов/текста и шрифты Orbitron (заголовки)
+/// + Inter (основной текст).
 class AppColors {
   static const bg = Color(0xFF050308);
   static const bgCard = Color(0xFF0F0A1C);
@@ -30,9 +28,8 @@ class AppColors {
       ];
 }
 
-/// Шрифт заголовков/лейблов/цифр — Orbitron, как в макете (лого, статус
-/// подключения, суммы, screen-label). Обычный текст остаётся на Inter
-/// через основной textTheme темы.
+/// Шрифт заголовков, лейблов и цифр — Orbitron. Обычный текст идёт на
+/// Inter через основной textTheme темы.
 TextStyle orbitron({
   double fontSize = 14,
   FontWeight fontWeight = FontWeight.w700,

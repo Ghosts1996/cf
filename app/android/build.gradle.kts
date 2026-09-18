@@ -20,11 +20,10 @@ subprojects {
 }
 
 subprojects {
-    // [ИСПРАВЛЕНО] :app уже задаёт compileSdk = 36 сам в app/build.gradle.kts и к моменту
-    // этого блока уже вычислен (см. evaluationDependsOn(":app") выше) — повторный
-    // afterEvaluate на уже вычисленном проекте Gradle запрещает и роняет сборку
-    // ("Cannot run Project.afterEvaluate(Action) when the project is already evaluated").
-    // Патчим compileSdk только остальным подпроектам (плагинам), :app пропускаем.
+    // Патчим compileSdk только плагинам: :app задаёт его сам и к этому моменту
+    // уже вычислен (evaluationDependsOn(":app") выше), а повторный
+    // afterEvaluate на вычисленном проекте Gradle роняет сборку с
+    // "Cannot run Project.afterEvaluate(Action) when the project is already evaluated".
     if (project.name != "app") {
         afterEvaluate {
             val android = extensions.findByName("android") as? com.android.build.gradle.BaseExtension

@@ -3,11 +3,9 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import '../theme.dart';
 
-/// Общие компоненты, воспроизводящие CSS-классы из макета
-/// vpnonline-app-mockup-2.html: .app-header/.brand, .neon-ring icon badge
-/// (.menu-row .ic), .server-pill, .stat-card, .badge, .toggle, .btn-pill,
-/// .plan-card, .key-card/.contact-card, .section-title, .header-divider.
-/// Один источник правды для стиля — экраны просто собирают их.
+/// Общие неоновые компоненты интерфейса: шапка, бейджи, карточки,
+/// переключатели, кнопки-пилюли, строка сервера. Один источник правды
+/// для стиля — экраны просто собирают их.
 
 /// Шапка экрана: кольцо-лого + "VPN"+"onLine" + кнопка справа (меню/назад).
 class AppHeader extends StatelessWidget {
@@ -24,28 +22,17 @@ class AppHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // [НОВОЕ — "нет кнопок назад" на Windows] AppHeader раньше давал только
-    // один слот — `trailing`. На части экранов туда посажена СОБСТВЕННАЯ
-    // кнопка экрана (обновить на "Выбор сервера", меню на "Подключение"),
-    // а не "назад" — экран в принципе не мог показать кнопку назад. На
-    // Android это было не страшно: у системы всегда есть аппаратная кнопка/
-    // жест "назад", он работает независимо от того, что нарисовано в
-    // интерфейсе. На Windows такого системного "назад" нет вообще — экран
-    // без trailing=arrow_back оказывался тупиком, из него нельзя было выйти
-    // ничем, кроме перезапуска приложения. Показываем отдельную кнопку
-    // "назад" слева от лого, только когда экран реально можно закрыть
-    // (`Navigator.canPop`) и только на Windows — на Android ничего не
-    // меняется (там это надёжно решает системная навигация, как и раньше).
+    // Кнопка "назад" слева от лого. Нужна только на Windows: там нет
+    // системного жеста/кнопки "назад", а слот `trailing` у части экранов
+    // занят собственной кнопкой (обновить, меню), и экран становится
+    // тупиком. На Android навигацию закрывает система.
     final showBackButton =
         !kIsWeb && Platform.isWindows && Navigator.canPop(context);
     return Column(
       children: [
-        // [ИСПРАВЛЕНО] Раньше отступ сверху был всего 4px — на части
-        // реальных устройств (вырез камеры / изогнутый угол экрана вне
-        // зоны status bar, которую SafeArea не всегда полностью учитывает
-        // на некоторых прошивках) заголовок визуально "залезал" под вырез.
-        // Увеличено до 14px — достаточный запас на большинстве устройств,
-        // при этом не создаёт заметной лишней пустоты там, где выреза нет.
+        // 14px сверху, а не 4: на устройствах с вырезом камеры или изогнутым
+        // углом SafeArea не всегда покрывает эту зону, и заголовок подлезает
+        // под вырез.
         Padding(
           padding: const EdgeInsets.fromLTRB(4, 14, 4, 0),
           child: Row(
@@ -378,6 +365,7 @@ class ServerPill extends StatelessWidget {
     required this.code,
     required this.name,
     required this.pingLabel,
+    this.techLabel,
     this.pingColor = AppColors.success,
     this.trailing,
     this.onTap,
@@ -387,6 +375,11 @@ class ServerPill extends StatelessWidget {
   final String code;
   final String name;
   final String pingLabel;
+
+  /// Техническая строка под пингом — «VLESS / TCP / REALITY». Ровно та же
+  /// подпись, что показывают другие клиенты: протокол, транспорт и тип
+  /// шифрования канала. null — подписывать нечем.
+  final String? techLabel;
   final Color pingColor;
   final Widget? trailing;
   final VoidCallback? onTap;
@@ -418,9 +411,30 @@ class ServerPill extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                Text(name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 2),
-                Text(pingLabel, style: TextStyle(fontSize: 10, color: pingColor)),
+                // Подпись под именем теперь несёт и протокол, и транспорт, и
+                // она стала длиннее прежнего «172 мс · проверено». Без
+                // обрезки длинная строка вылезала бы за карточку жёлтой
+                // полосой переполнения.
+                Text(pingLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 10, color: pingColor)),
+                if (techLabel != null && techLabel!.isNotEmpty) ...[
+                  const SizedBox(height: 1),
+                  Text(techLabel!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 9,
+                          letterSpacing: 0.4,
+                          color: AppColors.textDim)),
+                ],
               ],
             ),
           ),
