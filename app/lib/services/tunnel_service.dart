@@ -3775,6 +3775,14 @@ class TunnelService {
     return profiles;
   }
 
+  /// Схемы ссылок, по которым видно, что перед нами список узлов подписки, —
+  /// в открытом виде или под base64. Разбираем мы не все из них, но узнать
+  /// список нужно в любом случае: нераспознанные строки попадают в
+  /// [_cachedOthers] и честно показываются на экране как неподдерживаемые.
+  static final RegExp _nodeLinkPattern = RegExp(
+      r'(?:vless|vmess|trojan|ss|ssr|hysteria2?|hy2|tuic|wireguard|wg|ssh)://',
+      caseSensitive: false);
+
   List<_ParsedVless> _parseSubscriptionBody(String body) {
     String text = body.trim();
     // Сбрасываем на каждый разбор: иначе после подписки с hysteria2-нодой
@@ -3790,13 +3798,18 @@ class TunnelService {
       if (fromJson.isNotEmpty) return fromJson;
     }
 
-    if (!text.contains('vless://')) {
+    // Раскрываем base64 по любой ссылке узла, а не только по vless://.
+    // Проверка на одну схему разваливалась на подписке, где vless-узлов нет
+    // вовсе: тело оставалось base64-строкой, ни одна ссылка из неё не
+    // разбиралась, и экран показывал пустой список там, где другие клиенты
+    // показывали десяток trojan- или hysteria2-узлов.
+    if (!_nodeLinkPattern.hasMatch(text)) {
       try {
         final normalized = text.replaceAll('-', '+').replaceAll('_', '/');
         final padded = normalized.padRight(
             normalized.length + (4 - normalized.length % 4) % 4, '=');
         final decoded = utf8.decode(base64.decode(padded));
-        if (decoded.contains('vless://')) text = decoded;
+        if (_nodeLinkPattern.hasMatch(decoded)) text = decoded;
       } catch (_) {}
     }
 
@@ -3847,12 +3860,22 @@ class TunnelService {
     }
   }
 
-  /// Достаёт vless-профили из JSON-конфига sing-box — из `{"outbounds":[...]}`
-  /// или из голого массива outbound'ов. Молча пропускает outbound'ы других
-  /// типов (direct/block/urltest) и vless-записи без полей, необходимых для
-  /// подключения (те же проверки, что в `_ParsedVless.tryParse`). Ошибки
-  /// парсинга наружу не бросает: вызывающий `_parseSubscriptionBody` в этом
-  /// случае идёт обычным путём через vless://-ссылки и base64.
+  /// Типы outbound'ов, которые мы умеем собрать обратно в конфиг. Ровно те же
+  /// протоколы, что разбираются из ссылок, — см. `_ParsedVless.tryParseAny`.
+  static const _jsonOutboundTypes = <String>{
+    'vless',
+    'vmess',
+    'trojan',
+    'shadowsocks',
+    'hysteria2',
+  };
+
+  /// Достаёт профили из JSON-конфига sing-box — из `{"outbounds":[...]}`
+  /// или из голого массива outbound'ов. Молча пропускает служебные outbound'ы
+  /// (direct/block/urltest) и записи без полей, необходимых для подключения
+  /// (те же проверки, что в `_ParsedVless.tryParseAny`). Ошибки парсинга
+  /// наружу не бросает: вызывающий `_parseSubscriptionBody` в этом случае
+  /// идёт обычным путём через ссылки и base64.
   List<_ParsedVless> _parseSingboxJsonOutbounds(String text) {
     try {
       final decoded = jsonDecode(text);
@@ -3868,17 +3891,24 @@ class TunnelService {
       final result = <_ParsedVless>[];
       for (final item in outbounds) {
         if (item is! Map<String, dynamic>) continue;
-        if ((item['type'] as String?)?.toLowerCase() != 'vless') continue;
+        final type = (item['type'] as String?)?.toLowerCase();
+        if (type == null || !_jsonOutboundTypes.contains(type)) continue;
 
-        final uuid = item['uuid'] as String?;
         final host = item['server'] as String?;
         final port = (item['server_port'] as num?)?.toInt();
-        if (uuid == null ||
-            uuid.isEmpty ||
-            host == null ||
-            host.isEmpty ||
-            port == null ||
-            port == 0) {
+        if (host == null || host.isEmpty || port == null || port == 0) continue;
+
+        // Чем узел удостоверяет клиента: uuid у vless и vmess, пароль у
+        // остальных. Запись без своего обязательного поля пропускаем — ядро
+        // такой outbound всё равно не примет.
+        final uuid = item['uuid'] as String? ?? '';
+        final password = item['password'] as String?;
+        final method = item['method'] as String?;
+        if ((type == 'vless' || type == 'vmess') && uuid.isEmpty) continue;
+        if (type != 'vless' && type != 'vmess') {
+          if (password == null || password.isEmpty) continue;
+        }
+        if (type == 'shadowsocks' && (method == null || method.isEmpty)) {
           continue;
         }
 
@@ -3915,8 +3945,17 @@ class TunnelService {
 
         final alpnList = tls?['alpn'];
 
+        final obfs = item['obfs'] as Map<String, dynamic>?;
+
         result.add(_ParsedVless(
+          protocol: type,
           uuid: uuid,
+          password: password,
+          method: method,
+          vmessSecurity: item['security'] as String?,
+          alterId: (item['alter_id'] as num?)?.toInt() ?? 0,
+          obfsType: obfs?['type'] as String?,
+          obfsPassword: obfs?['password'] as String?,
           host: host,
           port: port,
           security: security,

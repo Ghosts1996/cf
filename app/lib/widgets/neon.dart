@@ -405,9 +405,20 @@ class ServerPill extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                Text(name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 2),
-                Text(pingLabel, style: TextStyle(fontSize: 10, color: pingColor)),
+                // Подпись под именем теперь несёт и протокол, и транспорт, и
+                // она стала длиннее прежнего «172 мс · проверено». Без
+                // обрезки длинная строка вылезала бы за карточку жёлтой
+                // полосой переполнения.
+                Text(pingLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 10, color: pingColor)),
               ],
             ),
           ),

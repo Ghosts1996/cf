@@ -85,6 +85,46 @@ void main() {
       expect(locations.first.security, 'tls');
     });
 
+    test('base64-подписка без единого vless всё равно раскрывается', () async {
+      // Гейт раскрытия base64 раньше смотрел только на vless://, и подписка,
+      // где vless-узлов нет вовсе, оставалась нераспознанной строкой: экран
+      // показывал пустой список там, где другие клиенты показывали узлы.
+      const onlyOthers =
+          'dHJvamFuOi8vc2VjcmV0QHRyLmV4YW1wbGUuY29tOjQ0Mz9zZWN1cml0eT10bHMmc25pPWV4YW1wbGUuY29tJnR5cGU9d3MmcGF0aD0lMkZ3cyNUcm9qYW4gT25seQpoeXN0ZXJpYTI6Ly9wYXNzQGVlLmV4YW1wbGUuY29tOjQ0Mz9zbmk9ZXhhbXBsZS5jb20jRXN0b25pYQpzczovL1lXVnpMVEkxTmkxblkyMDZjR0Z6Y3dAbHQuZXhhbXBsZS5jb206ODM4OCNMaXRodWFuaWE=';
+      final locations = await tunnel.listSubscriptionLocations(onlyOthers);
+      expect(locations.map((l) => l.remark),
+          ['Trojan Only', 'Estonia', 'Lithuania']);
+      expect(locations.map((l) => l.protocol),
+          ['trojan', 'hysteria2', 'shadowsocks']);
+      expect(locations.every((l) => l.supported), isTrue);
+    });
+
+    test('JSON-конфиг sing-box отдаёт не только vless-outbound\'ы', () async {
+      const json = '''
+{"outbounds":[
+  {"type":"vless","tag":"JSON VLESS","server":"de.example.com","server_port":443,
+   "uuid":"11111111-1111-1111-1111-111111111111",
+   "tls":{"enabled":true,"server_name":"example.com"}},
+  {"type":"trojan","tag":"JSON Trojan","server":"tr.example.com","server_port":443,
+   "password":"secret","tls":{"enabled":true,"server_name":"example.com"},
+   "transport":{"type":"ws","path":"/ws"}},
+  {"type":"shadowsocks","tag":"JSON SS","server":"lt.example.com","server_port":8388,
+   "method":"aes-256-gcm","password":"pass"},
+  {"type":"hysteria2","tag":"JSON HY2","server":"ee.example.com","server_port":443,
+   "password":"pass","tls":{"enabled":true,"server_name":"example.com"}},
+  {"type":"direct","tag":"direct"}
+]}
+''';
+      final locations = await tunnel.listSubscriptionLocations(json);
+      expect(locations.map((l) => l.remark),
+          ['JSON VLESS', 'JSON Trojan', 'JSON SS', 'JSON HY2']);
+      expect(locations.map((l) => l.protocol),
+          ['vless', 'trojan', 'shadowsocks', 'hysteria2']);
+      final trojan = locations.firstWhere((l) => l.protocol == 'trojan');
+      expect(trojan.transport, 'ws');
+      expect(trojan.host, 'tr.example.com');
+    });
+
     test('vmess разбирается из base64-JSON', () async {
       const link =
           'vmess://eyJ2IjoiMiIsInBzIjoiVm1lc3MgTm9kZSIsImFkZCI6InZtLmV4YW1wbGUuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoiMzMzMzMzMzMtMzMzMy0zMzMzLTMzMzMtMzMzMzMzMzMzMzMzIiwiYWlkIjoiMCIsInNjeSI6ImF1dG8iLCJuZXQiOiJ3cyIsImhvc3QiOiJ2bS5leGFtcGxlLmNvbSIsInBhdGgiOiIvdm0iLCJ0bHMiOiJ0bHMifQ==';

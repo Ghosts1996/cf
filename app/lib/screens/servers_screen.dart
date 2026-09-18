@@ -86,7 +86,8 @@ class _ServersScreenState extends State<ServersScreen> {
         int port,
         String security,
         String? sni,
-        String transport
+        String transport,
+        String protocol
       })> _realEndpoints = {};
 
   // Пинг обновляется всё время, пока экран смонтирован. Внутри IndexedStack
@@ -460,6 +461,12 @@ class _ServersScreenState extends State<ServersScreen> {
   /// Адреса мержим, а не заменяем карту целиком: метод вызывается на каждом
   /// цикле замера, и один неудачный прогон (сеть моргнула, подписка не
   /// отдалась) стирал бы уже найденные — экран откатывался на общий запасной.
+  /// Короткая подпись протокола под именем локации. Разбор хранит протокол
+  /// так, как он называется в конфиге ядра, а на карточке места мало — для
+  /// shadowsocks показываем то же «ss», что стоит в самой ссылке подписки.
+  static String _protocolLabel(String protocol) =>
+      protocol == 'shadowsocks' ? 'ss' : protocol;
+
   void _applySubscriptionLocations(List<SubscriptionLocation> locations) {
     final endpoints = <String,
         ({
@@ -467,7 +474,8 @@ class _ServersScreenState extends State<ServersScreen> {
           int port,
           String security,
           String? sni,
-          String transport
+          String transport,
+          String protocol
         })>{};
     final unsupported = <String, String>{};
     final extra = <Map<String, dynamic>>[];
@@ -490,6 +498,7 @@ class _ServersScreenState extends State<ServersScreen> {
           security: location.security ?? 'none',
           sni: location.sni,
           transport: location.transport ?? 'tcp',
+          protocol: location.protocol,
         );
       } else {
         unsupported[key] = location.protocol;
@@ -1287,14 +1296,23 @@ class _ServersScreenState extends State<ServersScreen> {
                 // наравне с рабочими.
                 final isRealityOnly =
                     _realEndpoints[id]?.security == 'reality';
-                // Транспорт показываем, когда он не голый TCP: по подписке
-                // сразу видно, какая локация ходит через XHTTP, а какая нет,
-                // и почему одна из них может быть недоступна текущему ядру.
-                final transport = _realEndpoints[id]?.transport;
+                // Протокол и транспорт подписываем прямо под именем
+                // локации. Протокол — всегда: подписка давно перестала быть
+                // однородной, в ней рядом стоят vless, trojan, vmess, ss и
+                // hysteria2, и по одному имени узла не понять, чем он
+                // поднимается. Транспорт — только когда он не голый TCP:
+                // сразу видно, какая локация ходит через XHTTP или gRPC и
+                // почему она может быть недоступна текущему ядру.
+                final endpoint = _realEndpoints[id];
+                final protocol = endpoint?.protocol;
+                final transport = endpoint?.transport;
+                final detailParts = <String>[
+                  if (protocol != null && protocol.isNotEmpty)
+                    _protocolLabel(protocol),
+                  if (transport != null && transport != 'tcp') transport,
+                ];
                 final transportSuffix =
-                    (transport == null || transport == 'tcp')
-                        ? ''
-                        : ' · $transport';
+                    detailParts.isEmpty ? '' : ' · ${detailParts.join(' · ')}';
                 // Единая шкала для всех чисел на этом экране, потому что
                 // число теперь всегда одно и то же по смыслу: задержка,
                 // измеренная ядром через настоящий VLESS-канал по
