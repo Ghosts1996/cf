@@ -1134,7 +1134,7 @@ class TunnelService {
         if (p.remark.isEmpty) continue;
         result.add(SubscriptionLocation(
           remark: p.remark,
-          protocol: 'vless',
+          protocol: p.protocol,
           supported: true,
           host: p.host,
           port: p.port,
@@ -3105,12 +3105,53 @@ class TunnelService {
     // outbound'ом смена страны требовала нового конфига и перезапуска ядра, то
     // есть разрыва туннеля.
     Map<String, dynamic> buildProxyOutbound(_ParsedVless p, String outboundTag) {
+      // Shadowsocks и hysteria2 стоят особняком: у них нет ни транспорта
+      // (ws/grpc/xhttp), ни привычного блока tls — всё описывается своими
+      // полями. Собираем их отдельно и сразу возвращаем.
+      if (p.protocol == 'shadowsocks') {
+        return <String, dynamic>{
+          'type': 'shadowsocks',
+          'tag': outboundTag,
+          'server': p.host,
+          'server_port': p.port,
+          'method': p.method ?? 'aes-256-gcm',
+          'password': p.password ?? '',
+        };
+      }
+      if (p.protocol == 'hysteria2') {
+        return <String, dynamic>{
+          'type': 'hysteria2',
+          'tag': outboundTag,
+          'server': p.host,
+          'server_port': p.port,
+          'password': p.password ?? '',
+          if (p.obfsType != null)
+            'obfs': {
+              'type': p.obfsType,
+              if (p.obfsPassword != null) 'password': p.obfsPassword,
+            },
+          'tls': {
+            'enabled': true,
+            'server_name': p.sni ?? p.host,
+            if (p.allowInsecure) 'insecure': true,
+          },
+        };
+      }
+
       final outbound = <String, dynamic>{
-        'type': 'vless',
+        'type': p.protocol,
         'tag': outboundTag,
         'server': p.host,
         'server_port': p.port,
-        'uuid': p.uuid,
+        // vless и vmess опознают пользователя по uuid, trojan — по паролю.
+        if (p.protocol == 'trojan')
+          'password': p.password ?? ''
+        else
+          'uuid': p.uuid,
+        if (p.protocol == 'vmess') ...{
+          'security': p.vmessSecurity ?? 'auto',
+          if (p.alterId > 0) 'alter_id': p.alterId,
+        },
         if (p.flow != null && p.flow!.isNotEmpty) 'flow': p.flow,
         // Как упаковывать UDP внутри VLESS. Панели линейки x-ui поднимают
         // Xray, а он принимает только XUDP; в «родном» формате sing-box такие
@@ -3118,7 +3159,8 @@ class TunnelService {
         // QUIC, ни звонки в мессенджерах, ни DNS по UDP через туннель.
         // Hiddify подставляет xudp всегда, когда в ссылке нет packetEncoding
         // (ray2sing/vless.go).
-        'packet_encoding': p.packetEncoding ?? 'xudp',
+        if (p.protocol != 'trojan')
+          'packet_encoding': p.packetEncoding ?? 'xudp',
         // «Обход DPI» в том виде, в каком он вообще что-то значит: рвётся на
         // куски наше собственное TLS-рукопожатие к VLESS-серверу — то самое,
         // по которому DPI решает, пропускать соединение или нет. Правило
@@ -3613,13 +3655,13 @@ class TunnelService {
     List<String> extraExcludedPackages = const <String>[],
     List<String> alternateUris = const <String>[],
   }) {
-    final profile = _ParsedVless.tryParse(vlessUri);
+    final profile = _ParsedVless.tryParseAny(vlessUri);
     if (profile == null) {
       throw TunnelException('Ссылка не распознана: $vlessUri');
     }
     final alternates = <_ParsedVless>[];
     for (final uri in alternateUris) {
-      final parsed = _ParsedVless.tryParse(uri);
+      final parsed = _ParsedVless.tryParseAny(uri);
       if (parsed != null) alternates.add(parsed);
     }
     return _buildSingBoxConfig(
@@ -3764,12 +3806,22 @@ class TunnelService {
         .where((line) => line.isNotEmpty)
         .toList();
 
-    // Строки не с vless:// запоминаем отдельно: подключиться к ним нечем, но
-    // и молча выкидывать их нельзя — в подписке с внешними нодами они
-    // попадаются, и пользователь видит их в других клиентах.
+    final result = <_ParsedVless>[];
+    final parsedLines = <String>{};
+    for (final line in allLines) {
+      final parsed = _ParsedVless.tryParseAny(line);
+      if (parsed != null) {
+        result.add(parsed);
+        parsedLines.add(line);
+      }
+    }
+
+    // Строки, которые разобрать не вышло, запоминаем отдельно: подключиться к
+    // ним нечем, но и молча выкидывать их нельзя — пользователь видит эти
+    // узлы в других клиентах и справедливо ждёт их здесь.
     final others = <({String remark, String protocol})>[];
     for (final line in allLines) {
-      if (line.startsWith('vless://')) continue;
+      if (parsedLines.contains(line)) continue;
       final match = RegExp(r'^([a-z][a-z0-9+.\-]*)://').firstMatch(line);
       if (match == null) continue;
       final protocol = match.group(1)!;
@@ -3779,12 +3831,6 @@ class TunnelService {
     }
     _cachedOthers = others;
 
-    final result = <_ParsedVless>[];
-    for (final line in allLines) {
-      if (!line.startsWith('vless://')) continue;
-      final parsed = _ParsedVless.tryParse(line);
-      if (parsed != null) result.add(parsed);
-    }
     return result;
   }
 
@@ -4391,6 +4437,7 @@ class _VpnServiceStartException implements Exception {
 
 class _ParsedVless {
   _ParsedVless({
+    this.protocol = 'vless',
     required this.uuid,
     required this.host,
     required this.port,
@@ -4409,10 +4456,43 @@ class _ParsedVless {
     this.transportPath,
     this.packetEncoding,
     this.allowInsecure = false,
+    this.password,
+    this.method,
+    this.vmessSecurity,
+    this.alterId = 0,
+    this.obfsType,
+    this.obfsPassword,
     required this.remark,
   });
 
+  /// Протокол узла: vless | trojan | vmess | shadowsocks | hysteria2.
+  ///
+  /// Класс называется _ParsedVless по историческим причинам — начинался он
+  /// с одного протокола. Общего у всех перечисленных достаточно (адрес, порт,
+  /// TLS, транспорт, имя), чтобы держать их в одной структуре и не плодить
+  /// три почти одинаковых ветки разбора подписки.
+  final String protocol;
+
+  /// Идентификатор пользователя: uuid у vless и vmess. У trojan, shadowsocks
+  /// и hysteria2 вместо него пароль — см. [password].
   final String uuid;
+
+  /// Пароль: trojan, shadowsocks, hysteria2.
+  final String? password;
+
+  /// Метод шифрования shadowsocks (`aes-256-gcm`, `chacha20-ietf-poly1305`...).
+  final String? method;
+
+  /// Шифрование vmess из поля `scy`. null — ядро подставит `auto`.
+  final String? vmessSecurity;
+
+  /// alterId vmess. Ноль у всех современных панелей.
+  final int alterId;
+
+  /// Обфускация hysteria2: тип (сейчас бывает только `salamander`) и пароль.
+  final String? obfsType;
+  final String? obfsPassword;
+
   final String host;
   final int port;
   final String security; // reality | tls | none
@@ -4449,6 +4529,240 @@ class _ParsedVless {
   static bool _isTruthy(String? value) {
     final v = value?.trim().toLowerCase();
     return v == '1' || v == 'true';
+  }
+
+  /// Разбор ссылки любого поддерживаемого протокола.
+  ///
+  /// Сначала пробуем vless (самый частый), затем остальные. Каждый разборщик
+  /// возвращает null, если схема не его, — поэтому порядок здесь не важен.
+  static _ParsedVless? tryParseAny(String line) {
+    return tryParse(line) ??
+        _tryParseTrojan(line) ??
+        _tryParseVmess(line) ??
+        _tryParseShadowsocks(line) ??
+        _tryParseHysteria2(line);
+  }
+
+  /// Имя узла из фрагмента ссылки. Percent-декодирование безопасное: в
+  /// подписках попадаются имена с одиночным «%», который не начинает валидную
+  /// последовательность, и строгий декодер на них падает.
+  static String _fragmentName(Uri uri, String fallback) {
+    if (uri.fragment.isEmpty) return fallback;
+    try {
+      return Uri.decodeComponent(uri.fragment);
+    } catch (_) {
+      return uri.fragment;
+    }
+  }
+
+  /// trojan://пароль@host:port?security=tls&sni=…&type=ws&path=…#имя
+  static _ParsedVless? _tryParseTrojan(String line) {
+    try {
+      final uri = Uri.parse(line);
+      if (uri.scheme != 'trojan') return null;
+      final password = Uri.decodeComponent(uri.userInfo);
+      if (password.isEmpty || uri.host.isEmpty || uri.port == 0) return null;
+      final q = uri.queryParameters;
+      final transport = _transportFromQuery(q);
+      // У trojan TLS включён почти всегда, даже когда в ссылке про него ничего
+      // не сказано: без TLS протокол не работает в принципе.
+      final security = (q['security'] ?? 'tls').toLowerCase();
+      return _ParsedVless(
+        protocol: 'trojan',
+        uuid: '',
+        password: password,
+        host: uri.host,
+        port: uri.port,
+        security: security == 'none' ? 'none' : 'tls',
+        sni: q['sni'] ?? q['peer'],
+        fp: q['fp'],
+        alpn: q['alpn'],
+        transportType: transport.type,
+        transportHost: transport.host,
+        transportPath: transport.path,
+        allowInsecure: _isTruthy(q['allowInsecure'] ?? q['insecure']),
+        remark: _fragmentName(uri, uri.host),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// vmess://<base64 JSON>. Формат придумал v2rayN, и он же стал общим:
+  /// add/port/id/aid/scy/net/type/host/path/tls/sni/alpn/fp/ps.
+  static _ParsedVless? _tryParseVmess(String line) {
+    try {
+      if (!line.startsWith('vmess://')) return null;
+      final payload = line.substring('vmess://'.length).trim();
+      final normalized = payload.replaceAll('-', '+').replaceAll('_', '/');
+      final padded = normalized.padRight(
+          normalized.length + (4 - normalized.length % 4) % 4, '=');
+      final decoded = utf8.decode(base64.decode(padded));
+      final map = jsonDecode(decoded);
+      if (map is! Map<String, dynamic>) return null;
+
+      String? str(String key) {
+        final value = map[key];
+        if (value == null) return null;
+        final text = value.toString().trim();
+        return text.isEmpty ? null : text;
+      }
+
+      final host = str('add');
+      final uuid = str('id');
+      final port = int.tryParse(str('port') ?? '');
+      if (host == null || uuid == null || port == null || port == 0) {
+        return null;
+      }
+      final net = str('net') ?? 'tcp';
+      final headerType = str('type');
+      var transportType = TunnelService._normalizeTransportType(net);
+      // «type»: none у vmess означает отсутствие маскировки, а http — ту же
+      // HTTP-маскировку поверх голого TCP, что и headerType у vless.
+      if (transportType == 'tcp' && headerType == 'http') transportType = 'http';
+      final tls = (str('tls') ?? '').toLowerCase();
+      return _ParsedVless(
+        protocol: 'vmess',
+        uuid: uuid,
+        host: host,
+        port: port,
+        security: tls == 'tls' || tls == 'reality' ? 'tls' : 'none',
+        sni: str('sni') ?? str('host'),
+        fp: str('fp'),
+        alpn: str('alpn'),
+        vmessSecurity: str('scy'),
+        alterId: int.tryParse(str('aid') ?? '0') ?? 0,
+        transportType: transportType,
+        transportHost: str('host'),
+        transportPath: str('path'),
+        allowInsecure: _isTruthy(str('allowInsecure')),
+        remark: str('ps') ?? host,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// ss://… в двух видах: base64(метод:пароль)@host:port и
+  /// base64(метод:пароль@host:port). Второй встречается у старых панелей.
+  static _ParsedVless? _tryParseShadowsocks(String line) {
+    try {
+      if (!line.startsWith('ss://')) return null;
+      final hashIndex = line.indexOf('#');
+      final body =
+          hashIndex >= 0 ? line.substring(5, hashIndex) : line.substring(5);
+      var remark = hashIndex >= 0 ? line.substring(hashIndex + 1) : '';
+      try {
+        remark = Uri.decodeComponent(remark);
+      } catch (_) {}
+
+      String decodeBase64(String value) {
+        final normalized = value.replaceAll('-', '+').replaceAll('_', '/');
+        final padded = normalized.padRight(
+            normalized.length + (4 - normalized.length % 4) % 4, '=');
+        return utf8.decode(base64.decode(padded));
+      }
+
+      String method;
+      String password;
+      String host;
+      int port;
+
+      final atIndex = body.lastIndexOf('@');
+      if (atIndex > 0) {
+        // base64(метод:пароль)@host:port — параметры после ? отбрасываем,
+        // плагины (obfs и прочее) приложение всё равно не собирает.
+        var userInfo = body.substring(0, atIndex);
+        var hostPort = body.substring(atIndex + 1);
+        final query = hostPort.indexOf('?');
+        if (query >= 0) hostPort = hostPort.substring(0, query);
+        final creds = userInfo.contains(':') ? userInfo : decodeBase64(userInfo);
+        final colon = creds.indexOf(':');
+        if (colon <= 0) return null;
+        method = creds.substring(0, colon);
+        password = creds.substring(colon + 1);
+        final portSep = hostPort.lastIndexOf(':');
+        if (portSep <= 0) return null;
+        host = hostPort.substring(0, portSep);
+        port = int.tryParse(hostPort.substring(portSep + 1)) ?? 0;
+      } else {
+        final decoded = decodeBase64(body);
+        final at = decoded.lastIndexOf('@');
+        if (at <= 0) return null;
+        final creds = decoded.substring(0, at);
+        final hostPort = decoded.substring(at + 1);
+        final colon = creds.indexOf(':');
+        final portSep = hostPort.lastIndexOf(':');
+        if (colon <= 0 || portSep <= 0) return null;
+        method = creds.substring(0, colon);
+        password = creds.substring(colon + 1);
+        host = hostPort.substring(0, portSep);
+        port = int.tryParse(hostPort.substring(portSep + 1)) ?? 0;
+      }
+
+      if (method.isEmpty || password.isEmpty || host.isEmpty || port == 0) {
+        return null;
+      }
+      return _ParsedVless(
+        protocol: 'shadowsocks',
+        uuid: '',
+        password: password,
+        method: method,
+        host: host,
+        port: port,
+        security: 'none',
+        remark: remark.isEmpty ? host : remark,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// hysteria2://пароль@host:port?sni=…&insecure=1&obfs=salamander#имя
+  static _ParsedVless? _tryParseHysteria2(String line) {
+    try {
+      final uri = Uri.parse(line);
+      if (uri.scheme != 'hysteria2' && uri.scheme != 'hy2') return null;
+      if (uri.host.isEmpty || uri.port == 0) return null;
+      // Пароль обычно в userInfo, но часть панелей кладёт его в параметр.
+      final q = uri.queryParameters;
+      final password = uri.userInfo.isNotEmpty
+          ? Uri.decodeComponent(uri.userInfo)
+          : (q['password'] ?? '');
+      if (password.isEmpty) return null;
+      final obfs = q['obfs'];
+      return _ParsedVless(
+        protocol: 'hysteria2',
+        uuid: '',
+        password: password,
+        host: uri.host,
+        port: uri.port,
+        security: 'tls', // hysteria2 всегда поверх TLS
+        sni: q['sni'] ?? q['peer'],
+        allowInsecure: _isTruthy(q['insecure'] ?? q['allowInsecure']),
+        obfsType: (obfs != null && obfs.trim().isNotEmpty) ? obfs.trim() : null,
+        obfsPassword: q['obfs-password'] ?? q['obfs_password'],
+        remark: _fragmentName(uri, uri.host),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Транспорт и его параметры из query-строки ссылки — общая часть для
+  /// vless и trojan.
+  static ({String type, String? host, String? path}) _transportFromQuery(
+      Map<String, String> q) {
+    final rawType = q['type'] ?? q['net'] ?? 'tcp';
+    var type = TunnelService._normalizeTransportType(rawType);
+    if (type == 'tcp' && (q['headerType'] ?? '').toLowerCase() == 'http') {
+      type = 'http';
+    }
+    return (
+      type: type,
+      host: q['host'],
+      path: q['path'] ?? q['serviceName'] ?? q['servicename'],
+    );
   }
 
   static _ParsedVless? tryParse(String line) {

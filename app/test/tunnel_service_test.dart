@@ -57,19 +57,44 @@ void main() {
       expect(uk.security, 'reality');
     });
 
-    test('чужие протоколы видны, но помечены неподдерживаемыми', () async {
+    test('hysteria2 и shadowsocks тоже разбираются', () async {
       final locations =
           await tunnel.listSubscriptionLocations(mixedSubscription);
       final estonia = locations.firstWhere((l) => l.remark == 'Estonia Gaming');
-      expect(estonia.supported, isFalse);
+      expect(estonia.supported, isTrue);
       expect(estonia.protocol, 'hysteria2');
-      // Адреса у такой локации нет: подключаться к ней нечем, и притворяться,
-      // что есть, нельзя.
-      expect(estonia.host, isNull);
+      expect(estonia.host, 'ee.example.com');
+      expect(estonia.port, 443);
 
       final lithuania = locations.firstWhere((l) => l.remark == 'Lithuania');
-      expect(lithuania.supported, isFalse);
-      expect(lithuania.protocol, 'ss');
+      expect(lithuania.supported, isTrue);
+      expect(lithuania.protocol, 'shadowsocks');
+      expect(lithuania.host, 'lt.example.com');
+      expect(lithuania.port, 8388);
+    });
+
+    test('trojan разбирается вместе с транспортом', () async {
+      const link = 'trojan://secret@tr.example.com:443'
+          '?security=tls&sni=example.com&type=ws&path=%2Fws#Trojan';
+      final locations = await tunnel.listSubscriptionLocations(link);
+      expect(locations, hasLength(1));
+      expect(locations.first.protocol, 'trojan');
+      expect(locations.first.remark, 'Trojan');
+      expect(locations.first.host, 'tr.example.com');
+      expect(locations.first.transport, 'ws');
+      expect(locations.first.security, 'tls');
+    });
+
+    test('vmess разбирается из base64-JSON', () async {
+      const link =
+          'vmess://eyJ2IjoiMiIsInBzIjoiVm1lc3MgTm9kZSIsImFkZCI6InZtLmV4YW1wbGUuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoiMzMzMzMzMzMtMzMzMy0zMzMzLTMzMzMtMzMzMzMzMzMzMzMzIiwiYWlkIjoiMCIsInNjeSI6ImF1dG8iLCJuZXQiOiJ3cyIsImhvc3QiOiJ2bS5leGFtcGxlLmNvbSIsInBhdGgiOiIvdm0iLCJ0bHMiOiJ0bHMifQ==';
+      final locations = await tunnel.listSubscriptionLocations(link);
+      expect(locations, hasLength(1));
+      expect(locations.first.protocol, 'vmess');
+      expect(locations.first.remark, 'Vmess Node');
+      expect(locations.first.host, 'vm.example.com');
+      expect(locations.first.port, 443);
+      expect(locations.first.transport, 'ws');
     });
   });
 }
