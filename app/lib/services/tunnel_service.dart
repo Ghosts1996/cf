@@ -41,9 +41,13 @@ class TunnelService {
       _client.getServiceState().timeout(_nativeCallTimeout);
   static const _nativeStatsChannel = MethodChannel('vpnonline/native_stats');
   bool _initialized = false;
+  // Тумблер «Kill Switch» с экрана «Безопасность». Решает, показывать ли
+  // пользователю, что защиты сейчас нет; восстановление туннеля от него
+  // больше не зависит — см. _onStatusChanged.
   // Выключен по умолчанию — совпадает с fallback при чтении из LocalPrefs в
   // connect(), пока не переопределится сохранённым значением.
   bool _killSwitchEnabled = false;
+  bool get killSwitchEnabled => _killSwitchEnabled;
   // См. PrefKeys.strictKillSwitch: "физически блокировать трафик", а не
   // только "пытаться переподключиться".
   bool _strictKillSwitchEnabled = false;
@@ -930,22 +934,47 @@ class TunnelService {
     // серверах подряд.
     if (_connectInProgress) return;
     if (_lastConnectionString == null) return;
-    if (!_killSwitchEnabled) return;
-    // При исчерпании попыток авто-переподключения, если включён строгий Kill
-    // Switch, поднимаем блокирующую сессию, а не оставляем устройство с
-    // незащищённым интернетом.
-    if (_autoReconnectAttempt >= _maxAutoReconnectAttempts) {
-      if (_strictKillSwitchEnabled) _engageHardKillSwitch();
-      return;
+    // «Реальная проверка» поднимает и гасит собственную временную сессию тем
+    // же нативным клиентом. Её гашение — не обрыв туннеля, и поднимать в ответ
+    // боевое подключение нельзя: оно столкнётся с проверкой на том же клиенте.
+    // Раньше сюда не доходило, потому что восстановление работало только при
+    // включённом Kill Switch; теперь оно работает всегда, и проверку нужно
+    // исключить явно.
+    if (_probeInProgress) return;
+
+    // Восстанавливаем туннель всегда, а не только при включённом Kill Switch.
+    //
+    // Раньше здесь стояло `if (!_killSwitchEnabled) return;`, и это было
+    // главной причиной жалоб «через какое-то время перестал работать». Kill
+    // Switch отвечает за другое: блокировать ли трафик, пока туннеля нет. У
+    // кого он выключен — а выключен он по умолчанию, — обрыв не поднимал
+    // вообще ничего. Андроид усыпил сервис, сеть переключилась с Wi-Fi на
+    // мобильную, ядро потеряло соединение — и туннель оставался лежать до
+    // тех пор, пока пользователь сам не откроет приложение и не нажмёт
+    // кнопку. Пользователь при этом ничего не отключал.
+    //
+    // Единственное, что действительно значит «не восстанавливать», — это
+    // явное нажатие «Отключить»: оно взводит _userInitiatedDisconnect выше.
+    if (_strictKillSwitchEnabled &&
+        _autoReconnectAttempt >= _maxAutoReconnectAttempts) {
+      // Строгий Kill Switch: после исчерпания обычных попыток поднимаем
+      // блокирующую сессию, чтобы трафик не утёк мимо туннеля. Попытки
+      // восстановления при этом продолжаются — см. задержку ниже.
+      _engageHardKillSwitch();
     }
 
     killSwitchBlocking.value = true;
     _autoReconnectAttempt++;
-    Future.delayed(Duration(seconds: 3), () async {
+    // Паузу наращиваем, но потолок держим низким: пользователь ждёт не
+    // «когда-нибудь», а сейчас. И попытки не кончаются — прежний предел в три
+    // штуки означал, что после трёх неудач подряд (например, пока телефон
+    // ехал в лифте) приложение сдавалось навсегда.
+    Future.delayed(_reconnectBackoff(_autoReconnectAttempt), () async {
       if (_userInitiatedDisconnect) return;
-      // За эти 3 секунды подключение могло начаться другим путём (кнопка
+      // За это время подключение могло начаться другим путём (кнопка
       // "Подключить", смена сервера, автоподключение при возврате Wi-Fi).
       if (_connectInProgress) return;
+      if (isConnected) return;
       try {
         await connect(_lastConnectionString!,
             preferredHostName: _lastPreferredHostName);
@@ -957,6 +986,24 @@ class TunnelService {
         // чтобы не задваивать логику.
       }
     });
+  }
+
+  /// Пауза перед очередной попыткой восстановить туннель.
+  ///
+  /// Первые попытки идут быстро — обрыв чаще всего мгновенный и сам собой
+  /// проходит (смена сети, короткий сон устройства). Дальше пауза растёт,
+  /// чтобы не молотить впустую при настоящем отсутствии интернета, но выше
+  /// минуты не поднимается: туннель должен вернуться, как только вернётся
+  /// сеть, а не через четверть часа.
+  @visibleForTesting
+  static Duration reconnectBackoffFor(int attempt) => _reconnectBackoff(attempt);
+
+  static Duration _reconnectBackoff(int attempt) {
+    const steps = <int>[3, 5, 10, 20, 30, 60];
+    final index = attempt - 1;
+    if (index < 0) return const Duration(seconds: 3);
+    if (index >= steps.length) return const Duration(seconds: 60);
+    return Duration(seconds: steps[index]);
   }
 
   /// Строгий Kill Switch: поднимает служебную VPN-сессию с конфигом без
@@ -2483,15 +2530,41 @@ class TunnelService {
         // например). Оставлять пользователя без связи из-за собственной
         // проверки нельзя — принимаем последнюю поднявшуюся сессию и честно
         // пишем в журнал, что связь не подтверждена.
+        // Сессия поднята и все локации подписки лежат в ней отдельными
+        // outbound'ами под группой-селектором. Значит проверять связь можно не
+        // задерживая пользователя: если первая локация молчит, ядро
+        // переключится на соседнюю внутри той же сессии, не разрывая туннель.
+        // Отдаём управление сразу — кнопка отпускается, приложение говорит
+        // «Подключено», а подбор рабочей локации идёт в фоне. Раньше здесь
+        // ждали до восьми секунд на проверку и ещё столько же на каждого
+        // соседа, и всё это время экран висел со спиннером.
+        if (sessionOrder.length > 1 && !proxyOnly) {
+          final connectedName = profile.remark.isNotEmpty
+              ? profile.remark
+              : (preferredHostName ?? 'VPNOnline');
+          _commitConnectedSession(
+            connectedName: connectedName,
+            proxyOnly: proxyOnly,
+            sessionOrder: sessionOrder,
+            connectionString: connectionString,
+            preferredHostName: preferredHostName,
+          );
+          unawaited(_verifyAndHealInBackground(
+            sessionOrder: sessionOrder,
+            proxyOnly: proxyOnly,
+            preferredHostName: preferredHostName,
+          ));
+          return connectedName;
+        }
+
+        // Группы-селектора нет (старое ядро или проверочная proxy-сессия) —
+        // переключиться внутри сессии не выйдет, и единственный способ уйти с
+        // мёртвой локации это поднять ядро заново. Здесь по-прежнему проверяем
+        // связь до возврата: показать «Подключено» и оставить человека без
+        // интернета без возможности молча починиться — хуже, чем подождать.
         var internetReachable =
             await _verifyInternetReachable(proxyOnly: proxyOnly);
 
-        // Связь не подтвердилась, но все локации подписки уже лежат в этой же
-        // сессии отдельными outbound'ами под группой-селектором. Гасить ядро и
-        // поднимать заново ради соседнего сервера не нужно: просим ядро
-        // переключить активный участник группы и проверяем снова. Перезапуск
-        // сессии стоит секунд десять на попытку, переключение — доли секунды;
-        // именно из этих перезапусков и складывалось «очень долго грузится».
         var activeProfile = profile;
         if (!internetReachable && sessionOrder.length > 1) {
           // Не больше трёх соседей: если четыре сервера подряд молчат, дело
@@ -2546,24 +2619,13 @@ class TunnelService {
         final connectedName = activeProfile.remark.isNotEmpty
             ? activeProfile.remark
             : (preferredHostName ?? 'VPNOnline');
-        connectedServerName.value = connectedName;
-        localProxyAddress.value =
-            proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
-
-        _sessionOutboundOrder = sessionOrder;
-        _sessionOutboundRemarks =
-            sessionOrder.map((e) => e.remark).toList(growable: false);
-        // Порядок outbound'ов известен только здесь: тикер, запущенный событием
-        // "connected" чуть раньше, не мог знать, есть ли группа.
-        _restartLatencyProbe(true);
-        _lastConnectionString = connectionString;
-        _lastPreferredHostName = preferredHostName;
-        // Сохраняем маршрут сессии на диск (см. _persistSessionRoute()) именно
-        // здесь: сохранять имеет смысл только то подключение, которое реально
-        // поднялось и прошло проверку связности.
-        _persistSessionRoute();
-        _userInitiatedDisconnect = false;
-        killSwitchBlocking.value = false;
+        _commitConnectedSession(
+          connectedName: connectedName,
+          proxyOnly: proxyOnly,
+          sessionOrder: sessionOrder,
+          connectionString: connectionString,
+          preferredHostName: preferredHostName,
+        );
         return connectedName;
       } on _VpnServiceStartException catch (e) {
         // Отказ Android поднять VpnService — не про сервер. Перебирать
@@ -2581,6 +2643,88 @@ class TunnelService {
       '${skippedCount > 0 ? ', ещё $skippedCount пропущено — ядро не поддерживает их транспорт' : ''}'
       '): $lastFailure',
     );
+  }
+
+  /// Фиксирует поднятую сессию как рабочее подключение: имя локации, порядок
+  /// outbound'ов, запуск замерщика задержки и сохранение маршрута на диск.
+  ///
+  /// Вынесено отдельно, потому что вызывается из двух мест: сразу после
+  /// подъёма интерфейса (когда проверка связи уходит в фон) и после успешной
+  /// проверки (когда группы-селектора нет и проверять приходится синхронно).
+  void _commitConnectedSession({
+    required String connectedName,
+    required bool proxyOnly,
+    required List<_ParsedVless> sessionOrder,
+    required String connectionString,
+    required String? preferredHostName,
+  }) {
+    connectedServerName.value = connectedName;
+    localProxyAddress.value =
+        proxyOnly ? '127.0.0.1:$_proxyPort (SOCKS5 и HTTP)' : null;
+
+    _sessionOutboundOrder = sessionOrder;
+    _sessionOutboundRemarks =
+        sessionOrder.map((e) => e.remark).toList(growable: false);
+    // Порядок outbound'ов известен только здесь: тикер, запущенный событием
+    // "connected" чуть раньше, не мог знать, есть ли группа.
+    _restartLatencyProbe(true);
+    _lastConnectionString = connectionString;
+    _lastPreferredHostName = preferredHostName;
+    _persistSessionRoute();
+    _userInitiatedDisconnect = false;
+    killSwitchBlocking.value = false;
+    _autoReconnectAttempt = 0;
+  }
+
+  /// Проверяет связь уже после того, как приложение сказало «Подключено», и
+  /// молча уводит туннель с молчащей локации на соседнюю.
+  ///
+  /// Туннель при этом не рвётся: все локации подписки лежат в той же сессии
+  /// отдельными outbound'ами, и переключение — это один вызов к ядру, доли
+  /// секунды. Пользователь видит только, как меняется название страны.
+  Future<void> _verifyAndHealInBackground({
+    required List<_ParsedVless> sessionOrder,
+    required bool proxyOnly,
+    required String? preferredHostName,
+  }) async {
+    if (!isConnected) return;
+    if (await _verifyInternetReachable(proxyOnly: proxyOnly)) return;
+
+    // Не больше трёх соседей: если четыре локации подряд молчат, дело не в
+    // локациях, и перебирать всю подписку — только тратить батарею.
+    final limit = sessionOrder.length < 4 ? sessionOrder.length : 4;
+    for (var next = 1; next < limit; next++) {
+      if (!isConnected || _userInitiatedDisconnect) return;
+      final candidate = sessionOrder[next];
+      try {
+        await _client
+            .selectOutbound('proxy', 'out-$next')
+            .timeout(_nativeCallTimeout);
+      } catch (_) {
+        return; // селектор не отвечает — трогать живую сессию дальше нечем
+      }
+      unawaited(AppLogService.instance.log(
+          'Локация не ответила на фоновую проверку — переключаюсь внутри '
+          'поднятой сессии на "${candidate.remark}"'));
+      final name = candidate.remark.isNotEmpty
+          ? candidate.remark
+          : (preferredHostName ?? 'VPNOnline');
+      connectedServerName.value = name;
+      _persistSessionRoute();
+      if (await _verifyInternetReachable(
+          proxyOnly: proxyOnly, timeout: _switchProbeTimeout)) {
+        return;
+      }
+    }
+
+    // Ни одна локация не подтвердила связь. Туннель не рвём: он может быть
+    // рабочим, а молчать могут сами проверочные адреса — на некоторых сетях
+    // они заблокированы. Просто честно говорим об этом на экране.
+    unawaited(AppLogService.instance.log(
+        'Фоновая проверка: ни одна локация сессии не подтвердила связь',
+        level: AppLogLevel.warning));
+    lastError.value = 'Туннель поднят, но проверка связи через него не прошла — '
+        'если сайты не открываются, смени локацию.';
   }
 
   /// Настоящая проверка одной локации подписки: поднимает временную сессию
