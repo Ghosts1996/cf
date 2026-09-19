@@ -60,6 +60,16 @@ class TunnelService {
   // проверки; изоляция публичного status сделана временной отпиской от
   // стримов внутри самого realCheckProfile().
   bool _probeInProgress = false;
+  /// Просьба свернуть «Реальную проверку»: пользователь нажал «Подключить».
+  ///
+  /// Проверка поднимает собственную временную сессию тем же единственным
+  /// нативным клиентом и на время работы снимает подписку на состояние
+  /// сервиса. Пока она идёт, боевое подключение не только дерётся с ней за
+  /// клиент, но и вообще не видит событий: `_waitForConnected` досиживает всё
+  /// окно и отчитывается «ядро не успело поднять туннель», хотя ядру просто не
+  /// дали работать. Со стороны это и есть «через раз запускается, надо выйти и
+  /// нажать пару раз».
+  bool _probeCancelRequested = false;
   bool _userInitiatedDisconnect = false;
   String? _lastConnectionString;
   String? _lastPreferredHostName;
@@ -2201,12 +2211,33 @@ class TunnelService {
       throw TunnelException(
           'Подключение уже выполняется — дождись его завершения.');
     }
+    // Нажатие пользователя важнее фоновой проверки: просим её свернуться и
+    // ждём, пока она отпустит нативный клиент. Без этого подключение стартует
+    // поверх её временной сессии и гарантированно проваливается по таймауту.
+    await _yieldProbeToConnect();
     _connectInProgress = true;
     try {
       return await _connectInternal(connectionString,
           preferredHostName: preferredHostName);
     } finally {
       _connectInProgress = false;
+    }
+  }
+
+  /// Просит «Реальную проверку» свернуться и ждёт, пока она освободит ядро.
+  ///
+  /// Ждём ограниченно: проверка сама доходит до ближайшей точки выхода за
+  /// секунды, а держать кнопку дольше нельзя — человек нажал и смотрит на
+  /// экран. Если она почему-то не уложилась, идём подключаться всё равно:
+  /// хуже уже не будет, а ложное «подключение уже выполняется» — будет.
+  Future<void> _yieldProbeToConnect() async {
+    if (!_probeInProgress) return;
+    _probeCancelRequested = true;
+    unawaited(AppLogService.instance.log(
+        'Нажато «Подключить» во время проверки серверов — сворачиваю проверку'));
+    final deadline = DateTime.now().add(const Duration(seconds: 12));
+    while (_probeInProgress && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 150));
     }
   }
 
@@ -3012,6 +3043,10 @@ class TunnelService {
       multiDnsSupported: await _coreSupportsMultiDns(),
     );
 
+    if (_probeCancelRequested) {
+      return const RealCheckResult(
+          ok: false, error: 'Проверка отменена — пользователь подключается');
+    }
     _probeInProgress = true;
     await _stateSub?.cancel();
     await _statsSub?.cancel();
@@ -3111,6 +3146,7 @@ class TunnelService {
         lastError.value = error.toString();
       });
       _probeInProgress = false;
+      _probeCancelRequested = false;
     }
   }
 
@@ -3241,7 +3277,20 @@ class TunnelService {
       // показывает эта проверка, — работает локация или нет, а число по
       // текущей сессии всё равно уточняет живой замер через туннель.
       final order = usable.map((e) => e.remark).toList(growable: false);
+      if (_probeCancelRequested) return results;
       final best = await _collectGroupDelays(order);
+      // Пользователь нажал «Подключить» — второй проход не начинаем, отдаём
+      // что успели измерить и освобождаем ядро.
+      if (_probeCancelRequested) {
+        for (final profile in usable) {
+          if (profile.remark.isEmpty) continue;
+          final delay = best[profile.remark];
+          if (delay != null) {
+            results[profile.remark] = RealCheckResult(ok: true, latencyMs: delay);
+          }
+        }
+        return results;
+      }
 
       // Второй проход по всем локациям, и берём из двух меньшее. Он делает
       // сразу две вещи.
@@ -3303,6 +3352,7 @@ class TunnelService {
         lastError.value = error.toString();
       });
       _probeInProgress = false;
+      _probeCancelRequested = false;
     }
   }
 

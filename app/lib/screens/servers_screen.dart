@@ -1101,6 +1101,11 @@ class _ServersScreenState extends State<ServersScreen> {
       final hosts = _allHosts;
       if (hosts == null || hosts.isEmpty) return;
       _measureAllPings(hosts);
+      // Здесь же пробуем полную проверку. Раньше её запускала только загрузка
+      // экрана, а теперь загрузка попадает в окно придержки после старта
+      // приложения — без этого вызова первая проверка не случилась бы вовсе
+      // до ближайшего включения или выключения VPN.
+      _maybeAutoRealCheck();
     });
     // Обновляет реальный пинг текущего сервера сразу при
     // подключении/отключении, а не раз в 25 секунд по таймеру.
@@ -1186,7 +1191,15 @@ class _ServersScreenState extends State<ServersScreen> {
   ///    остановка ядра, несколько секунд и заметный расход батареи;
   ///  * молча, без всплывающих сообщений — экран просто заменяет подписи на
   ///    подтверждённые.
+  /// Когда приложение открылось. Первую автопроверку после запуска
+  /// придерживаем: человек чаще всего открывает приложение ровно затем, чтобы
+  /// нажать «Подключить», а проверка поднимает собственную сессию ядра. Само
+  /// подключение теперь умеет её свернуть, но лучше и не создавать этой гонки.
+  final DateTime _openedAt = DateTime.now();
+  static const _autoCheckStartupDelay = Duration(seconds: 25);
+
   void _maybeAutoRealCheck() {
+    if (DateTime.now().difference(_openedAt) < _autoCheckStartupDelay) return;
     if (_realChecking || _switching) return;
     if (_tunnel.isConnected || _tunnel.isBusy) return;
     if (_allHosts == null || _allHosts!.isEmpty) return;
