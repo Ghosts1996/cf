@@ -1935,16 +1935,29 @@ class TunnelService {
   // со штатным ядром (XHTTP отсеивается, как и раньше), и с ядром на форке
   // hiddify-sing-box (XHTTP используется), без флагов сборки и версий в коде.
   final Map<String, bool> _transportSupport = {};
+  /// Проверки, которые сейчас идут. Профили теперь проверяются одновременно, и
+  /// без этого три локации на одном незнакомом транспорте запустили бы три
+  /// одинаковых разбора пробного конфига вместо одного.
+  final Map<String, Future<bool>> _transportSupportInFlight = {};
   bool? _probeConfigUsable;
 
   /// Умеет ли установленное ядро транспорт [type]. Результат кэшируется на
   /// время жизни процесса: ядро внутри одной сессии не меняется.
-  Future<bool> _coreSupportsTransport(String type) async {
+  Future<bool> _coreSupportsTransport(String type) {
     final normalized = _normalizeTransportType(type);
-    if (_supportedTransports.contains(normalized)) return true;
+    if (_supportedTransports.contains(normalized)) return Future.value(true);
     final cached = _transportSupport[normalized];
-    if (cached != null) return cached;
+    if (cached != null) return Future.value(cached);
+    final running = _transportSupportInFlight[normalized];
+    if (running != null) return running;
+    final probe = _probeTransportSupport(normalized);
+    _transportSupportInFlight[normalized] = probe;
+    return probe.whenComplete(() {
+      _transportSupportInFlight.remove(normalized);
+    });
+  }
 
+  Future<bool> _probeTransportSupport(String normalized) async {
     try {
       await _ensureInitialized();
       // Контрольный прогон: убеждаемся, что сама форма пробного конфига ядру
@@ -2198,6 +2211,7 @@ class TunnelService {
 
   Future<String> _connectInternal(String connectionString,
       {String? preferredHostName}) async {
+    final connectStarted = DateTime.now();
     lastError.value = null;
     await _ensureInitialized();
     // На Android 13+ одного объявления POST_NOTIFICATIONS в манифесте
@@ -2297,8 +2311,6 @@ class TunnelService {
     // Спрашиваем у ядра один раз за запуск: умеет ли оно рвать собственное
     // рукопожатие. На штатном ядре — нет, и «Обход DPI» остаётся прежним
     // правилом маршрутизации.
-    final tlsFragmentSupported =
-        dpiBypass ? await _coreSupportsTlsFragment() : false;
     // «Быстрый пинг» (experimental.unified_delay) — только если пользователь
     // включил его сам. По умолчанию выключен: на адресе проверки, который
     // закрывает соединение после первого ответа, второму запросу идти некуда,
@@ -2306,12 +2318,26 @@ class TunnelService {
     // Подробности и замеры — в PrefKeys.fastPing.
     final fastPing =
         await LocalPrefs.instance.getBool(PrefKeys.fastPing, fallback: false);
-    final unifiedDelaySupported =
-        fastPing ? await _coreSupportsUnifiedDelay() : false;
+    // Три вопроса к ядру задаём разом, а не по очереди. Ответы независимы, а
+    // каждый — это отдельный разбор пробного конфига нативной стороной; в
+    // очереди они складывались в заметную паузу перед самым подключением, и
+    // ждал её пользователь, глядя на спиннер. Кэш внутри каждой проверки
+    // остался прежним: за запуск приложения ядро спрашивают один раз.
+    final probeStarted = DateTime.now();
+    final probes = await Future.wait<bool>([
+      // Умеет ли ядро рвать собственное рукопожатие. На штатном — нет, и
+      // «Обход DPI» остаётся прежним правилом маршрутизации.
+      dpiBypass ? _coreSupportsTlsFragment() : Future<bool>.value(false),
+      fastPing ? _coreSupportsUnifiedDelay() : Future<bool>.value(false),
+      // Составной резолвер для адреса сервера спрашиваем всегда: он ничего не
+      // меняет там, где 1.1.1.1 и так доступен, и спасает там, где нет.
+      _coreSupportsMultiDns(),
+    ]);
+    final tlsFragmentSupported = probes[0];
+    final unifiedDelaySupported = probes[1];
+    final multiDnsSupported = probes[2];
     _sessionFastPing = unifiedDelaySupported;
-    // Составной резолвер для адреса сервера спрашиваем всегда: он ничего не
-    // меняет там, где 1.1.1.1 и так доступен, и спасает там, где нет.
-    final multiDnsSupported = await _coreSupportsMultiDns();
+    final probeMs = DateTime.now().difference(probeStarted).inMilliseconds;
     // См. PrefKeys.excludeAppFromTunnel. При fallback false список исключений
     // ниже остаётся пустым и конфиг собирается ровно такой же, как без этой
     // настройки.
@@ -2368,9 +2394,15 @@ class TunnelService {
     // конфиг проверяется целиком, поэтому одна такая запись в подписке
     // отправила бы в отказ и группу-селектор со всеми остальными серверами
     // (см. _isTransportSupported). Отсеиваем её до сборки конфига.
+    // Профили проверяем разом, а не по очереди: внутри всё сводится к вопросу
+    // «умеет ли ядро такой транспорт», ответ на каждый транспорт кэшируется, и
+    // последовательный обход тридцати локаций был просто тридцатью ожиданиями
+    // подряд ради горстки разных ответов.
+    final supportFlags =
+        await Future.wait(ordered.map(_isProfileSupported));
     final usable = <_ParsedVless>[];
-    for (final profile in ordered) {
-      if (await _isProfileSupported(profile)) usable.add(profile);
+    for (var i = 0; i < ordered.length; i++) {
+      if (supportFlags[i]) usable.add(ordered[i]);
     }
     final skippedCount = ordered.length - usable.length;
     // Состав подписки — в журнал. Без этого при разборе «не работает» неясно
@@ -2381,6 +2413,14 @@ class TunnelService {
         '[${ordered.map((p) => '${p.remark.isEmpty ? p.host : p.remark}:'
             '${p.transportType ?? 'tcp'}/${p.security}').join(', ')}]'
         '${skippedCount > 0 ? '; пропущено ядром: $skippedCount' : ''}'));
+    // Сколько заняла подготовка до первой попытки поднять ядро. Без этих
+    // чисел «долго подключается» невозможно разобрать со стороны
+    // пользователя: непонятно, ждём мы подписку, ответы ядра о его
+    // возможностях или сам подъём туннеля.
+    unawaited(AppLogService.instance.log(
+        'Подготовка подключения: ${DateTime.now().difference(connectStarted).inMilliseconds} мс '
+        '(из них опрос возможностей ядра $probeMs мс), '
+        'в сессию пойдёт не больше ${_maxSessionAlternates + 1} локаций'));
     if (usable.isEmpty) {
       throw TunnelException(
         'В подписке нет серверов с транспортом, который поддерживает ядро: '
@@ -2546,7 +2586,12 @@ class TunnelService {
         // было просто подождать ещё пару секунд.
         final startupWindow = Duration(
             seconds: (12 + sessionOrder.length).clamp(12, 25));
+        final startupStarted = DateTime.now();
         final reallyConnected = await _waitForConnected(startupWindow);
+        unawaited(AppLogService.instance.log(
+            'Подъём ядра с ${sessionOrder.isEmpty ? 1 : sessionOrder.length} '
+            'локациями: ${DateTime.now().difference(startupStarted).inMilliseconds} мс, '
+            '${reallyConnected ? 'поднялось' : 'не уложилось в ${startupWindow.inSeconds} с'}'));
         if (!reallyConnected) {
           await _settleAfterDisconnect();
           lastFailure =
