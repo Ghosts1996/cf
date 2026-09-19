@@ -15,6 +15,11 @@ class AppColors {
   static const textDim = Color(0xFF9C93C0);
   static const success = Color(0xFF35E0A1);
   static const danger = Color(0xFFFF6B8B);
+  /// Насыщенный красный для подписи выключенного сервера. `danger` — мягкий
+  /// розовый, и в подписи в 10 пунктов он читается как серый: именно этим
+  /// «красное» и не выглядело красным. Здесь нужен цвет, который видно с
+  /// одного взгляда на список из трёх десятков строк.
+  static const offline = Color(0xFFFF3B4E);
   static const warning = Color(0xFFF4B740);
 
   static const LinearGradient violetGradient = LinearGradient(

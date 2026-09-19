@@ -1391,6 +1391,7 @@ class TunnelService {
         _emptyLatencyRuns = 0;
       }
       latencyByRemark.value = smoothed;
+      unawaited(_saveLatencySnapshot(smoothed));
       // Результат замера в журнал: если ядро не достучалось ни до одной
       // локации, это первое, что стоит увидеть при разборе.
       unawaited(AppLogService.instance.log(
@@ -2385,10 +2386,7 @@ class TunnelService {
     }
 
     final profiles = await _loadProfiles(connectionString);
-    final preferred = _matchProfile(profiles, preferredHostName);
-    final ordered = preferred != null
-        ? [preferred, ...profiles.where((p) => !identical(p, preferred))]
-        : profiles;
+    final ordered = await _orderProfilesForConnect(profiles, preferredHostName);
 
     // Локация с транспортом, которого ядро не знает, портит не только себя:
     // конфиг проверяется целиком, поэтому одна такая запись в подписке
@@ -2736,6 +2734,99 @@ class TunnelService {
     );
   }
 
+  /// Сохраняет последние известные задержки по именам локаций.
+  ///
+  /// Снимок переживает перезапуск приложения и нужен ровно для одного: выбрать
+  /// самую быструю локацию при подключении, когда в этом запуске ещё ничего не
+  /// измерено. Пустые снимки игнорируем — они затёрли бы осмысленные числа.
+  Future<void> _saveLatencySnapshot(Map<String, int> byRemark) async {
+    if (byRemark.isEmpty) return;
+    try {
+      await LocalPrefs.instance
+          .setString(PrefKeys.cachedLatencyJson, jsonEncode(byRemark));
+    } catch (_) {
+      // Не смогли сохранить — подключение от этого не зависит.
+    }
+  }
+
+  Future<Map<String, int>> _loadLatencySnapshot() async {
+    try {
+      final raw = await LocalPrefs.instance.getString(PrefKeys.cachedLatencyJson);
+      if (raw == null || raw.isEmpty) return const <String, int>{};
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return const <String, int>{};
+      return <String, int>{
+        for (final entry in decoded.entries)
+          if (entry.value is num && (entry.value as num) > 0)
+            '${entry.key}': (entry.value as num).toInt(),
+      };
+    } catch (_) {
+      return const <String, int>{};
+    }
+  }
+
+  /// Порядок перебора локаций при подключении.
+  ///
+  /// Выбрал страну сам — идём в неё, замеры тут никого не интересуют. Не
+  /// выбирал — первой идёт самая быстрая из последнего замера. Порядок, в
+  /// котором локации лежат в подписке, не значит ничего: упереться первой же
+  /// кнопкой в мёртвый или далёкий узел было обычным делом.
+  Future<List<_ParsedVless>> _orderProfilesForConnect(
+    List<_ParsedVless> profiles,
+    String? preferredHostName,
+  ) async {
+    final chosenManually = await LocalPrefs.instance
+        .getBool(PrefKeys.serverChosenManually, fallback: false);
+    if (chosenManually) {
+      final preferred = _matchProfile(profiles, preferredHostName);
+      if (preferred != null) {
+        return [preferred, ...profiles.where((p) => !identical(p, preferred))];
+      }
+    }
+
+    final latency = await _loadLatencySnapshot();
+    if (latency.isEmpty) {
+      // Замеров ещё нет — оставляем порядок подписки, врать тут нечем.
+      final preferred = _matchProfile(profiles, preferredHostName);
+      return preferred != null
+          ? [preferred, ...profiles.where((p) => !identical(p, preferred))]
+          : profiles;
+    }
+
+    int rank(_ParsedVless p) {
+      final own = latency[p.remark];
+      if (own != null) return own;
+      // Имена в подписке и в замере могут отличаться префиксом сервиса —
+      // сопоставляем так же мягко, как это делает latencyForHostName.
+      final needle = p.remark.trim().toLowerCase();
+      if (needle.isEmpty) return 1 << 20;
+      for (final entry in latency.entries) {
+        final key = entry.key.trim().toLowerCase();
+        if (key == needle || key.contains(needle) || needle.contains(key)) {
+          return entry.value;
+        }
+      }
+      return 1 << 20; // не измерена — в конец, но не выброшена
+    }
+
+    final sorted = [...profiles]..sort((a, b) => rank(a).compareTo(rank(b)));
+    unawaited(AppLogService.instance.log(
+        'Локация не выбрана вручную — подключаемся к самой быстрой по '
+        'последнему замеру: "${sorted.first.remark}" (${rank(sorted.first)} мс)'));
+    return sorted;
+  }
+
+  /// Порядок локаций, в котором подключение будет их перебирать — только для
+  /// тестов: сам перебор требует живого ядра, а порядок проверяется отдельно.
+  @visibleForTesting
+  Future<List<String>> debugOrderProfilesForConnect(
+      String connectionString, String? preferredHostName) async {
+    final profiles = _parseSubscriptionBody(connectionString);
+    final ordered =
+        await _orderProfilesForConnect(profiles, preferredHostName);
+    return ordered.map((p) => p.remark).toList(growable: false);
+  }
+
   /// Фиксирует поднятую сессию как рабочее подключение: имя локации, порядок
   /// outbound'ов, запуск замерщика задержки и сохранение маршрута на диск.
   ///
@@ -2780,7 +2871,22 @@ class TunnelService {
     required String? preferredHostName,
   }) async {
     if (!isConnected) return;
+
+    // Даём туннелю встать. Событие «интерфейс поднят» приходит раньше, чем
+    // ядро дотянуло маршруты и резолвер: запрос в эту же секунду не проходит
+    // даже через совершенно живой сервер. Именно на этом проверка и обожглась —
+    // она объявляла хорошую локацию молчащей и уводила сессию на соседнюю, а
+    // там могла оказаться мёртвая. Со стороны это выглядело так: «Подключено»,
+    // интернета нет, помогает только выключить и включить заново.
+    await Future<void>.delayed(const Duration(seconds: 3));
+    if (!isConnected || _userInitiatedDisconnect) return;
+
+    // Два захода, а не один: первый может не успеть по той же причине.
     if (await _verifyInternetReachable(proxyOnly: proxyOnly)) return;
+    if (!isConnected || _userInitiatedDisconnect) return;
+    if (await _verifyInternetReachable(proxyOnly: proxyOnly)) return;
+
+    final startName = connectedServerName.value;
 
     // Не больше трёх соседей: если четыре локации подряд молчат, дело не в
     // локациях, и перебирать всю подписку — только тратить батарею.
@@ -2793,7 +2899,7 @@ class TunnelService {
             .selectOutbound('proxy', 'out-$next')
             .timeout(_nativeCallTimeout);
       } catch (_) {
-        return; // селектор не отвечает — трогать живую сессию дальше нечем
+        break; // селектор не отвечает — возвращаемся на исходную ниже
       }
       unawaited(AppLogService.instance.log(
           'Локация не ответила на фоновую проверку — переключаюсь внутри '
@@ -2809,14 +2915,26 @@ class TunnelService {
       }
     }
 
-    // Ни одна локация не подтвердила связь. Туннель не рвём: он может быть
-    // рабочим, а молчать могут сами проверочные адреса — на некоторых сетях
-    // они заблокированы. Просто честно говорим об этом на экране.
+    // Ни один сосед не подтвердил связь — возвращаем сессию на ту локацию, с
+    // которой начинали. Оставить её на последнем перебранном кандидате было бы
+    // хуже всего: связь не подтвердил никто, но ушли мы при этом с локации,
+    // которую пользователь выбрал сам и которая вполне могла работать — просто
+    // проверочные адреса на этой сети недоступны.
+    if (isConnected && !_userInitiatedDisconnect) {
+      try {
+        await _client
+            .selectOutbound('proxy', 'out-0')
+            .timeout(_nativeCallTimeout);
+        if (startName != null) connectedServerName.value = startName;
+        _persistSessionRoute();
+      } catch (_) {
+        // Селектор не отвечает — сессия остаётся как есть, рвать её нельзя.
+      }
+    }
     unawaited(AppLogService.instance.log(
-        'Фоновая проверка: ни одна локация сессии не подтвердила связь',
+        'Фоновая проверка: ни одна локация сессии не подтвердила связь, '
+        'сессия возвращена на исходную локацию',
         level: AppLogLevel.warning));
-    lastError.value = 'Туннель поднят, но проверка связи через него не прошла — '
-        'если сайты не открываются, смени локацию.';
   }
 
   /// Настоящая проверка одной локации подписки: поднимает временную сессию
@@ -3164,6 +3282,11 @@ class TunnelService {
             : const RealCheckResult(
                 ok: false, error: 'не ответил на две проверки подряд');
       }
+      unawaited(_saveLatencySnapshot({
+        for (final entry in results.entries)
+          if (entry.value.ok && (entry.value.latencyMs ?? 0) > 0)
+            entry.key: entry.value.latencyMs!,
+      }));
       unawaited(AppLogService.instance.log(
           'Проверка всех локаций: '
           '${results.entries.map((e) => '${e.key} — '

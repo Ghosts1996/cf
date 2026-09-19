@@ -26,15 +26,15 @@ void main() {
 
   testWidgets('выключенный сервер подписан красным — видно с одного взгляда',
       (tester) async {
-    await pump(tester, 'нет ответа', AppColors.danger);
-    expect(colorOf(tester, 'нет ответа'), AppColors.danger);
+    await pump(tester, 'нет ответа', AppColors.offline);
+    expect(colorOf(tester, 'нет ответа'), AppColors.offline);
   });
 
-  testWidgets('локация вне подписки — приглушённо, это не отказ сервера',
+  testWidgets('локация вне подписки тоже помечена красным',
       (tester) async {
-    await pump(tester, 'нет в подписке', AppColors.textDim);
-    expect(colorOf(tester, 'нет в подписке'), AppColors.textDim);
-    expect(colorOf(tester, 'нет в подписке'), isNot(AppColors.danger));
+    await pump(tester, 'нет в подписке', AppColors.offline);
+    expect(colorOf(tester, 'нет в подписке'), AppColors.offline);
+    expect(colorOf(tester, 'нет в подписке'), isNot(AppColors.textDim));
   });
 
   testWidgets('живое число остаётся зелёным', (tester) async {

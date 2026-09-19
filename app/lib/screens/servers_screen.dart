@@ -1017,6 +1017,9 @@ class _ServersScreenState extends State<ServersScreen> {
     setState(() => _selectedId = id);
     SelectedServer.select(id, name);
     _prefs.setString(PrefKeys.selectedServerId, id);
+    // Человек выбрал страну сам — с этого момента его выбор важнее любых
+    // замеров, и подключение больше не переигрывает его на «самую быструю».
+    _prefs.setBool(PrefKeys.serverChosenManually, true);
 
     if (!_tunnel.isConnected) return; // не из чего переключать — обычный выбор
     if (id == _hostIdForConnectedName(_tunnel.connectedServerName.value)) {
@@ -1457,7 +1460,7 @@ class _ServersScreenState extends State<ServersScreen> {
                   // выключен. Технические подробности отказа остались в
                   // журнале, на карточке только факт.
                   pingLabel = tr('нет ответа');
-                  pingColor = AppColors.danger;
+                  pingColor = AppColors.offline;
                 } else if (endpoint == null &&
                     (_realEndpoints.isNotEmpty ||
                         _unsupportedProtocols.isNotEmpty)) {
@@ -1466,7 +1469,7 @@ class _ServersScreenState extends State<ServersScreen> {
                   // и подключаться некуда — но и «измеряю…» до скончания веков
                   // писать нельзя, экран выглядит зависшим.
                   pingLabel = tr('нет в подписке');
-                  pingColor = AppColors.textDim;
+                  pingColor = AppColors.offline;
                 } else if (_tunnel.isConnected) {
                   pingLabel = tr('измеряю...');
                   pingColor = AppColors.textDim;
@@ -1478,7 +1481,7 @@ class _ServersScreenState extends State<ServersScreen> {
                   pingColor = AppColors.textDim;
                 } else if (ping < 0) {
                   pingLabel = tr('нет ответа');
-                  pingColor = AppColors.danger;
+                  pingColor = AppColors.offline;
                 } else if (isRealityOnly) {
                   // TCP-стук до Reality-узла успешен всегда, даже когда
                   // VLESS-инбаунд за ним мёртв, — поэтому число показываем как

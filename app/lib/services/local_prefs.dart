@@ -150,6 +150,20 @@ class PrefKeys {
   static const favoriteServers = 'servers.favorites';
   static const autoBalance = 'servers.auto_balance';
   static const selectedServerId = 'servers.selected_id';
+
+  /// Выбрал ли пользователь страну сам, ткнув в карточку на экране «Серверы».
+  ///
+  /// Пока флага нет, первое подключение идёт на самую быструю локацию из
+  /// последнего замера, а не на первую попавшуюся из подписки — порядок в
+  /// подписке ничего не значит, и упереться первой же кнопкой в мёртвый или
+  /// далёкий узел было обычным делом. Как только человек выбрал страну сам,
+  /// его выбор важнее любых замеров и не переигрывается.
+  static const serverChosenManually = 'servers.chosen_manually';
+
+  /// Последние известные задержки по именам локаций из подписки: `{remark: мс}`.
+  /// Переживает перезапуск — именно по ним и выбирается самая быстрая локация
+  /// до того, как в этом запуске хоть что-то измерено.
+  static const cachedLatencyJson = 'servers.cached_latency';
   static const splitTunnelBypass = 'split_tunnel.bypassed_packages';
   // 'exclude' — выбранные приложения идут в обход VPN, остальные через
   // туннель; 'include' — через VPN идут только выбранные. Читается в
