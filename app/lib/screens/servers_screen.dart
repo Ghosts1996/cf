@@ -142,10 +142,16 @@ class _ServersScreenState extends State<ServersScreen> {
   // между автоматическими прогонами: каждая локация это запуск и остановка
   // сессии sing-box, секунды работы и расход батареи.
   DateTime? _lastRealCheckAt;
-  static const _realCheckCooldown = Duration(minutes: 10);
+  // Двадцать минут, а не десять. Числа теперь переживают перезапуск и
+  // показываются сразу при открытии экрана, так что гонять полную проверку
+  // часто незачем: она поднимает временную сессию ядра и стоит батареи. Реже
+  // — значит и меньше поводов увидеть экран в состоянии «идёт проверка».
+  static const _realCheckCooldown = Duration(minutes: 20);
   // Насколько долго результату реальной проверки можно доверять при
   // автоматическом переключении живого туннеля (см. _autoBalanceScore).
-  static const _realCheckMaxAge = Duration(minutes: 30);
+  // Держим заметно больше паузы между проверками, иначе автобалансировка
+  // осталась бы вообще без данных в промежутке.
+  static const _realCheckMaxAge = Duration(minutes: 60);
   // Автопроверка при открытии экрана запускается один раз за сессию экрана:
   // дальше её перезапускает только отключение VPN или кнопка "Проверить".
   bool _autoRealCheckScheduled = false;
@@ -745,6 +751,10 @@ class _ServersScreenState extends State<ServersScreen> {
       // другой туннель» на промежутке между двумя сессиями.
       final byRemark = await _tunnel.realCheckAllProfiles(connectionString);
       if (!mounted) return;
+      // Проверка не дала ничего — подписка не отдалась, ядро не поднялось,
+      // сеть моргнула. Прошлые числа в этом случае ценнее пустого экрана:
+      // оставляем их как есть и молча ждём следующего цикла.
+      if (byRemark.isEmpty) return;
       _lastRealCheckByRemark = byRemark;
       setState(() {
         _realCheckResults
@@ -764,15 +774,24 @@ class _ServersScreenState extends State<ServersScreen> {
   }
 
   /// Раскладывает ответ «Реальной проверки» по локациям экрана.
+  ///
+  /// Локацию, которой в ответе не нашлось, не трогаем: у неё остаётся прошлый
+  /// результат. Раньше ей проставлялось «не найдена в подписке», и стоило
+  /// подписке один раз не загрузиться — весь список разом краснел этой
+  /// надписью, хотя ни один сервер не проверялся и ни один не умер.
   Map<String, RealCheckResult> _mapRealCheckToHosts(
       Map<String, RealCheckResult> byRemark) {
     final mapped = <String, RealCheckResult>{};
     for (final raw in _allHosts ?? const []) {
       final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
       if (id.isEmpty) continue;
-      mapped[id] = _resultForHostName(byRemark, id) ??
-          const RealCheckResult(
-              ok: false, error: 'Локация не найдена в подписке.');
+      final found = _resultForHostName(byRemark, id);
+      if (found != null) {
+        mapped[id] = found;
+      } else {
+        final previous = _realCheckResults[id];
+        if (previous != null) mapped[id] = previous;
+      }
     }
     return mapped;
   }
@@ -1375,9 +1394,22 @@ class _ServersScreenState extends State<ServersScreen> {
                 // Оба числа считаются одинаково, поэтому и сравнивать их между
                 // собой можно.
                 final realCheck = _realCheckResults[id];
-                final corePing = _tunnel.isConnected
-                    ? _tunnel.latencyForHostName(id)
-                    : (realCheck != null && realCheck.ok ? realCheck.latencyMs : null);
+                // Сохранённое число прошлой проверки. Оно живёт между
+                // запусками приложения, и именно оно показывается сразу при
+                // открытии экрана — до того, как отработает свежий замер.
+                final savedPing =
+                    (realCheck != null && realCheck.ok) ? realCheck.latencyMs : null;
+                // Живое число от ядра есть только при поднятом туннеле и
+                // только после первого прогона замерщика.
+                final livePing =
+                    _tunnel.isConnected ? _tunnel.latencyForHostName(id) : null;
+                // Живое, если оно уже есть, иначе сохранённое. Раньше при
+                // поднятом туннеле сохранённое не смотрели вовсе: открываешь
+                // экран на живом VPN — и все карточки в «измеряю через
+                // VLESS…», хотя числа по ним давно посчитаны и лежат рядом.
+                // Число теперь появляется мгновенно и молча уточняется, когда
+                // придёт свежий замер.
+                final corePing = livePing ?? savedPing;
 
                 // Локация есть в подписке, но написана на протоколе, который
                 // приложение в конфиг не собирает. Показываем её — в других
@@ -1391,13 +1423,15 @@ class _ServersScreenState extends State<ServersScreen> {
                   pingLabel =
                       '${tr('протокол')} $unsupportedProtocol · ${tr('приложение его пока не поддерживает')}';
                   pingColor = AppColors.textDim;
-                } else if (_realChecking) {
-                  pingLabel = tr('проверяю по-настоящему...');
-                  pingColor = AppColors.textDim;
                 } else if (corePing != null && corePing > 0) {
+                  // Число показываем всегда, когда оно есть, — в том числе
+                  // пока идёт свежая проверка. Раньше проверка на время своей
+                  // работы затирала все подписи на «проверяю по-настоящему…»,
+                  // и экран выглядел зависшим ровно в тот момент, когда на
+                  // него смотрят.
                   final suffix = isCurrentlyConnected
                       ? tr('мс · подключено')
-                      : tr('мс · проверено');
+                      : tr('мс');
                   if (corePing < 120) {
                     pingLabel = '$corePing $suffix';
                     pingColor = AppColors.success;
@@ -1406,23 +1440,30 @@ class _ServersScreenState extends State<ServersScreen> {
                     pingColor = AppColors.warning;
                   } else {
                     pingLabel = '$corePing ${tr('мс · медленно')}';
-                    pingColor = AppColors.danger;
+                    pingColor = AppColors.warning;
                   }
-                } else if (_tunnel.isConnected) {
-                  // Туннель поднят, а ядро по этой локации ничего не отдало.
-                  // Отличаем «ещё меряю» от «не отвечает»: если по другим
-                  // локациям числа уже есть, значит замер отработал и молчание
-                  // по этой означает отказ.
-                  final measuredSomething = _tunnel.latencyByRemark.value.isNotEmpty;
-                  pingLabel = measuredSomething
-                      ? tr('не отвечает')
-                      : tr('измеряю через VLESS...');
-                  pingColor =
-                      measuredSomething ? AppColors.danger : AppColors.textDim;
+                } else if (_realChecking) {
+                  pingLabel = tr('проверяю...');
+                  pingColor = AppColors.textDim;
                 } else if (realCheck != null && !realCheck.ok) {
-                  pingLabel =
-                      '${tr('не работает')} (${realCheck.error ?? tr("нет ответа")})';
-                  pingColor = AppColors.danger;
+                  // Сервер не ответил. Пишем это коротко и приглушённо, без
+                  // красного и без технических подробностей: карточка должна
+                  // сообщать факт, а не пугать. Причина отказа по-прежнему
+                  // пишется в журнал приложения.
+                  pingLabel = tr('нет ответа');
+                  pingColor = AppColors.textDim;
+                } else if (endpoint == null &&
+                    (_realEndpoints.isNotEmpty ||
+                        _unsupportedProtocols.isNotEmpty)) {
+                  // Подписка разобрана, а этой локации в ней нет: панель её
+                  // отдала в /hosts, но ключа под неё не выдала. Мерить нечего
+                  // и подключаться некуда — но и «измеряю…» до скончания веков
+                  // писать нельзя, экран выглядит зависшим.
+                  pingLabel = tr('нет в подписке');
+                  pingColor = AppColors.textDim;
+                } else if (_tunnel.isConnected) {
+                  pingLabel = tr('измеряю...');
+                  pingColor = AppColors.textDim;
                 } else if (ping == null) {
                   pingLabel = tr('измеряю...');
                   pingColor = AppColors.textDim;
@@ -1430,8 +1471,8 @@ class _ServersScreenState extends State<ServersScreen> {
                   pingLabel = tr('нет данных для пинга');
                   pingColor = AppColors.textDim;
                 } else if (ping < 0) {
-                  pingLabel = tr('недоступен');
-                  pingColor = AppColors.danger;
+                  pingLabel = tr('нет ответа');
+                  pingColor = AppColors.textDim;
                 } else if (isRealityOnly) {
                   // TCP-стук до Reality-узла успешен всегда, даже когда
                   // VLESS-инбаунд за ним мёртв, — поэтому число показываем как
@@ -1446,7 +1487,7 @@ class _ServersScreenState extends State<ServersScreen> {
                   pingColor = AppColors.warning;
                 } else {
                   pingLabel = '$ping ${tr('мс · медленно')}';
-                  pingColor = AppColors.danger;
+                  pingColor = AppColors.warning;
                 }
                 return ServerPill(
                   code: code,

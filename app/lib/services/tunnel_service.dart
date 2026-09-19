@@ -2511,7 +2511,8 @@ class TunnelService {
             unawaited(AppLogService.instance.log(
                 'Локация "${activeProfile.remark}" не ответила — переключаюсь '
                 'внутри поднятой сессии на "${candidate.remark}"'));
-            if (await _verifyInternetReachable(proxyOnly: proxyOnly)) {
+            if (await _verifyInternetReachable(
+                proxyOnly: proxyOnly, timeout: _switchProbeTimeout)) {
               internetReachable = true;
               activeProfile = candidate;
               break;
@@ -4140,14 +4141,20 @@ class TunnelService {
   /// событию «интерфейс поднят». Интерфейс поднимается и при полностью
   /// нерабочем сервере, поэтому приложение показывало «ПОДКЛЮЧЕНО» с нулевым
   /// трафиком и никогда не переходило к следующей локации подписки.
-  Future<Uri?> _reachableProbeUrl({required bool proxyOnly}) async {
+  Future<Uri?> _reachableProbeUrl(
+      {required bool proxyOnly, Duration? timeout}) async {
     // В VPN-режиме окно шире: там к моменту проверки ядро ещё поднимает
     // маршруты и первые соединения идут медленнее.
-    // Окно на один заход. Раньше было 8/12 секунд — с запасом на то, что все
-    // проверочные адреса были доменами и ждали резолва. Теперь первым идёт
-    // адрес по IP, и живой туннель отвечает за доли секунды; длинное окно
-    // теперь только затягивает перебор при мёртвом сервере.
-    final timeout = Duration(seconds: proxyOnly ? 6 : 8);
+    //
+    // Окно на один заход. Оно определяет не скорость живого туннеля, а цену
+    // мёртвого: адреса опрашиваются одновременно и первый ответивший
+    // выигрывает, поэтому рабочий сервер отвечает за доли секунды при любом
+    // окне. А вот неотвечающий стоит ровно столько, сколько здесь написано, —
+    // и стоит он этого до четырёх раз за попытку подключения, три попытки
+    // подряд. Из этих ожиданий и складывалась минута на экране подключения.
+    // Первым в списке идёт адрес по IP, резолва ждать не нужно, так что
+    // пяти секунд рабочему каналу хватает с запасом.
+    final window = timeout ?? Duration(seconds: proxyOnly ? 4 : 5);
     // Адреса проверяются одновременно, а не по очереди: последовательный
     // перебор означал, что один недоступный адрес стоит целого таймаута, и
     // проверка честного сервера растягивалась на десяток секунд. Побеждает
@@ -4159,7 +4166,7 @@ class TunnelService {
       final client = _throughTunnelClient();
       unawaited(client
           .head(uri)
-          .timeout(timeout)
+          .timeout(window)
           .then((response) {
             if (response.statusCode > 0 && !completer.isCompleted) {
               completer.complete(uri);
@@ -4177,8 +4184,15 @@ class TunnelService {
     return completer.future;
   }
 
-  Future<bool> _verifyInternetReachable({required bool proxyOnly}) async =>
-      await _reachableProbeUrl(proxyOnly: proxyOnly) != null;
+  Future<bool> _verifyInternetReachable(
+          {required bool proxyOnly, Duration? timeout}) async =>
+      await _reachableProbeUrl(proxyOnly: proxyOnly, timeout: timeout) != null;
+
+  /// Окно проверки связи при переключении участника группы внутри уже
+  /// поднятой сессии. Короче обычного: ядро на ходу, маршруты подняты,
+  /// резолвер прогрет — живому участнику хватает доли секунды, а каждая
+  /// лишняя секунда здесь умножается на число перебираемых соседей.
+  static const _switchProbeTimeout = Duration(seconds: 3);
 
   /// Задержка через туннель в миллисекундах — то же число, что показывает
   /// Hiddify.
