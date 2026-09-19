@@ -59,6 +59,50 @@ class _ServersScreenState extends State<ServersScreen> {
     if (_subscriptionOnlyHosts.isEmpty) return own;
     return <dynamic>[...own, ..._subscriptionOnlyHosts];
   }
+
+  /// Тот же список, но по возрастанию пинга: сверху самые быстрые, снизу те,
+  /// что не отвечают.
+  ///
+  /// Панели отдают локации вперемешку, и в списке из трёх десятков строк найти
+  /// быстрый сервер глазами было нечем — числа шли вразнобой, а мёртвые узлы
+  /// стояли вперемешку с живыми. Порядок задаётся тем же числом, которое видно
+  /// на карточке, поэтому список читается сверху вниз как «лучшее первым».
+  List<dynamic>? get _hostsSortedByPing {
+    final hosts = _allHosts;
+    if (hosts == null) return null;
+    // Сортировка устойчивая: локации с одинаковым весом сохраняют исходный
+    // порядок панели, а не прыгают при каждом замере.
+    final indexed = <MapEntry<int, dynamic>>[
+      for (var i = 0; i < hosts.length; i++) MapEntry(i, hosts[i]),
+    ];
+    indexed.sort((a, b) {
+      final ra = _sortRankFor(a.value);
+      final rb = _sortRankFor(b.value);
+      if (ra.group != rb.group) return ra.group.compareTo(rb.group);
+      if (ra.ms != rb.ms) return ra.ms.compareTo(rb.ms);
+      return a.key.compareTo(b.key);
+    });
+    return indexed.map((e) => e.value).toList(growable: false);
+  }
+
+  /// Вес локации для сортировки. Считается ровно из того же, что показано на
+  /// карточке, иначе список и подписи разошлись бы.
+  ({int group, int ms}) _sortRankFor(dynamic raw) {
+    final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
+    if (id.isEmpty) return serverSortRank();
+    final realCheck = _realCheckResults[id];
+    final livePing = _tunnel.isConnected ? _tunnel.latencyForHostName(id) : null;
+    return serverSortRank(
+      unsupportedProtocol: _unsupportedProtocols.containsKey(id),
+      corePing: livePing ??
+          ((realCheck != null && realCheck.ok) ? realCheck.latencyMs : null),
+      checkFailed: realCheck != null && !realCheck.ok,
+      inSubscription: _realEndpoints[id] != null,
+      subscriptionKnown:
+          _realEndpoints.isNotEmpty || _unsupportedProtocols.isNotEmpty,
+      tcpPing: _livePing[id],
+    );
+  }
   String? _error;
   bool _loading = true;
   String? _selectedId;
@@ -1354,7 +1398,7 @@ class _ServersScreenState extends State<ServersScreen> {
                     style: const TextStyle(color: AppColors.textDim)),
               ),
             if (_allHosts != null)
-              ..._allHosts!.map((s) {
+              ..._hostsSortedByPing!.map((s) {
                 final host = s as Map<String, dynamic>;
                 final id = host['host_name'] as String? ?? '';
                 final name = id.isEmpty ? tr('Без названия') : id;
@@ -1611,4 +1655,33 @@ class _ServersScreenState extends State<ServersScreen> {
       ),
     );
   }
+}
+
+/// Вес локации в списке «Серверы»: сначала группа, внутри группы — миллисекунды.
+///
+/// Группы по убыванию полезности:
+///   0 — есть измеренный пинг, сортируются по возрастанию;
+///   1 — замер ещё идёт;
+///   2 — сервер не ответил;
+///   3 — локации нет в подписке, подключиться некуда;
+///   4 — протокол, который приложение собрать не умеет.
+///
+/// Вынесено из виджета отдельной функцией, чтобы порядок можно было проверить
+/// тестом, а не глазами по скриншоту.
+@visibleForTesting
+({int group, int ms}) serverSortRank({
+  bool unsupportedProtocol = true,
+  int? corePing,
+  bool checkFailed = false,
+  bool inSubscription = false,
+  bool subscriptionKnown = false,
+  int? tcpPing,
+}) {
+  if (unsupportedProtocol) return (group: 4, ms: 0);
+  if (corePing != null && corePing > 0) return (group: 0, ms: corePing);
+  if (!inSubscription && subscriptionKnown) return (group: 3, ms: 0);
+  if (checkFailed) return (group: 2, ms: 0);
+  if (tcpPing != null && tcpPing > 0) return (group: 0, ms: tcpPing);
+  if (tcpPing != null && tcpPing < 0) return (group: 2, ms: 0);
+  return (group: 1, ms: 0);
 }
