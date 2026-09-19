@@ -1446,12 +1446,18 @@ class _ServersScreenState extends State<ServersScreen> {
                   pingLabel = tr('проверяю...');
                   pingColor = AppColors.textDim;
                 } else if (realCheck != null && !realCheck.ok) {
-                  // Сервер не ответил. Пишем это коротко и приглушённо, без
-                  // красного и без технических подробностей: карточка должна
-                  // сообщать факт, а не пугать. Причина отказа по-прежнему
-                  // пишется в журнал приложения.
+                  // Сервер не ответил — красным, чтобы выключенную локацию
+                  // было видно с одного взгляда.
+                  //
+                  // Пугала людей не краснота сама по себе, а то, что ею
+                  // заливало весь список из-за ложного «не найдена в
+                  // подписке»: не проверялся ни один сервер, а красными
+                  // становились все. Это починено выше, и красный снова
+                  // означает ровно то, что должен, — вот этот сервер сейчас
+                  // выключен. Технические подробности отказа остались в
+                  // журнале, на карточке только факт.
                   pingLabel = tr('нет ответа');
-                  pingColor = AppColors.textDim;
+                  pingColor = AppColors.danger;
                 } else if (endpoint == null &&
                     (_realEndpoints.isNotEmpty ||
                         _unsupportedProtocols.isNotEmpty)) {
@@ -1472,7 +1478,7 @@ class _ServersScreenState extends State<ServersScreen> {
                   pingColor = AppColors.textDim;
                 } else if (ping < 0) {
                   pingLabel = tr('нет ответа');
-                  pingColor = AppColors.textDim;
+                  pingColor = AppColors.danger;
                 } else if (isRealityOnly) {
                   // TCP-стук до Reality-узла успешен всегда, даже когда
                   // VLESS-инбаунд за ним мёртв, — поэтому число показываем как
@@ -1570,7 +1576,7 @@ class _ServersScreenState extends State<ServersScreen> {
                           _autoBalance
                               ? (_lastSwitchTarget != null
                                   ? '${tr('реально переключились на')} $_lastSwitchTarget'
-                                  : tr('следим за пингом каждые 25 с и переключаем туннель сами'))
+                                  : tr('следим за пингом и переключаем туннель сами'))
                               : tr('выбор лучшего сервера'),
                           style: const TextStyle(
                               fontSize: 10, color: AppColors.textDim),

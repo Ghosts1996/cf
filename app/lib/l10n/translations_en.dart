@@ -370,7 +370,7 @@ const Map<String, String> translationsEn = {
   'выбран': 'selected',
   'Авто-балансировка': 'Auto load balancing',
   'реально переключились на': 'actually switched to',
-  'следим за пингом каждые 25 с и переключаем туннель сами': 'we watch ping every 25s and switch the tunnel automatically',
+  'следим за пингом и переключаем туннель сами': 'we watch ping and switch the tunnel automatically',
   'выбор лучшего сервера': 'picks the best server',
   'Не удалось переключиться на': 'Failed to switch to',
   'Нет активного ключа с подпиской — нечего проверять.': 'No active key with a subscription — nothing to check.',
