@@ -60,6 +60,45 @@ class TunnelService {
   // проверки; изоляция публичного status сделана временной отпиской от
   // стримов внутри самого realCheckProfile().
   bool _probeInProgress = false;
+
+  // Сторож против вранья на экране: пока приложение показывает «Подключено»,
+  // раз в несколько секунд спрашиваем нативную сторону, жив ли сервис на самом
+  // деле. Без этого экран оставался с «ПОДКЛЮЧЕНО», когда VPN выключили не
+  // кнопкой в приложении — из шторки или в системных настройках: событие
+  // оттуда до нас не всегда доходит, а возврата из фона, на котором состояние
+  // сверялось раньше, в этом случае не происходит вовсе.
+  Timer? _stateWatchdogTimer;
+  static const _stateWatchdogInterval = Duration(seconds: 5);
+  // Сколько раз подряд нативная сторона сказала «не подключено». Верим не с
+  // первого раза: при холодном старте и сразу после подъёма плагин ещё не
+  // всегда привязан к foreground-сервису и честно отвечает «нет», хотя туннель
+  // работает. Два ответа подряд врать уже не могут.
+  int _watchdogNegativeReads = 0;
+
+  /// Видно ли приложение на экране прямо сейчас. Ставится с экрана
+  /// «Подключение», который и так следит за жизненным циклом.
+  ///
+  /// Нужно, чтобы отличить «пользователь выключил VPN» от «туннель оборвался
+  /// сам». Из Dart эти два события приходят одинаковым «отключено»: кнопка в
+  /// шторке и переключатель в системных настройках гасят сервис тем же путём,
+  /// что и наша кнопка. Но выключает человек, глядя на экран, а обрывы от
+  /// смены сети и засыпания случаются, когда приложение свёрнуто. Поэтому
+  /// отключение при открытом приложении считаем намеренным и молча его не
+  /// отменяем: человек и так видит «ОТКЛЮЧЕНО» и нажмёт кнопку, если хотел
+  /// иначе. Цена обратной ошибки выше — приложение само включало VPN, который
+  /// только что выключили руками.
+  bool _appInForeground = true;
+  set appInForeground(bool value) => _appInForeground = value;
+
+  /// Поднимать ли туннель обратно после неожиданного отключения.
+  ///
+  /// Вынесено отдельной функцией, чтобы правило можно было проверить тестом:
+  /// цена ошибки в обе стороны высокая — либо приложение включает VPN, который
+  /// только что выключили руками, либо не возвращает туннель, оборвавшийся в
+  /// кармане.
+  @visibleForTesting
+  static bool shouldAutoReconnectAfterDrop({required bool appInForeground}) =>
+      !appInForeground;
   /// Просьба свернуть «Реальную проверку»: пользователь нажал «Подключить».
   ///
   /// Проверка поднимает собственную временную сессию тем же единственным
@@ -557,6 +596,7 @@ class TunnelService {
         mapped == TunnelConnState.disconnected) {
       mapped = TunnelConnState.connecting;
     }
+    _restartStateWatchdog(mapped == TunnelConnState.connected);
 
     if (!_restoringConnectStartedAt) {
       if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
@@ -955,6 +995,47 @@ class TunnelService {
     return _fallbackSelfPackage;
   }
 
+  /// Включает сторожа, пока на экране «Подключено», и гасит его в остальное
+  /// время.
+  void _restartStateWatchdog(bool shouldRun) {
+    if (!shouldRun) {
+      _stateWatchdogTimer?.cancel();
+      _stateWatchdogTimer = null;
+      _watchdogNegativeReads = 0;
+      return;
+    }
+    if (_stateWatchdogTimer != null) return; // уже сторожим
+    _watchdogNegativeReads = 0;
+    _stateWatchdogTimer =
+        Timer.periodic(_stateWatchdogInterval, (_) => unawaited(_checkRealState()));
+  }
+
+  Future<void> _checkRealState() async {
+    // Во время подключения, смены сервера и проверки серверов состояние
+    // меняется само по себе и постоянно — сторожу там делать нечего.
+    if (_connectInProgress || _switchInProgress || _probeInProgress) return;
+    if (_hardKillSwitchEngaged) return;
+    if (status.value?.state != TunnelConnState.connected) return;
+    dynamic actual;
+    try {
+      actual = await _getServiceStateNative();
+    } catch (_) {
+      return; // нативная сторона не ответила — это не повод объявлять обрыв
+    }
+    if (_mapServiceState(actual) == TunnelConnState.connected) {
+      _watchdogNegativeReads = 0;
+      return;
+    }
+    _watchdogNegativeReads++;
+    if (_watchdogNegativeReads < 2) return;
+    unawaited(AppLogService.instance.log(
+        'Сервис VPN не работает, хотя на экране «Подключено» — '
+        'приводим экран в соответствие',
+        level: AppLogLevel.warning));
+    _watchdogNegativeReads = 0;
+    _applyServiceState(actual);
+  }
+
   void _onStatusChanged(TunnelConnState state) {
     if (state != TunnelConnState.disconnected) return;
     if (_userInitiatedDisconnect) return;
@@ -974,6 +1055,15 @@ class TunnelService {
     // включённом Kill Switch; теперь оно работает всегда, и проверку нужно
     // исключить явно.
     if (_probeInProgress) return;
+    // Выключили при открытом приложении — считаем, что этого и хотели.
+    if (!shouldAutoReconnectAfterDrop(appInForeground: _appInForeground)) {
+      unawaited(AppLogService.instance.log(
+          'Туннель отключён при открытом приложении — считаем это намеренным '
+          'и не поднимаем его обратно сами'));
+      _sessionEstablished = false;
+      killSwitchBlocking.value = false;
+      return;
+    }
     // Восстанавливаем только то, что было поднято. Сорвавшаяся попытка
     // подключения тоже заканчивается состоянием «отключено», и повтор поверх
     // неё означал бы, что приложение молча поднимает и гасит ядро прямо

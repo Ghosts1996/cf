@@ -137,6 +137,12 @@ class _ConnectScreenState extends State<ConnectScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
+    // Сообщаем службе, видит ли пользователь экран прямо сейчас: по этому она
+    // отличает «выключил сам» от «оборвалось само» — см. appInForeground.
+    // inactive — это тоже «пользователь смотрит»: так Android помечает
+    // состояние с опущенной шторкой, а именно из неё и нажимают «Отключить».
+    _tunnel.appInForeground = state == AppLifecycleState.resumed ||
+        state == AppLifecycleState.inactive;
     if (state != AppLifecycleState.resumed) return;
     // Пока пользователь сам подключается/отключается, состояние и так
     // меняется под контролем _toggleConnection() — лезть туда с
