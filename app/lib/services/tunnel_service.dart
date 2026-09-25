@@ -109,6 +109,33 @@ class TunnelService {
   /// дали работать. Со стороны это и есть «через раз запускается, надо выйти и
   /// нажать пару раз».
   bool _probeCancelRequested = false;
+
+  /// Кто прямо сейчас имеет право трогать единственный нативный клиент:
+  /// 'connect' — боевое подключение, 'probe' — проверка серверов, null —
+  /// свободен.
+  ///
+  /// Раньше взаимная блокировка держалась на двух отдельных флагах, и она была
+  /// дырявой с обеих сторон. Подключение тратит секунды на подготовку — читает
+  /// подписку, спрашивает ядро о возможностях, собирает конфиг, — и всё это
+  /// время `status` ещё «отключено», а `isBusy` ложь: проверка считала клиент
+  /// свободным и поднимала поверх свою сессию. Симметрично и наоборот: пока
+  /// проверка готовилась, её собственный флаг ещё не был взведён, и
+  /// подключение не знало, что надо подождать. Отсюда и «через раз
+  /// запускается»: кто успел занять клиент первым, тот и работал, второй
+  /// досиживал таймаут.
+  ///
+  /// Теперь владелец один и взводится первой строкой, до любого await.
+  String? _nativeOwner;
+
+  /// Номер текущей сессии туннеля. Растёт на каждом подключении.
+  ///
+  /// Фоновая проверка связи засыпает на секунды и живёт дольше, чем сессия, в
+  /// которой её запустили. Без номера выходило так: пользователь отключился и
+  /// тут же подключился заново, а проснувшаяся задача от старой сессии звала
+  /// `selectOutbound` уже на новой — и уводила её на чужую локацию из старого
+  /// списка. Задача запоминает номер при старте и молча выходит, если он
+  /// сменился.
+  int _sessionGeneration = 0;
   bool _userInitiatedDisconnect = false;
   String? _lastConnectionString;
   String? _lastPreferredHostName;
@@ -1374,8 +1401,13 @@ class TunnelService {
   /// в двадцать пять секунд, из-за которого приложение когда-то «дико лагало»
   /// на мобильном канале.
   Future<void> _runLatencyWarmup() async {
+    // Разгон тоже переживает свою сессию: между прогонами он спит секундами.
+    // Сам замер безобиден, но следом за ним идёт самовосстановление, а оно
+    // умеет переключать outbound — на чужой сессии это увело бы пользователя
+    // на локацию из прошлого списка.
+    final generation = _sessionGeneration;
     for (var run = 0; run < _latencyWarmupRuns; run++) {
-      if (!isConnected) return;
+      if (!isConnected || _sessionGeneration != generation) return;
       // force: разгон имеет смысл только пока он идёт подряд. Пропустить его
       // из-за трафика значит остаться с единственным холодным замером до
       // конца сессии.
@@ -1384,7 +1416,7 @@ class TunnelService {
         await Future<void>.delayed(_latencyWarmupSpacing);
       }
     }
-    if (!isConnected) return;
+    if (!isConnected || _sessionGeneration != generation) return;
     _latencyProbeTimer?.cancel();
     _latencyProbeTimer =
         Timer.periodic(_latencyProbeInterval, (_) => unawaited(_runLatencyProbe()));
@@ -1704,6 +1736,7 @@ class TunnelService {
     final completer = Completer<Map<String, int>>();
     StreamSubscription<dynamic>? sub;
     Timer? deadline;
+    Timer? cancelWatch;
     final collected = <String, int>{};
 
     void finish() {
@@ -1748,6 +1781,16 @@ class TunnelService {
       }, onError: (_) => finish());
 
       deadline = Timer(window, finish);
+      // Пользователь нажал «Подключить» — досиживать окно незачем: сбор идёт
+      // до сорока секунд, а подключение ждёт освобождения ядра двенадцать.
+      // Без этой проверки проверка успевала не уложиться, и подключение
+      // стартовало поверх неё.
+      cancelWatch = Timer.periodic(const Duration(milliseconds: 200), (t) {
+        if (_probeCancelRequested) {
+          t.cancel();
+          finish();
+        }
+      });
       await _client.urlTest(_latencyGroupTag).timeout(_nativeCallTimeout);
       return await completer.future;
     } catch (e) {
@@ -1755,6 +1798,7 @@ class TunnelService {
       return Map<String, int>.from(collected);
     } finally {
       deadline?.cancel();
+      cancelWatch?.cancel();
       await sub?.cancel();
     }
   }
@@ -2301,16 +2345,28 @@ class TunnelService {
       throw TunnelException(
           'Подключение уже выполняется — дождись его завершения.');
     }
-    // Нажатие пользователя важнее фоновой проверки: просим её свернуться и
-    // ждём, пока она отпустит нативный клиент. Без этого подключение стартует
-    // поверх её временной сессии и гарантированно проваливается по таймауту.
-    await _yieldProbeToConnect();
+    // Заявку взводим синхронно, до первого await. Пока идёт ожидание ниже,
+    // клиент формально ничей — и без этой строки проверка успевала войти
+    // ровно в это окно, забрать владение и заодно стереть просьбу свернуться.
     _connectInProgress = true;
     try {
+      // Нажатие пользователя важнее фоновой проверки: просим её свернуться и
+      // ждём, пока она отпустит нативный клиент. Без этого подключение
+      // стартует поверх её временной сессии и проваливается по таймауту.
+      // Ждём, пока проверка отпустит ядро. Если не дождались — забираем
+      // владение силой: нажатие пользователя важнее. Проверка увидит, что
+      // владельцем больше не числится, и в своём finally не станет гасить
+      // сессию, которую подняли уже мы.
+      await _yieldProbeToConnect();
+      _nativeOwner = 'connect';
+      // Подписки могли остаться снятыми проверкой, которая ещё не дошла до
+      // своего finally. Без них подключение не увидит события «поднялось».
+      _ensureStateSubscriptions();
       return await _connectInternal(connectionString,
           preferredHostName: preferredHostName);
     } finally {
       _connectInProgress = false;
+      if (_nativeOwner == 'connect') _nativeOwner = null;
     }
   }
 
@@ -2320,13 +2376,32 @@ class TunnelService {
   /// секунды, а держать кнопку дольше нельзя — человек нажал и смотрит на
   /// экран. Если она почему-то не уложилась, идём подключаться всё равно:
   /// хуже уже не будет, а ложное «подключение уже выполняется» — будет.
+  /// Возвращает подписки на события ядра, если их сейчас нет.
+  ///
+  /// «Реальная проверка» снимает их на время своей работы, чтобы её временная
+  /// сессия не просочилась в публичный статус. Если подключение забрало ядро,
+  /// не дождавшись её, подписок не будет вовсе — и ожидание подъёма туннеля
+  /// не увидит ни одного события, сколько бы ни ждало. Это и был самый
+  /// коварный вид «через раз запускается»: ядро поднималось, а приложение об
+  /// этом не узнавало.
+  void _ensureStateSubscriptions() {
+    _stateSub ??= _client.serviceStateStream.listen(_applyServiceState);
+    _statsSub ??= _client.trafficStatsStream.listen(_applyTrafficStats);
+    _faultSub ??= _client.faultStream.listen((error) {
+      lastError.value = error.toString();
+    });
+  }
+
   Future<void> _yieldProbeToConnect() async {
-    if (!_probeInProgress) return;
+    // Просьбу выставляем всегда, даже если проверка ещё только готовится и
+    // владельцем не числится: она сверится с этим флагом перед тем, как
+    // поднимать свою сессию, и не станет её поднимать вовсе.
     _probeCancelRequested = true;
+    if (_nativeOwner == null) return;
     unawaited(AppLogService.instance.log(
         'Нажато «Подключить» во время проверки серверов — сворачиваю проверку'));
     final deadline = DateTime.now().add(const Duration(seconds: 12));
-    while (_probeInProgress && DateTime.now().isBefore(deadline)) {
+    while (_nativeOwner != null && DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 150));
     }
   }
@@ -2978,6 +3053,7 @@ class TunnelService {
     killSwitchBlocking.value = false;
     _autoReconnectAttempt = 0;
     _sessionEstablished = true;
+    _sessionGeneration++;
   }
 
   /// Проверяет связь уже после того, как приложение сказало «Подключено», и
@@ -2991,7 +3067,17 @@ class TunnelService {
     required bool proxyOnly,
     required String? preferredHostName,
   }) async {
-    if (!isConnected) return;
+    // Задача переживает собственную сессию: она спит секундами, а пользователь
+    // за это время успевает отключиться и подключиться заново. Запоминаем, в
+    // какой сессии запустились, и на каждом шаге сверяемся — иначе проснувшаяся
+    // задача уводила бы уже новую сессию на локацию из старого списка.
+    final generation = _sessionGeneration;
+    bool stillOurs() =>
+        _sessionGeneration == generation &&
+        isConnected &&
+        !_userInitiatedDisconnect;
+
+    if (!stillOurs()) return;
 
     // Даём туннелю встать. Событие «интерфейс поднят» приходит раньше, чем
     // ядро дотянуло маршруты и резолвер: запрос в эту же секунду не проходит
@@ -3000,11 +3086,11 @@ class TunnelService {
     // там могла оказаться мёртвая. Со стороны это выглядело так: «Подключено»,
     // интернета нет, помогает только выключить и включить заново.
     await Future<void>.delayed(const Duration(seconds: 3));
-    if (!isConnected || _userInitiatedDisconnect) return;
+    if (!stillOurs()) return;
 
     // Два захода, а не один: первый может не успеть по той же причине.
     if (await _verifyInternetReachable(proxyOnly: proxyOnly)) return;
-    if (!isConnected || _userInitiatedDisconnect) return;
+    if (!stillOurs()) return;
     if (await _verifyInternetReachable(proxyOnly: proxyOnly)) return;
 
     final startName = connectedServerName.value;
@@ -3013,7 +3099,7 @@ class TunnelService {
     // локациях, и перебирать всю подписку — только тратить батарею.
     final limit = sessionOrder.length < 4 ? sessionOrder.length : 4;
     for (var next = 1; next < limit; next++) {
-      if (!isConnected || _userInitiatedDisconnect) return;
+      if (!stillOurs()) return;
       final candidate = sessionOrder[next];
       try {
         await _client
@@ -3041,7 +3127,7 @@ class TunnelService {
     // хуже всего: связь не подтвердил никто, но ушли мы при этом с локации,
     // которую пользователь выбрал сам и которая вполне могла работать — просто
     // проверочные адреса на этой сети недоступны.
-    if (isConnected && !_userInitiatedDisconnect) {
+    if (stillOurs()) {
       try {
         await _client
             .selectOutbound('proxy', 'out-0')
@@ -3078,11 +3164,25 @@ class TunnelService {
   /// подключился или отключился.
   Future<RealCheckResult> realCheckProfile(
       String connectionString, String hostName) async {
-    if (isConnected || isBusy || _probeInProgress) {
+    // Тот же единственный владелец нативного клиента, что и у подключения, —
+    // см. [_nativeOwner]. Берём его до первого await.
+    if (isConnected || isBusy || _nativeOwner != null || _connectInProgress) {
       return const RealCheckResult(
           ok: false,
           error: 'Сейчас активен другой туннель или уже идёт проверка.');
     }
+    _nativeOwner = 'probe';
+    _probeCancelRequested = false;
+    try {
+      return await _realCheckProfileOwned(connectionString, hostName);
+    } finally {
+      if (_nativeOwner == 'probe') _nativeOwner = null;
+      _probeCancelRequested = false;
+    }
+  }
+
+  Future<RealCheckResult> _realCheckProfileOwned(
+      String connectionString, String hostName) async {
     await _ensureInitialized();
 
     _ParsedVless? profile;
@@ -3221,20 +3321,25 @@ class TunnelService {
       final latency = best ?? await _measureWarmDelayMs(probe);
       return RealCheckResult(ok: true, latencyMs: latency);
     } finally {
-      try {
-        await _disconnectNative();
-      } catch (_) {}
-      // Та же пауза, что и в _settleAfterDisconnect() ниже — даём
-      // нативному сервису реально освободиться, прежде чем следующая
-      // проверка или обычное подключение попробуют стартовать заново.
-      await Future.delayed(const Duration(milliseconds: 350));
+      // Гасим собственную сессию только если ядро всё ещё наше. Если
+      // подключение забрало владение, не дождавшись нас, то сессия сейчас уже
+      // его — и disconnect здесь оборвал бы пользователю туннель сразу после
+      // того, как он поднялся.
+      if (_nativeOwner == 'probe') {
+        try {
+          await _disconnectNative();
+        } catch (_) {}
+        // Та же пауза, что и в _settleAfterDisconnect() ниже — даём
+        // нативному сервису реально освободиться, прежде чем следующая
+        // проверка или обычное подключение попробуют стартовать заново.
+        await Future.delayed(const Duration(milliseconds: 350));
+      }
       // Восстанавливаем обычные подписки на события основного клиента —
       // ровно как делает _ensureInitialized() при первом запуске.
-      _stateSub = _client.serviceStateStream.listen(_applyServiceState);
-      _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
-      _faultSub = _client.faultStream.listen((error) {
-        lastError.value = error.toString();
-      });
+      // Через ??=: подключение могло восстановить их раньше нас, забрав
+      // владение. Переприсвоение поверх живой подписки оставило бы вторую
+      // висеть и удваивало каждое событие ядра.
+      _ensureStateSubscriptions();
       _probeInProgress = false;
       _probeCancelRequested = false;
     }
@@ -3261,9 +3366,23 @@ class TunnelService {
   /// локаций на экране — забота вызывающего.
   Future<Map<String, RealCheckResult>> realCheckAllProfiles(
       String connectionString) async {
-    if (isConnected || isBusy || _probeInProgress) {
+    // Владельца берём первой строкой, до любого await: подготовка занимает
+    // секунды, и всё это время клиент обязан считаться занятым.
+    if (isConnected || isBusy || _nativeOwner != null || _connectInProgress) {
       return const <String, RealCheckResult>{};
     }
+    _nativeOwner = 'probe';
+    _probeCancelRequested = false;
+    try {
+      return await _realCheckAllProfilesOwned(connectionString);
+    } finally {
+      if (_nativeOwner == 'probe') _nativeOwner = null;
+      _probeCancelRequested = false;
+    }
+  }
+
+  Future<Map<String, RealCheckResult>> _realCheckAllProfilesOwned(
+      String connectionString) async {
     await _ensureInitialized();
 
     List<_ParsedVless> profiles;
@@ -3303,6 +3422,13 @@ class TunnelService {
       multiDnsSupported: await _coreSupportsMultiDns(),
       alternates: usable.skip(1).toList(),
     );
+
+    // Последняя проверка перед тем, как поднимать собственную сессию:
+    // подготовка выше занимает секунды (чтение подписки, опрос ядра), и за это
+    // время пользователь вполне мог нажать «Подключить». Поднять сессию сейчас
+    // значило бы заставить его подключение досиживать таймаут — ровно то, от
+    // чего мы и уходим.
+    if (_probeCancelRequested) return results;
 
     _probeInProgress = true;
     await _stateSub?.cancel();
@@ -3432,15 +3558,21 @@ class TunnelService {
               '${e.value.ok ? '${e.value.latencyMs} мс' : e.value.error}').join('; ')}'));
       return results;
     } finally {
-      try {
-        await _disconnectNative();
-      } catch (_) {}
-      await Future.delayed(const Duration(milliseconds: 350));
-      _stateSub = _client.serviceStateStream.listen(_applyServiceState);
-      _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
-      _faultSub = _client.faultStream.listen((error) {
-        lastError.value = error.toString();
-      });
+      // Гасим собственную сессию только если ядро всё ещё наше: подключение
+      // могло забрать владение, не дождавшись нас, и тогда сессия сейчас его.
+      // Без этой проверки проверка обрывала пользователю туннель сразу после
+      // того, как он поднялся, — и приходилось нажимать «Подключить» второй
+      // раз.
+      if (_nativeOwner == 'probe') {
+        try {
+          await _disconnectNative();
+        } catch (_) {}
+        await Future.delayed(const Duration(milliseconds: 350));
+      }
+      // Через ??=: подключение могло восстановить их раньше нас, забрав
+      // владение. Переприсвоение поверх живой подписки оставило бы вторую
+      // висеть и удваивало каждое событие ядра.
+      _ensureStateSubscriptions();
       _probeInProgress = false;
       _probeCancelRequested = false;
     }
@@ -4750,6 +4882,9 @@ class TunnelService {
     }
     _userInitiatedDisconnect = true;
     _sessionEstablished = false;
+    // Сессия кончилась — всё, что было запущено в её рамках и ещё не
+    // проснулось, теперь относится к прошлому и трогать ядро не должно.
+    _sessionGeneration++;
     _autoReconnectAttempt = 0;
     killSwitchBlocking.value = false;
     _restartDurationTicker(false);
@@ -4791,6 +4926,7 @@ class TunnelService {
       // _applyServiceState(), пока `_hardKillSwitchEngaged == true`, а к моменту
       // снятия флага событие уже прошло — экран после "Отключить" при активной
       // строгой блокировке остался бы в "ПОДКЛЮЧЕНО".
+      _restartStateWatchdog(false);
       status.value = const TunnelStatus(
         state: TunnelConnState.disconnected,
         duration: 0,
@@ -4824,7 +4960,6 @@ class TunnelService {
       if (!_switchInProgress) {
         _sessionOutboundOrder = const <_ParsedVless>[];
         _sessionOutboundRemarks = const <String>[];
-      _sessionOutboundRemarks = const <String>[];
         _lastConnectionString = null;
         _lastPreferredHostName = null;
         _connectStartedAt = null;
@@ -4852,6 +4987,10 @@ class TunnelService {
         return;
       }
       _restartDurationTicker(false);
+      // Сторож состояния гасим явно: здесь status пишется напрямую, минуя
+      // _applyServiceState(), который обычно его и останавливает. Иначе после
+      // «Отключить» таймер продолжал бы тикать до конца жизни приложения.
+      _restartStateWatchdog(false);
       status.value = const TunnelStatus(
         state: TunnelConnState.disconnected,
         duration: 0,
