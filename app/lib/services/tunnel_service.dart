@@ -421,21 +421,7 @@ class TunnelService {
       // подписки они оставались только в logcat. Пишем в тот же журнал, что
       // показывает экран "Безопасность", и не трогаем info/debug — иначе
       // полезное тонет в служебном потоке.
-      _coreLogSub = _client.coreLogStream.listen((entries) {
-        if (entries is! List) return;
-        for (final entry in entries) {
-          final level = entry.level;
-          if (level == LogLevel.warn) {
-            AppLogService.instance
-                .log('Ядро: ${entry.message}', level: AppLogLevel.warning);
-          } else if (level == LogLevel.error ||
-              level == LogLevel.fatal ||
-              level == LogLevel.panic) {
-            AppLogService.instance
-                .log('Ядро: ${entry.message}', level: AppLogLevel.error);
-          }
-        }
-      });
+      _coreLogSub = _client.coreLogStream.listen(_handleCoreLogs);
     } catch (e) {
       // Плагин мог не отдать стримы, если его initialize() выше отвалился
       // по таймауту. Это не повод рушить весь запуск приложения — состояние
@@ -893,6 +879,90 @@ class TunnelService {
 
   @visibleForTesting
   TunnelConnState debugMapServiceState(dynamic state) => _mapServiceState(state);
+
+  static final _ansiEscape = RegExp(r'\x1B\[[0-9;]*m');
+  static final _coreLevelWord =
+      RegExp(r'^\s*(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|PANIC)\b');
+
+  /// Что делать со строкой журнала ядра: в какой уровень журнала приложения
+  /// её записать, или null — выбросить.
+  ///
+  /// Уровень берём из текста самой строки, а не из поля, которое присылает
+  /// плагин. Плагин переводит числовой уровень libbox в название по таблице
+  /// `0 → trace … 6 → panic`, а у sing-box порядок обратный: `0 — panic,
+  /// 1 — fatal, 2 — error, 3 — warn, 4 — info, 5 — debug, 6 — trace`. В итоге
+  /// весь шум — трассировка каждого пакета, отладка, служебные сообщения —
+  /// приходил с пометкой «panic/fatal/error» и писался в журнал как ошибка, а
+  /// настоящие ошибки ядра приходили как «info/debug» и выбрасывались. В
+  /// тексте же уровень написан словом, и ошибиться там нечему.
+  ///
+  /// В журнал идёт только WARN и выше. Всё остальное отбрасывается здесь, без
+  /// единого обращения к хранилищу.
+  @visibleForTesting
+  static AppLogLevel? coreLogSeverity(dynamic pluginLevel, String message) {
+    final clean = message.replaceAll(_ansiEscape, '');
+    final word = _coreLevelWord.firstMatch(clean)?.group(1);
+    String? level;
+    if (word != null) {
+      level = word == 'WARNING' ? 'WARN' : word;
+    } else {
+      // В тексте уровня нет — берём поле плагина, развернув его таблицу
+      // обратно: имя, которое он присылает, стоит на месте, зеркальном
+      // настоящему уровню.
+      const pluginOrder = [
+        'trace', 'debug', 'info', 'warn', 'error', 'fatal', 'panic'
+      ];
+      const trueOrder = [
+        'PANIC', 'FATAL', 'ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'
+      ];
+      final name = '$pluginLevel'.split('.').last.toLowerCase();
+      final index = pluginOrder.indexOf(name);
+      if (index >= 0) level = trueOrder[index];
+    }
+    switch (level) {
+      case 'WARN':
+        return AppLogLevel.warning;
+      case 'ERROR':
+      case 'FATAL':
+      case 'PANIC':
+        return AppLogLevel.error;
+      default:
+        return null;
+    }
+  }
+
+  /// Строка журнала ядра без цветовых кодов терминала — в журнале приложения
+  /// они выглядели как `[37mDEBUG[0m` и мешали читать.
+  @visibleForTesting
+  static String cleanCoreLogMessage(String message) =>
+      message.replaceAll(_ansiEscape, '').trim();
+
+  /// Пачка строк журнала ядра: отбрасываем шум, остальное пишем одной
+  /// записью в хранилище, а не по строке.
+  void _handleCoreLogs(dynamic entries) {
+    if (entries is! List) return;
+    final keep = <({String message, AppLogLevel level})>[];
+    for (final entry in entries) {
+      final String message;
+      final dynamic pluginLevel;
+      try {
+        message = '${entry.message}';
+        pluginLevel = entry.level;
+      } catch (_) {
+        continue;
+      }
+      final severity = coreLogSeverity(pluginLevel, message);
+      if (severity == null) continue;
+      keep.add((
+        message: 'Ядро: ${cleanCoreLogMessage(message)}',
+        level: severity,
+      ));
+    }
+    if (keep.isNotEmpty) unawaited(AppLogService.instance.logBatch(keep));
+  }
+
+  @visibleForTesting
+  void debugHandleCoreLogs(List<dynamic> entries) => _handleCoreLogs(entries);
 
   TunnelConnState _mapServiceState(dynamic state) {
     final s = state.toString().toLowerCase();

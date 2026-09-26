@@ -97,6 +97,42 @@ class AppLogService {
   // заставляет каждый следующий log() дождаться предыдущего.
   Future<void> _writeChain = Future.value();
 
+  /// Сколько раз журнал реально переписывался в хранилище. Нужен тестам:
+  /// по нему видно, что пачка строк ядра стоит одну запись, а не сотню.
+  @visibleForTesting
+  int debugWriteCount = 0;
+
+  /// Добавляет сразу несколько записей за одну запись в хранилище.
+  ///
+  /// Каждый вызов [log] — это чтение всего журнала, разбор JSON, запись
+  /// обратно на диск и ещё одно чтение для очистки старого. Для редких
+  /// событий приложения это незаметно. Журнал ядра приходит пачками по
+  /// десятку-сотне строк, и построчная запись превращалась в сотни полных
+  /// перезаписей в секунду: приложение без остановки гоняло JSON и диск,
+  /// пока пользователь листал сайты. Отсюда и лаги.
+  Future<void> logBatch(List<({String message, AppLogLevel level})> items) {
+    if (items.isEmpty) return _writeChain;
+    final next = _writeChain.then((_) async {
+      try {
+        final entries = await _readAll();
+        final now = DateTime.now();
+        for (final item in items) {
+          entries.add(AppLogEntry(
+              timestamp: now, message: item.message, level: item.level));
+        }
+        final trimmed = entries.length > _maxEntries
+            ? entries.sublist(entries.length - _maxEntries)
+            : entries;
+        await _writeAll(trimmed);
+        await applyRetention();
+      } catch (_) {
+        // Лог — вспомогательная функция, не критичная для работы VPN.
+      }
+    });
+    _writeChain = next;
+    return next;
+  }
+
   /// Добавляет запись в журнал. Безопасна для вызова откуда угодно —
   /// ошибки чтения/записи хранилища не пробрасываются наружу, чтобы сбой
   /// логирования никогда не мешал основной функциональности приложения.
@@ -179,6 +215,7 @@ class AppLogService {
   Future<void> _writeAll(List<AppLogEntry> entries) async {
     entries.sort((a, b) => a.timestamp.compareTo(b.timestamp));
     final raw = jsonEncode(entries.map((e) => e.toJson()).toList());
+    debugWriteCount++;
     await LocalPrefs.instance.setString(_storageKey, raw);
     entryCount.value = entries.length;
   }
