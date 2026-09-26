@@ -13,10 +13,19 @@ import 'local_prefs.dart';
 import 'singbox_runtime.dart';
 
 class TunnelService {
-  TunnelService._();
+  TunnelService._() : _client = createSingboxRuntime();
   static final TunnelService instance = TunnelService._();
 
-  final SingboxRuntimeClient _client = createSingboxRuntime();
+  /// Отдельный экземпляр поверх заданного ядра — только для тестов.
+  ///
+  /// Почти все баги подключения последних недель были гонками между
+  /// подключением, проверкой серверов и фоновыми задачами. Воспроизвести их
+  /// на телефоне — дело случая; подменив ядро управляемой заглушкой, их можно
+  /// гонять детерминированно, в каждой сборке.
+  @visibleForTesting
+  TunnelService.withRuntime(this._client);
+
+  final SingboxRuntimeClient _client;
 
   // Верхняя граница на любой вызов в нативный код плагина.
   //
@@ -882,12 +891,22 @@ class TunnelService {
     return synced;
   }
 
+  @visibleForTesting
+  TunnelConnState debugMapServiceState(dynamic state) => _mapServiceState(state);
+
   TunnelConnState _mapServiceState(dynamic state) {
     final s = state.toString().toLowerCase();
-    if (s.contains('connecting') || s.contains('starting'))
-      return TunnelConnState.connecting;
+    // Порядок проверок важен: сопоставление идёт по подстрокам, а
+    // «disconnected» содержит «connected», «disconnecting» — «connecting».
+    // Отрицательные состояния проверяем первыми. Раньше «disconnected»
+    // проваливалось в ветку «connected», и на Windows, где ядро шлёт именно
+    // эти слова, каждое отключение выглядело как подключение.
     if (s.contains('disconnecting') || s.contains('stopping'))
       return TunnelConnState.disconnecting;
+    if (s.contains('disconnected') || s.contains('stopped'))
+      return TunnelConnState.disconnected;
+    if (s.contains('connecting') || s.contains('starting'))
+      return TunnelConnState.connecting;
     if (s.contains('connected') ||
         s.contains('started') ||
         s.contains('running')) return TunnelConnState.connected;
