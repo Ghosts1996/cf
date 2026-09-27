@@ -107,5 +107,9 @@ flutter_launcher_icons:
   image_path: "assets/icon/app_icon.png"
   adaptive_icon_background: "#05030A"
   adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"
+  # Без этого генератор ужимает картинку ещё на 16 % с каждой стороны, и
+  # кольцо на рабочем столе выходило мелким в чёрной рамке. Запас под маски
+  # лаунчеров уже заложен в самой картинке: кольцо ~67 dp из 108.
+  adaptive_icon_foreground_inset: 0
   min_sdk_android: 21
   remove_alpha_ios: true
