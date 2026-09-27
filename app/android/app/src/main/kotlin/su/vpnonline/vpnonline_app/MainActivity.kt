@@ -1,13 +1,18 @@
 package su.vpnonline.vpnonline_app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.TrafficStats
+import android.net.Uri
 import android.os.Build
 import android.os.Process
+import android.provider.Settings
 import androidx.annotation.NonNull
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.File
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -22,6 +27,9 @@ import io.flutter.plugin.common.MethodChannel
 /// 2. `getUidTraffic` — фолбэк-счётчики RX/TX для _pollNativeTraffic().
 /// 3. `getPackageName` — имя пакета для исключения самого приложения из
 ///    туннеля.
+/// 4. `getUpdatesDir`, `canInstallPackages`, `openInstallPermissionSettings`,
+///    `installApk` — обновление приложения без браузера
+///    (services/update_installer.dart).
 ///
 /// Всё на стандартном Android API: androidx.core уже транзитивно приходит
 /// с Flutter embedding v2.
@@ -50,6 +58,13 @@ class MainActivity : FlutterActivity() {
                     // addDisallowedApplication с NameNotFoundException —
                     // VPN перестанет подниматься.
                     "getPackageName" -> result.success(packageName)
+                    "getUpdatesDir" -> result.success(updatesDir().absolutePath)
+                    "canInstallPackages" -> result.success(canInstallPackages())
+                    "openInstallPermissionSettings" -> {
+                        openInstallPermissionSettings()
+                        result.success(null)
+                    }
+                    "installApk" -> installApk(call.argument<String>("path"), result)
                     else -> result.notImplemented()
                 }
             }
@@ -97,6 +112,67 @@ class MainActivity : FlutterActivity() {
             grantResults[0] == PackageManager.PERMISSION_GRANTED
         pendingPermissionResult?.success(granted)
         pendingPermissionResult = null
+    }
+
+    /// Папка для загруженного обновления. Та же, что открыта наружу в
+    /// res/xml/update_paths.xml, — и только она.
+    private fun updatesDir(): File = File(cacheDir, "updates").apply { mkdirs() }
+
+    /// «Установка неизвестных приложений» для этого приложения. Такая
+    /// настройка есть с Android 8 (API 26); раньше разрешение давалось
+    /// одним общим переключателем, и спрашивать было не у кого.
+    private fun canInstallPackages(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            packageManager.canRequestPackageInstalls()
+        } else {
+            true
+        }
+
+    private fun openInstallPermissionSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:$packageName")
+            )
+        )
+    }
+
+    /// Передаёт загруженный APK системному установщику. Android покажет своё
+    /// окно «Обновить приложение?» — молча ставить пакеты обычное приложение
+    /// не может. Пакет и ключ подписи те же, поэтому новая версия встаёт
+    /// поверх старой с сохранением всех данных.
+    private fun installApk(path: String?, result: MethodChannel.Result) {
+        if (path == null) {
+            result.error("NO_PATH", "Не передан путь к файлу", null)
+            return
+        }
+        val file = File(path)
+        // Отдаём наружу только то, что лежит в папке обновлений: канал
+        // внутренний, но лишняя проверка здесь ничего не стоит.
+        val dir = updatesDir().canonicalPath + File.separator
+        if (!file.canonicalPath.startsWith(dir)) {
+            result.error("BAD_PATH", "Файл вне папки обновлений", null)
+            return
+        }
+        if (!file.isFile) {
+            result.error("NO_FILE", "Файла обновления нет", null)
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.updates", file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                )
+            }
+            startActivity(intent)
+            result.success(null)
+        } catch (e: Exception) {
+            result.error("INSTALL_FAILED", e.message, null)
+        }
     }
 
     /// Суммарные rx/tx байты именно UID этого приложения с момента загрузки

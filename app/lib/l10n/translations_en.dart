@@ -169,6 +169,14 @@ const Map<String, String> translationsEn = {
   'Обновить': 'Update',
   'Скрыть': 'Hide',
   'Не удалось открыть ссылку на обновление.': 'Could not open the update link.',
+  'Обновление загружено': 'Update downloaded',
+  'Установить': 'Install',
+  'Разрешите установку обновлений в открывшихся настройках, затем нажмите «Установить»': 'Allow installing updates in the settings that opened, then tap “Install”',
+  'Не удалось загрузить обновление': 'Could not download the update',
+  'Скачать через браузер': 'Download in browser',
+  'Повторить': 'Retry',
+  'Загрузка обновления…': 'Downloading update…',
+  'Загрузка обновления': 'Downloading update',
   'нет в подписке': 'not in your subscription',
   'проверяю...': 'checking...',
   'мс · отличный сигнал': 'ms · excellent signal',
@@ -181,7 +189,6 @@ const Map<String, String> translationsEn = {
   'Всего ключей': 'Total keys',
   'Не удалось загрузить баланс': 'Failed to load balance',
   'Купить / продлить ключ': 'Buy / renew key',
-  'Повторить': 'Retry',
 
   // ── referral_screen.dart ────────────────────────────────────────────────
   'Приглашай друзей своей ссылкой — за их покупки на твой баланс начисляется бонус (процент настроен в боте, актуальную ставку уточняй в поддержке).':

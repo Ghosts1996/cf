@@ -8,6 +8,7 @@ import '../widgets/update_banner.dart';
 import '../services/api_client.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/update_installer.dart';
 import '../services/update_service.dart';
 import '../services/locale_service.dart';
 import '../state/selected_server.dart';
@@ -95,6 +96,7 @@ class _ConnectScreenState extends State<ConnectScreen>
     _tunnel.status.addListener(_onTunnelStatus);
     _tunnel.latencyByRemark.addListener(_onTunnelLatency);
     UpdateService.instance.available.addListener(_onUpdateAvailable);
+    UpdateInstaller.instance.state.addListener(_onUpdateAvailable);
     // Спрашиваем про обновление не сразу, а через несколько секунд: сразу
     // после запуска приложение чаще всего подключается, и лишний запрос в ту
     // же секунду ему ни к чему.
@@ -166,10 +168,10 @@ class _ConnectScreenState extends State<ConnectScreen>
     if (mounted) setState(() {});
   }
 
-  /// Открывает ссылку на новую версию. Скачиванием и установкой занимается
-  /// уже Android: браузер скачает APK, система предложит его поставить поверх
-  /// текущего — ключи и настройки при этом сохраняются.
-  Future<void> _openUpdate(AppUpdate update) async {
+  /// Запасной путь: открыть файл обновления в браузере. Нужен, только если
+  /// загрузка внутри приложения не удалась — например, на прошивке, где
+  /// системный установщик ведёт себя нестандартно.
+  Future<void> _openUpdateInBrowser(AppUpdate update) async {
     var opened = false;
     try {
       opened = await launchUrl(update.downloadUrl,
@@ -250,6 +252,7 @@ class _ConnectScreenState extends State<ConnectScreen>
     _tunnel.status.removeListener(_onTunnelStatus);
     _tunnel.latencyByRemark.removeListener(_onTunnelLatency);
     UpdateService.instance.available.removeListener(_onUpdateAvailable);
+    UpdateInstaller.instance.state.removeListener(_onUpdateAvailable);
     SelectedServer.hostName.removeListener(_onTunnelStatus);
     SelectedServer.displayName.removeListener(_onTunnelStatus);
     _tunnel.connectedServerName.removeListener(_onTunnelStatus);
@@ -780,7 +783,14 @@ class _ConnectScreenState extends State<ConnectScreen>
           const SizedBox(height: 18),
           if (UpdateService.instance.available.value case final update?)
             UpdateBanner(
-              onUpdate: () => _openUpdate(update),
+              progress: UpdateInstaller.instance.state.value,
+              // Загрузка и установка — внутри приложения, со шкалой, без
+              // браузера (см. UpdateInstaller).
+              onUpdate: () => unawaited(
+                  UpdateInstaller.instance.downloadAndInstall(update)),
+              onInstall: () => unawaited(UpdateInstaller.instance.install()),
+              onCancel: UpdateInstaller.instance.cancel,
+              onOpenInBrowser: () => _openUpdateInBrowser(update),
               onDismiss: () => unawaited(UpdateService.instance.dismiss()),
             ),
           if (_tunnel.killSwitchBlocking.value)

@@ -25,6 +25,10 @@
          Android 11+ (пакетная видимость). -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission"/>
+    <!-- Обновление приложения без браузера: загруженный APK передаётся
+         системному установщику (UpdateInstaller → MainActivity.installApk).
+         Без этого разрешения Android 8+ молча не откроет окно установки. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
         android:label="VPNonLine"
         android:name="${applicationName}"
@@ -51,6 +55,18 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Отдаёт системному установщику загруженное обновление. Свой
+             подкласс, а не FileProvider напрямую, — см. UpdateFileProvider.kt.
+             Наружу открыта только папка updates/ в кэше. -->
+        <provider
+            android:name=".UpdateFileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
