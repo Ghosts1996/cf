@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
+import '../widgets/update_banner.dart';
 import '../services/api_client.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/update_service.dart';
 import '../services/locale_service.dart';
 import '../state/selected_server.dart';
 import 'plans_screen.dart';
@@ -91,6 +94,13 @@ class _ConnectScreenState extends State<ConnectScreen>
     super.initState();
     _tunnel.status.addListener(_onTunnelStatus);
     _tunnel.latencyByRemark.addListener(_onTunnelLatency);
+    UpdateService.instance.available.addListener(_onUpdateAvailable);
+    // Спрашиваем про обновление не сразу, а через несколько секунд: сразу
+    // после запуска приложение чаще всего подключается, и лишний запрос в ту
+    // же секунду ему ни к чему.
+    Timer(const Duration(seconds: 5), () {
+      if (mounted) unawaited(UpdateService.instance.check());
+    });
     SelectedServer.hostName.addListener(_onTunnelStatus);
     SelectedServer.displayName.addListener(_onTunnelStatus);
     _tunnel.connectedServerName.addListener(_onTunnelStatus);
@@ -147,8 +157,36 @@ class _ConnectScreenState extends State<ConnectScreen>
     // Пока пользователь сам подключается/отключается, состояние и так
     // меняется под контролем _toggleConnection() — лезть туда с
     // параллельной синхронизацией незачем.
+    unawaited(UpdateService.instance.check());
     if (_connecting || _tunnel.isBusy) return;
     unawaited(_resyncOnResume());
+  }
+
+  void _onUpdateAvailable() {
+    if (mounted) setState(() {});
+  }
+
+  /// Открывает ссылку на новую версию. Скачиванием и установкой занимается
+  /// уже Android: браузер скачает APK, система предложит его поставить поверх
+  /// текущего — ключи и настройки при этом сохраняются.
+  Future<void> _openUpdate(AppUpdate update) async {
+    var opened = false;
+    try {
+      opened = await launchUrl(update.downloadUrl,
+          mode: LaunchMode.externalApplication);
+    } catch (_) {}
+    if (!opened) {
+      // Не нашлось браузера — пробуем страницу релиза целиком.
+      try {
+        opened = await launchUrl(UpdateService.latestReleasePage,
+            mode: LaunchMode.externalApplication);
+      } catch (_) {}
+    }
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(tr('Не удалось открыть ссылку на обновление.')),
+      ));
+    }
   }
 
   Future<void> _resyncOnResume() async {
@@ -211,6 +249,7 @@ class _ConnectScreenState extends State<ConnectScreen>
   void dispose() {
     _tunnel.status.removeListener(_onTunnelStatus);
     _tunnel.latencyByRemark.removeListener(_onTunnelLatency);
+    UpdateService.instance.available.removeListener(_onUpdateAvailable);
     SelectedServer.hostName.removeListener(_onTunnelStatus);
     SelectedServer.displayName.removeListener(_onTunnelStatus);
     _tunnel.connectedServerName.removeListener(_onTunnelStatus);
@@ -739,6 +778,11 @@ class _ConnectScreenState extends State<ConnectScreen>
               ),
             ),
           const SizedBox(height: 18),
+          if (UpdateService.instance.available.value case final update?)
+            UpdateBanner(
+              onUpdate: () => _openUpdate(update),
+              onDismiss: () => unawaited(UpdateService.instance.dismiss()),
+            ),
           if (_tunnel.killSwitchBlocking.value)
             Container(
               margin: const EdgeInsets.only(bottom: 14),

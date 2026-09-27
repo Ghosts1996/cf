@@ -2,6 +2,15 @@ name: Build Android APK
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Опубликовать релиз: у всех установленных приложений появится плашка «Обновить»'
+        type: boolean
+        default: false
+      release_notes:
+        description: 'Что нового — текст релиза (необязательно)'
+        type: string
+        required: false
   push:
     branches: [ main, master, fix/secure-configs-and-ci ]
   pull_request:
@@ -11,6 +20,10 @@ jobs:
   build:
     name: Build Flutter APK
     runs-on: ubuntu-latest
+    # Создание релиза — запись в репозиторий. Выдаём явно: права токена по
+    # умолчанию зависят от настроек репозитория и бывают только на чтение.
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: app
@@ -87,7 +100,7 @@ jobs:
           timeout_minutes: 30
           max_attempts: 3
           retry_wait_seconds: 30
-          command: cd app && flutter build apk --debug --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+          command: cd app && flutter build apk --debug --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }} --dart-define=APP_BUILD=${{ github.run_number }}
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -107,10 +120,41 @@ jobs:
           timeout_minutes: 30
           max_attempts: 3
           retry_wait_seconds: 30
-          command: cd app && if [ -f android/keystore/keystore.jks ]; then flutter build apk --release --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; else echo "Keystore not found, building unsigned release APK" && flutter build apk --release --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}; fi
+          command: cd app && if [ -f android/keystore/keystore.jks ]; then flutter build apk --release --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }} --dart-define=APP_BUILD=${{ github.run_number }}; else echo "Keystore not found, building unsigned release APK" && flutter build apk --release --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }} --dart-define=APP_BUILD=${{ github.run_number }}; fi
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
           path: app/build/app/outputs/flutter-apk/app-release.apk
+
+      # Публикация релиза — только по галочке при ручном запуске. Каждая
+      # опубликованная сборка становится «последней», и все установленные
+      # приложения покажут плашку «Обновить» (см. lib/services/update_service.dart).
+      # Поэтому обычные запуски — пуши, тестовые сборки — до клиентов не доходят.
+      #
+      # APK без постоянного ключа подписи публиковать нельзя: Android не
+      # поставит его поверх установленного приложения (подписи разные), и
+      # клиент, нажавший «Обновить», получит «Приложение не установлено».
+      - name: Refuse to publish an APK without the release key
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Секрет ANDROID_KEYSTORE_BASE64 не задан — APK подписан временным ключом и не встанет поверх установленного приложения. Релиз не опубликован."
+            exit 1
+          fi
+
+      - name: Publish release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Приложение узнаёт номер последней сборки именно из этого тега —
+          # формат `build-<номер>` менять нельзя без правки UpdateService.
+          tag_name: build-${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: VPNonLine — сборка ${{ github.run_number }}
+          body: ${{ inputs.release_notes }}
+          files: app/build/app/outputs/flutter-apk/app-release.apk
+          make_latest: 'true'

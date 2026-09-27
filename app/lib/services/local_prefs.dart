@@ -164,6 +164,13 @@ class PrefKeys {
   /// Переживает перезапуск — именно по ним и выбирается самая быстрая локация
   /// до того, как в этом запуске хоть что-то измерено.
   static const cachedLatencyJson = 'servers.cached_latency';
+
+  /// Проверка обновлений приложения (UpdateService): когда спрашивали
+  /// последний раз, какая сборка оказалась последней и какую пользователь
+  /// скрыл кнопкой «×» — для неё плашка больше не показывается.
+  static const updateLastCheckMs = 'update.last_check_ms';
+  static const updateLatestBuild = 'update.latest_build';
+  static const updateDismissedBuild = 'update.dismissed_build';
   static const splitTunnelBypass = 'split_tunnel.bypassed_packages';
   // 'exclude' — выбранные приложения идут в обход VPN, остальные через
   // туннель; 'include' — через VPN идут только выбранные. Читается в
