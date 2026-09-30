@@ -7,8 +7,11 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter_singbox_client/flutter_singbox_client.dart'
+    show LogEntry, LogLevel;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:vpnonline_app/services/app_log_service.dart';
 import 'package:vpnonline_app/services/tunnel_service.dart';
 
 import 'support/fake_runtime.dart';
@@ -214,4 +217,26 @@ void main() {
             '${core.selected}');
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 40)));
+
+  test('после проверки серверов журнал ядра снова доходит, ровно по разу',
+      () async {
+    // Проверка снимает подписки на время своей сессии. Журнал ядра раньше не
+    // возвращался вовсе — ошибки ядра после неё пропадали из журнала.
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.realCheckAllProfiles(_subscription);
+    final before = AppLogService.instance.debugWriteCount;
+    core.emitCoreLog([
+      LogEntry(
+          level: LogLevel.warn,
+          message: 'WARN[0005] outbound/vless[out-0]: dial tcp: i/o timeout',
+          time: DateTime.now()),
+    ]);
+    await waitUntil(
+        () => AppLogService.instance.debugWriteCount > before,
+        timeout: const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(AppLogService.instance.debugWriteCount, before + 1,
+        reason: 'строка ядра должна попасть в журнал один раз');
+  }, timeout: const Timeout(Duration(seconds: 90)));
 }

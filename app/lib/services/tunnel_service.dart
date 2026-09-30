@@ -1614,6 +1614,7 @@ class TunnelService {
       }
       latencyByRemark.value = smoothed;
       unawaited(_saveLatencySnapshot(smoothed));
+      unawaited(_clearDeadMarks(raw.keys));
       // Результат замера в журнал: если ядро не достучалось ни до одной
       // локации, это первое, что стоит увидеть при разборе.
       unawaited(AppLogService.instance.log(
@@ -1703,6 +1704,7 @@ class TunnelService {
       connectedServerName.value = bestRemark!;
       _lastPreferredHostName = bestRemark;
       _persistSessionRoute();
+      unawaited(_markLocationDead(active));
       unawaited(AppLogService.instance.log(
           'Локация "$active" перестала отвечать — сам переключился на '
           '"$bestRemark" ($bestDelay мс) без разрыва туннеля',
@@ -2260,6 +2262,46 @@ class TunnelService {
   /// спрашиваем ядро пробным конфигом — как про транспорты и tls_fragment.
   bool? _unifiedDelaySupport;
 
+  /// Принимает ли ядро настройки своего фонового мониторинга
+  /// (`experimental.monitoring`, форк hiddify-sing-box). null — ещё не
+  /// спрашивали.
+  bool? _monitoringOptionsSupport;
+
+  /// Настройки фонового мониторинга ядра. Форк сам, без спроса, раз в пять
+  /// минут проверяет каждую локацию сессии через www.gstatic.com и для каждой
+  /// ответившей узнаёт IP у сторонних сервисов — отсюда в журнале пачки
+  /// «URL test failed» и «Failed to get IP info … 429» при каждом
+  /// подключении. Приложению эти результаты не нужны: задержку оно меряет
+  /// своей группой `latency`. Выключить мониторинг нельзя, но можно сделать
+  /// его редким и лёгким: раз в час, тем же адресом, что и наш замер, и не
+  /// больше трёх проверок разом — чтобы в первые секунды после подключения
+  /// дюжина рукопожатий не толкалась с трафиком пользователя.
+  static const Map<String, dynamic> _monitoringOptions = {
+    'interval': '1h',
+    'urls': [_latencyTestUrl],
+    'workers': 3,
+  };
+
+  Future<bool> _coreSupportsMonitoringOptions() async {
+    final cached = _monitoringOptionsSupport;
+    if (cached != null) return cached;
+    try {
+      await _ensureInitialized();
+      final supported = await _checkConfigQuietly(jsonEncode({
+        'log': {'level': 'error'},
+        'outbounds': [
+          {'type': 'direct', 'tag': 'direct'}
+        ],
+        'experimental': {'monitoring': _monitoringOptions},
+      }));
+      _monitoringOptionsSupport = supported;
+      return supported;
+    } catch (_) {
+      _monitoringOptionsSupport = false;
+      return false;
+    }
+  }
+
   /// Включён ли «быстрый пинг» и умеет ли его установленное ядро. Оба
   /// условия сразу: настройка сама по себе ничего не значит на ядре без
   /// поддержки опции — конфиг с неизвестным полем такое ядро отвергает целиком.
@@ -2480,6 +2522,10 @@ class TunnelService {
     _faultSub ??= _client.faultStream.listen((error) {
       lastError.value = error.toString();
     });
+    // Журнал ядра проверка серверов снимает вместе с остальными подписками,
+    // а возвращался он только при запуске приложения: после первой же
+    // проверки предупреждения и ошибки ядра переставали попадать в журнал.
+    _coreLogSub ??= _client.coreLogStream.listen(_handleCoreLogs);
   }
 
   Future<void> _yieldProbeToConnect() async {
@@ -2619,10 +2665,12 @@ class TunnelService {
       // Составной резолвер для адреса сервера спрашиваем всегда: он ничего не
       // меняет там, где 1.1.1.1 и так доступен, и спасает там, где нет.
       _coreSupportsMultiDns(),
+      _coreSupportsMonitoringOptions(),
     ]);
     final tlsFragmentSupported = probes[0];
     final unifiedDelaySupported = probes[1];
     final multiDnsSupported = probes[2];
+    final monitoringOptionsSupported = probes[3];
     _sessionFastPing = unifiedDelaySupported;
     final probeMs = DateTime.now().difference(probeStarted).inMilliseconds;
     // См. PrefKeys.excludeAppFromTunnel. При fallback false список исключений
@@ -2768,6 +2816,7 @@ class TunnelService {
               tlsFragmentSupported: tlsFragmentSupported,
               unifiedDelaySupported: unifiedDelaySupported,
               multiDnsSupported: multiDnsSupported,
+              monitoringOptionsSupported: monitoringOptionsSupported,
               alternates: alts,
               adBlockRuleSetPath: adPath,
             );
@@ -3062,6 +3111,67 @@ class TunnelService {
     }
   }
 
+  /// Сколько помнить, что локация замолчала. Сервер, который лёг, обычно
+  /// лежит часами; если он поднимется раньше, отметку снимет первый же замер,
+  /// где он ответит.
+  static const _deadLocationTtl = Duration(hours: 3);
+
+  Future<Map<String, int>> _readDeadLocations() async {
+    try {
+      final raw = await LocalPrefs.instance.getString(PrefKeys.deadLocationsJson);
+      if (raw == null || raw.isEmpty) return <String, int>{};
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return <String, int>{};
+      return <String, int>{
+        for (final e in decoded.entries)
+          if (e.value is num) '${e.key}': (e.value as num).toInt(),
+      };
+    } catch (_) {
+      return <String, int>{};
+    }
+  }
+
+  Future<Set<String>> _loadDeadLocations() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final marks = await _readDeadLocations();
+    return {
+      for (final e in marks.entries)
+        if (now - e.value < _deadLocationTtl.inMilliseconds) e.key,
+    };
+  }
+
+  Future<void> _markLocationDead(String remark) async {
+    if (remark.isEmpty) return;
+    try {
+      final marks = await _readDeadLocations();
+      marks[remark] = DateTime.now().millisecondsSinceEpoch;
+      await LocalPrefs.instance
+          .setString(PrefKeys.deadLocationsJson, jsonEncode(marks));
+    } catch (_) {}
+  }
+
+  /// Локации, которые ответили на замер, — живы: отметку снимаем.
+  Future<void> _clearDeadMarks(Iterable<String> alive) async {
+    try {
+      final marks = await _readDeadLocations();
+      if (marks.isEmpty) return;
+      final before = marks.length;
+      for (final remark in alive) {
+        marks.remove(remark);
+      }
+      if (marks.length == before) return;
+      await LocalPrefs.instance
+          .setString(PrefKeys.deadLocationsJson, jsonEncode(marks));
+    } catch (_) {}
+  }
+
+  @visibleForTesting
+  Future<void> debugMarkLocationDead(String remark) => _markLocationDead(remark);
+
+  @visibleForTesting
+  Future<void> debugClearDeadMarks(Iterable<String> alive) =>
+      _clearDeadMarks(alive);
+
   /// Порядок перебора локаций при подключении.
   ///
   /// Выбрал страну сам — идём в неё, замеры тут никого не интересуют. Не
@@ -3074,10 +3184,29 @@ class TunnelService {
   ) async {
     final chosenManually = await LocalPrefs.instance
         .getBool(PrefKeys.serverChosenManually, fallback: false);
+    // Локации, с которых приложение недавно само уходило, потому что они
+    // замолчали. Начинать с такой — значит снова дать пользователю
+    // пятнадцать секунд «подключено, а интернета нет», пока самовосстановление
+    // не уведёт сессию на живую. Именно так и выглядело каждое подключение
+    // при выбранной вручную мёртвой локации.
+    final dead = await _loadDeadLocations();
+    bool isDead(_ParsedVless p) => dead.contains(p.remark);
+    List<_ParsedVless> deadLast(List<_ParsedVless> list) => [
+          ...list.where((p) => !isDead(p)),
+          ...list.where(isDead),
+        ];
+
     if (chosenManually) {
       final preferred = _matchProfile(profiles, preferredHostName);
-      if (preferred != null) {
+      if (preferred != null && !isDead(preferred)) {
         return [preferred, ...profiles.where((p) => !identical(p, preferred))];
+      }
+      if (preferred != null) {
+        unawaited(AppLogService.instance.log(
+            'Выбранная локация "${preferred.remark}" недавно перестала '
+            'отвечать — подключаюсь к живой. Как только она снова ответит, '
+            'подключение опять пойдёт в неё.',
+            level: AppLogLevel.warning));
       }
     }
 
@@ -3085,9 +3214,9 @@ class TunnelService {
     if (latency.isEmpty) {
       // Замеров ещё нет — оставляем порядок подписки, врать тут нечем.
       final preferred = _matchProfile(profiles, preferredHostName);
-      return preferred != null
+      return deadLast(preferred != null
           ? [preferred, ...profiles.where((p) => !identical(p, preferred))]
-          : profiles;
+          : profiles);
     }
 
     int rank(_ParsedVless p) {
@@ -3106,7 +3235,8 @@ class TunnelService {
       return 1 << 20; // не измерена — в конец, но не выброшена
     }
 
-    final sorted = [...profiles]..sort((a, b) => rank(a).compareTo(rank(b)));
+    final sorted = deadLast(
+        [...profiles]..sort((a, b) => rank(a).compareTo(rank(b))));
     unawaited(AppLogService.instance.log(
         'Локация не выбрана вручную — подключаемся к самой быстрой по '
         'последнему замеру: "${sorted.first.remark}" (${rank(sorted.first)} мс)'));
@@ -3219,6 +3349,9 @@ class TunnelService {
       _persistSessionRoute();
       if (await _verifyInternetReachable(
           proxyOnly: proxyOnly, timeout: _switchProbeTimeout)) {
+        // Сосед ответил, а исходная — нет: запоминаем, чтобы следующее
+        // подключение с неё не начиналось.
+        unawaited(_markLocationDead(sessionOrder.first.remark));
         return;
       }
     }
@@ -3919,6 +4052,8 @@ class TunnelService {
     // Путь к большому списку рекламных доменов на диске (AdBlockRules). null —
     // только короткий встроенный список [_adBlockDomains].
     String? adBlockRuleSetPath,
+    // Принимает ли ядро `experimental.monitoring` (см. _monitoringOptions).
+    bool monitoringOptionsSupported = false,
   }) {
     final adBlockRuleSet = blockAds && adBlockRuleSetPath != null;
     // Сборка одного proxy-outbound вынесена в функцию, чтобы тот же код собрал
@@ -4471,6 +4606,7 @@ class TunnelService {
         // hiddify-sing-box); на штатном ядре поля в конфиге просто нет, и
         // задержка считается по-старому — см. _coreSupportsUnifiedDelay.
         if (unifiedDelaySupported) 'unified_delay': {'enabled': true},
+        if (monitoringOptionsSupported) 'monitoring': _monitoringOptions,
       },
     };
 
@@ -4507,6 +4643,7 @@ class TunnelService {
     List<String> extraExcludedPackages = const <String>[],
     List<String> alternateUris = const <String>[],
     String? adBlockRuleSetPath,
+    bool monitoringOptionsSupported = false,
   }) {
     final profile = _ParsedVless.tryParseAny(vlessUri);
     if (profile == null) {
@@ -4538,6 +4675,7 @@ class TunnelService {
       multiDnsSupported: multiDnsSupported,
       alternates: alternates,
       adBlockRuleSetPath: adBlockRuleSetPath,
+      monitoringOptionsSupported: monitoringOptionsSupported,
     );
   }
 

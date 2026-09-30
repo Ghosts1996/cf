@@ -104,6 +104,13 @@ void main() {
       File('${dir.path}/vpn.json').writeAsStringSync(TunnelService.instance
           .buildConfigFromUri(_link,
               blockAds: true, adBlockRuleSetPath: srs, fakeIpDns: true));
+      File('${dir.path}/monitoring.json').writeAsStringSync(TunnelService
+          .instance
+          .buildConfigFromUri(_link,
+              blockAds: true,
+              adBlockRuleSetPath: srs,
+              fakeIpDns: true,
+              monitoringOptionsSupported: true));
       File('${dir.path}/proxy.json').writeAsStringSync(TunnelService.instance
           .buildConfigFromUri(_link,
               blockAds: true, adBlockRuleSetPath: srs, proxyOnly: true));

@@ -47,6 +47,9 @@ class FakeRuntime implements SingboxRuntimeClient {
     _state.add(s);
   }
 
+  /// Строки журнала ядра — как их присылает плагин.
+  void emitCoreLog(List<dynamic> entries) => _coreLog.add(entries);
+
   /// Ядро упало само — сеть пропала, Android усыпил сервис.
   void simulateDrop() {
     liveSessions = 0;

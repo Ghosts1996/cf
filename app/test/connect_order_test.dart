@@ -20,7 +20,11 @@ void main() {
 
   const latency = {'США': 210, 'Япония': 330, 'Германия': 70};
 
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    // LocalPrefs держит значения в памяти — отметки прошлых тестов стираем.
+    await LocalPrefs.instance.setString(PrefKeys.deadLocationsJson, '');
+  });
 
   Future<List<String>> order({required bool chosenManually, String? preferred}) async {
     await LocalPrefs.instance
@@ -49,5 +53,48 @@ void main() {
     final result = await TunnelService.instance
         .debugOrderProfilesForConnect(subscription, null);
     expect(result, ['США', 'Япония', 'Германия']);
+  });
+
+  group('замолчавшая локация', () {
+    test('выбрана вручную, но недавно замолчала — начинаем с живой, '
+        'она сама — последней', () async {
+      await TunnelService.instance.debugMarkLocationDead('Япония');
+      final result = await order(chosenManually: true, preferred: 'Япония');
+      expect(result, ['Германия', 'США', 'Япония']);
+    });
+
+    test('ответила на замер — снова первая, выбор пользователя в силе',
+        () async {
+      await TunnelService.instance.debugMarkLocationDead('Япония');
+      await TunnelService.instance.debugClearDeadMarks(['Япония']);
+      final result = await order(chosenManually: true, preferred: 'Япония');
+      expect(result.first, 'Япония');
+    });
+
+    test('не выбирали сами — замолчавшая уходит в конец даже при хорошем '
+        'старом замере', () async {
+      // По старому замеру Германия быстрее всех, но сейчас она молчит.
+      await TunnelService.instance.debugMarkLocationDead('Германия');
+      expect(await order(chosenManually: false), ['США', 'Япония', 'Германия']);
+    });
+
+    test('старая отметка (больше трёх часов) не мешает', () async {
+      final old = DateTime.now()
+          .subtract(const Duration(hours: 4))
+          .millisecondsSinceEpoch;
+      await LocalPrefs.instance.setString(
+          PrefKeys.deadLocationsJson, jsonEncode({'Япония': old}));
+      final result = await order(chosenManually: true, preferred: 'Япония');
+      expect(result.first, 'Япония');
+    });
+
+    test('замеров нет — замолчавшая всё равно не первой', () async {
+      await LocalPrefs.instance.setString(PrefKeys.cachedLatencyJson, '');
+      await LocalPrefs.instance.setBool(PrefKeys.serverChosenManually, false);
+      await TunnelService.instance.debugMarkLocationDead('США');
+      final result = await TunnelService.instance
+          .debugOrderProfilesForConnect(subscription, null);
+      expect(result, ['Япония', 'Германия', 'США']);
+    });
   });
 }
