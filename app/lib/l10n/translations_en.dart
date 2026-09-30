@@ -326,6 +326,8 @@ const Map<String, String> translationsEn = {
       'Resolves domains via internal addresses — faster and without timing leaks',
   'Блокировка рекламы и трекеров': 'Ad & tracker blocking',
   'На уровне DNS-фильтрации': 'At the DNS-filtering level',
+  'Реклама и трекеры в приложениях и на сайтах — 60 000+ доменов':
+      'Ads and trackers in apps and websites — 60,000+ domains',
   'Обход локальной сети': 'Bypass local network',
   'Устройства в LAN (роутер, принтер, NAS) доступны напрямую': 'LAN devices (router, printer, NAS) are reachable directly',
   'LAN тоже идёт через VPN — доступ к сети сервера': 'LAN also goes through the VPN — access to the server\'s network',

@@ -8,6 +8,7 @@ import 'package:flutter_singbox_client/flutter_singbox_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:app_settings/app_settings.dart';
+import 'ad_block_rules.dart';
 import 'app_log_service.dart';
 import 'local_prefs.dart';
 import 'singbox_runtime.dart';
@@ -2713,6 +2714,13 @@ class TunnelService {
       );
     }
 
+    // Большой список рекламных доменов лежит файлом: ядро читает его с диска.
+    // Не вышло положить файл или ядро его однажды отвергло — остаётся
+    // короткий встроенный список, подключение от этого не зависит.
+    final adBlockRuleSetPath = (blockAds && !_adBlockRuleSetRejected)
+        ? await AdBlockRules.ensureFile()
+        : null;
+
     Object? lastFailure;
     // Сколько локаций подряд пробовать, если подключение к ним не проходит
     // проверку связи. Каждая попытка — это полный цикл «поднять ядро, дождаться
@@ -2738,28 +2746,33 @@ class TunnelService {
                 .take(_maxSessionAlternates)
                 .toList()
             : const <_ParsedVless>[];
-        var config = _buildSingBoxConfig(
-          profile,
-          dnsProtection: dnsProtection,
-          blockAds: blockAds,
-          dpiBypass: dpiBypass,
-          selectedPackages: selectedPackages,
-          splitTunnelMode: splitTunnelMode,
-          extraExcludedPackages:
-              selfPackage != null ? <String>[selfPackage] : const <String>[],
-          proxyOnly: proxyOnly,
-          dnsProvider: dnsProvider,
-          customDns: customDns,
-          bypassLan: bypassLan,
-          muxEnabled: muxEnabled,
-          muxProtocol: muxProtocol,
-          fakeIpDns: fakeIpDns,
-          ipv6Enabled: ipv6Enabled,
-          tlsFragmentSupported: tlsFragmentSupported,
-          unifiedDelaySupported: unifiedDelaySupported,
-          multiDnsSupported: multiDnsSupported,
-          alternates: alternates,
-        );
+        String build(List<_ParsedVless> alts, String? adPath) =>
+            _buildSingBoxConfig(
+              profile,
+              dnsProtection: dnsProtection,
+              blockAds: blockAds,
+              dpiBypass: dpiBypass,
+              selectedPackages: selectedPackages,
+              splitTunnelMode: splitTunnelMode,
+              extraExcludedPackages: selfPackage != null
+                  ? <String>[selfPackage]
+                  : const <String>[],
+              proxyOnly: proxyOnly,
+              dnsProvider: dnsProvider,
+              customDns: customDns,
+              bypassLan: bypassLan,
+              muxEnabled: muxEnabled,
+              muxProtocol: muxProtocol,
+              fakeIpDns: fakeIpDns,
+              ipv6Enabled: ipv6Enabled,
+              tlsFragmentSupported: tlsFragmentSupported,
+              unifiedDelaySupported: unifiedDelaySupported,
+              multiDnsSupported: multiDnsSupported,
+              alternates: alts,
+              adBlockRuleSetPath: adPath,
+            );
+        var adPath = adBlockRuleSetPath;
+        var config = build(alternates, adPath);
         // Если сборка ядра не переваривает группу-селектор, конфиг отвергается
         // здесь, до попытки поднять туннель: пересобираем его с одним outbound'ом
         // и больше селектор в этом запуске не предлагаем.
@@ -2767,31 +2780,30 @@ class TunnelService {
         try {
           await _client.checkConfig(config);
         } catch (e) {
-          if (alternates.isEmpty) rethrow;
-          _selectorSupported = false;
-          sessionOrder = const <_ParsedVless>[];
-          config = _buildSingBoxConfig(
-            profile,
-            dnsProtection: dnsProtection,
-            blockAds: blockAds,
-            dpiBypass: dpiBypass,
-            selectedPackages: selectedPackages,
-            splitTunnelMode: splitTunnelMode,
-            extraExcludedPackages:
-                selfPackage != null ? <String>[selfPackage] : const <String>[],
-            proxyOnly: proxyOnly,
-            dnsProvider: dnsProvider,
-            customDns: customDns,
-            bypassLan: bypassLan,
-            muxEnabled: muxEnabled,
-            muxProtocol: muxProtocol,
-            fakeIpDns: fakeIpDns,
-            ipv6Enabled: ipv6Enabled,
-            tlsFragmentSupported: tlsFragmentSupported,
-            unifiedDelaySupported: unifiedDelaySupported,
-            multiDnsSupported: multiDnsSupported,
-          );
-          await _client.checkConfig(config);
+          var accepted = false;
+          if (adPath != null) {
+            // Большой список рекламы — самая новая часть конфига. Если ядро
+            // его не приняло, подключаемся с коротким встроенным списком, а
+            // не отказываем в подключении целиком.
+            _adBlockRuleSetRejected = true;
+            adPath = null;
+            unawaited(AppLogService.instance.log(
+                'Ядро не приняло список блокировки рекламы, работает '
+                'короткий встроенный: $e',
+                level: AppLogLevel.warning));
+            config = build(alternates, null);
+            try {
+              await _client.checkConfig(config);
+              accepted = true;
+            } catch (_) {}
+          }
+          if (!accepted) {
+            if (alternates.isEmpty) rethrow;
+            _selectorSupported = false;
+            sessionOrder = const <_ParsedVless>[];
+            config = build(const <_ParsedVless>[], adPath);
+            await _client.checkConfig(config);
+          }
         }
 
         // Конфиг, который реально уходит в ядро, пишем в журнал приложения с
@@ -3904,7 +3916,11 @@ class TunnelService {
     // Остальные локации подписки. Пустой список означает один outbound и
     // никакой группы — см. построение `outbounds` ниже.
     List<_ParsedVless> alternates = const <_ParsedVless>[],
+    // Путь к большому списку рекламных доменов на диске (AdBlockRules). null —
+    // только короткий встроенный список [_adBlockDomains].
+    String? adBlockRuleSetPath,
   }) {
+    final adBlockRuleSet = blockAds && adBlockRuleSetPath != null;
     // Сборка одного proxy-outbound вынесена в функцию, чтобы тот же код собрал
     // несколько — по одному на каждую локацию подписки. С единственным
     // outbound'ом смена страны требовала нового конфига и перезапуска ядра, то
@@ -4157,6 +4173,22 @@ class TunnelService {
         },
     ];
     final dnsRules = <Map<String, dynamic>>[
+      // Рекламный домен не резолвится вовсе: приложение сразу получает «нет
+      // такого домена» и не ждёт соединения, которое всё равно будет
+      // отклонено. Стоит первым — раньше Fake IP, иначе рекламный домен успел
+      // бы получить служебный адрес.
+      if (blockAds)
+        {
+          'domain_suffix': _adBlockDomains,
+          'action': 'predefined',
+          'rcode': 'NXDOMAIN',
+        },
+      if (adBlockRuleSet)
+        {
+          'rule_set': [_adBlockRuleSetTag],
+          'action': 'predefined',
+          'rcode': 'NXDOMAIN',
+        },
       if (fakeIpDns)
         {
           'query_type': ['A', 'AAAA'],
@@ -4183,7 +4215,13 @@ class TunnelService {
       // ресурсов в сети самого VPN-сервера.
       if (bypassLan)
         {'ip_is_private': true, 'action': 'route', 'outbound': 'direct'},
+      // DNS-правила выше ловят не всё: приложение может спросить адрес через
+      // DoH/DoT мимо нашего DNS или ходить по IP, а часть Android-телефонов
+      // с «Частным DNS» вообще не шлёт обычных DNS-запросов. Домен таких
+      // соединений ядро узнаёт сниффингом (SNI) и отклоняет здесь.
       if (blockAds) {'domain_suffix': _adBlockDomains, 'action': 'reject'},
+      if (adBlockRuleSet)
+        {'rule_set': [_adBlockRuleSetTag], 'action': 'reject'},
       // Запасной вариант для ядра без фрагментации на outbound'е: правило
       // маршрутизации с булевым tls_fragment. Оно рвёт рукопожатия внутри
       // туннеля, а не наше собственное, и от блокировки по ClientHello не
@@ -4396,6 +4434,15 @@ class TunnelService {
           'server': multiDnsSupported ? 'dns-direct-multi' : 'dns-direct',
         },
         'rules': routeRules,
+        if (adBlockRuleSet)
+          'rule_set': [
+            {
+              'type': 'local',
+              'tag': _adBlockRuleSetTag,
+              'format': 'binary',
+              'path': adBlockRuleSetPath,
+            },
+          ],
       },
       // Файл состояния ядра. Без него таблица Fake IP живёт только в памяти
       // процесса: после перезапуска ядра адреса 198.18.x.x, уже закэшированные
@@ -4459,6 +4506,7 @@ class TunnelService {
     List<String> selectedPackages = const <String>[],
     List<String> extraExcludedPackages = const <String>[],
     List<String> alternateUris = const <String>[],
+    String? adBlockRuleSetPath,
   }) {
     final profile = _ParsedVless.tryParseAny(vlessUri);
     if (profile == null) {
@@ -4489,6 +4537,7 @@ class TunnelService {
       unifiedDelaySupported: unifiedDelaySupported,
       multiDnsSupported: multiDnsSupported,
       alternates: alternates,
+      adBlockRuleSetPath: adBlockRuleSetPath,
     );
   }
 
@@ -4499,6 +4548,12 @@ class TunnelService {
     if (extra.isEmpty) return userSelected;
     return <String>{...userSelected, ...extra}.toList();
   }
+
+  static const _adBlockRuleSetTag = 'adblock';
+
+  /// Ядро однажды отвергло конфиг со списком рекламы — в этом запуске
+  /// приложения больше его не предлагаем.
+  bool _adBlockRuleSetRejected = false;
 
   static const _adBlockDomains = [
     'doubleclick.net',

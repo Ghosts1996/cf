@@ -100,8 +100,14 @@ class _ConnectScreenState extends State<ConnectScreen>
     // Спрашиваем про обновление не сразу, а через несколько секунд: сразу
     // после запуска приложение чаще всего подключается, и лишний запрос в ту
     // же секунду ему ни к чему.
+    //
+    // При запуске — всегда, без паузы между проверками: один лёгкий запрос
+    // на запуск ничего не стоит, а с паузой вышедший релиз показывался только
+    // через несколько часов, если приложение открывали незадолго до него.
     Timer(const Duration(seconds: 5), () {
-      if (mounted) unawaited(UpdateService.instance.check());
+      if (!mounted) return;
+      unawaited(UpdateInstaller.instance.cleanup());
+      unawaited(UpdateService.instance.check(force: true));
     });
     SelectedServer.hostName.addListener(_onTunnelStatus);
     SelectedServer.displayName.addListener(_onTunnelStatus);
@@ -160,6 +166,9 @@ class _ConnectScreenState extends State<ConnectScreen>
     // меняется под контролем _toggleConnection() — лезть туда с
     // параллельной синхронизацией незачем.
     unawaited(UpdateService.instance.check());
+    // Вернулись из настроек, где разрешали установку обновлений, — продолжаем
+    // установку сами.
+    unawaited(UpdateInstaller.instance.continueIfPermitted());
     if (_connecting || _tunnel.isBusy) return;
     unawaited(_resyncOnResume());
   }

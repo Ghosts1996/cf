@@ -163,6 +163,39 @@ class UpdateInstaller {
     }
   }
 
+  /// Убирает APK, оставшийся от прошлого обновления. После установки
+  /// новой версии Android запускает её с чистого листа, а файл в кэше так
+  /// и лежал бы — под сотню мегабайт. Вызывается при запуске; пока идёт
+  /// загрузка или файл ждёт установки, ничего не трогает.
+  Future<void> cleanup() async {
+    if (state.value.phase != UpdatePhase.idle) return;
+    try {
+      final dir = Directory(await _platform.updatesDir());
+      if (!dir.existsSync()) return;
+      for (final f in dir.listSync()) {
+        try {
+          f.deleteSync(recursive: true);
+        } catch (_) {}
+      }
+    } catch (_) {
+      // Нет канала (не Android) или нет доступа — не страшно.
+    }
+  }
+
+  /// Возврат в приложение из настроек Android. Если разрешение на установку
+  /// выдали — ставим сразу, без второго нажатия «Установить». Если нет —
+  /// ничего не делаем: иначе настройки открывались бы снова при каждом
+  /// возврате в приложение.
+  Future<void> continueIfPermitted() async {
+    if (state.value.phase != UpdatePhase.needsPermission) return;
+    try {
+      if (!await _platform.canInstall()) return;
+    } catch (_) {
+      return;
+    }
+    await install();
+  }
+
   /// Прервать загрузку.
   void cancel() {
     _cancelled = true;

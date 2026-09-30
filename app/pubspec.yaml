@@ -68,6 +68,10 @@ dependencies:
   # Windows/macOS/Linux, на Android и iOS tray_service.dart их не трогает.
   window_manager: ^0.4.3
   tray_manager: ^0.2.3
+  # Папка приложения, куда копируется список блокировки рекламы: ядро читает
+  # rule-set с диска (services/ad_block_rules.dart). Пакет и так приходил
+  # транзитивно, здесь он только объявлен явно.
+  path_provider: ^2.1.4
 
 dev_dependencies:
   flutter_test:
@@ -84,6 +88,7 @@ flutter:
   assets:
     - assets/icon/
     - assets/tray/
+    - assets/adblock/
 
 # image_path — полная иконка (фигура и фон) для iOS/macOS/Windows/web, где
 # адаптивных иконок нет. Для Android собирается adaptive icon: непрозрачный

@@ -125,7 +125,7 @@ void main() {
     expect(await service.check(), isNull);
   });
 
-  test('после сбоя сети пробуем снова сразу, а не через шесть часов', () async {
+  test('после сбоя сети пробуем снова сразу, а не через час', () async {
     var fail = true;
     final calls = <Uri>[];
     final service = UpdateService(
@@ -144,18 +144,35 @@ void main() {
     expect(update?.build, 340);
   });
 
-  test('чаще раза в шесть часов не спрашивает, но плашку помнит', () async {
+  test('чаще раза в час не спрашивает, но плашку помнит', () async {
     final calls = <Uri>[];
     final service = UpdateService(
         probe: redirectTo(latestTag, calls: calls), currentBuild: 330, now: now);
     await service.check();
-    clock = clock.add(const Duration(hours: 2));
+    clock = clock.add(const Duration(minutes: 40));
     final again = await service.check();
     expect(calls.length, 1, reason: 'повторный запрос раньше срока');
     expect(again?.build, 340, reason: 'найденное обновление не должно теряться');
-    clock = clock.add(const Duration(hours: 5));
+    clock = clock.add(const Duration(minutes: 30));
     await service.check();
     expect(calls.length, 2);
+  });
+
+  test('при запуске спрашивает всегда: релиз, вышедший после прошлой '
+      'проверки, виден сразу', () async {
+    var tag = 'https://github.com/Ghosts1996/cf/releases'; // релизов ещё нет
+    final service = UpdateService(
+        probe: (_) async => (status: 302, location: tag),
+        currentBuild: 342,
+        now: now);
+    expect(await service.check(), isNull);
+    // Через десять минут выходит сборка 343, приложение перезапускают.
+    tag = 'https://github.com/Ghosts1996/cf/releases/download/build-343/app-release.apk';
+    clock = clock.add(const Duration(minutes: 10));
+    expect(await service.check(), isNull,
+        reason: 'без force — ещё пауза между проверками');
+    final update = await service.check(force: true);
+    expect(update?.build, 343);
   });
 
   test('«×» скрывает эту версию, а следующая показывается снова', () async {

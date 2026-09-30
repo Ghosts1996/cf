@@ -244,6 +244,51 @@ void main() {
     expect(downloads, 1, reason: 'второй раз файл не качаем');
   });
 
+  test('вернулись из настроек с разрешением — ставим сами; без разрешения '
+      'настройки снова не открываем', () async {
+    final apk = fakeApk(50 * 1024);
+    storage = (res) async {
+      res.contentLength = apk.length;
+      res.add(apk);
+      await res.close();
+    };
+    platform.allowed = false;
+    final installer = UpdateInstaller(platform: platform);
+    await installer.downloadAndInstall(update());
+    expect(platform.settingsOpened, 1);
+
+    // Вернулся, ничего не разрешив: остаёмся на «Установить», в настройки
+    // не выкидываем.
+    await installer.continueIfPermitted();
+    expect(platform.settingsOpened, 1);
+    expect(platform.installed, isEmpty);
+    expect(installer.state.value.phase, UpdatePhase.needsPermission);
+
+    // Разрешил и вернулся — установка идёт без второго нажатия.
+    platform.allowed = true;
+    await installer.continueIfPermitted();
+    expect(platform.installed, hasLength(1));
+    expect(installer.state.value.phase, UpdatePhase.ready);
+
+    // Обычный возврат в приложение без ожидания разрешения — ничего.
+    await installer.continueIfPermitted();
+    expect(platform.installed, hasLength(1));
+  });
+
+  test('при запуске APK прошлого обновления удаляется, а идущая загрузка '
+      'не трогается', () async {
+    File('${dir.path}/vpnonline-341.apk').writeAsBytesSync(fakeApk(1000));
+    final installer = UpdateInstaller(platform: platform);
+    await installer.cleanup();
+    expect(dir.listSync(), isEmpty);
+
+    File('${dir.path}/vpnonline-342.apk').writeAsBytesSync(fakeApk(1000));
+    installer.state.value =
+        const UpdateProgress(phase: UpdatePhase.downloading);
+    await installer.cleanup();
+    expect(dir.listSync(), hasLength(1));
+  });
+
   test('старые файлы от прошлых обновлений убираются', () async {
     File('${dir.path}/vpnonline-300.apk').writeAsBytesSync(fakeApk(1000));
     File('${dir.path}/vpnonline-320.apk.part').writeAsBytesSync([1, 2, 3]);

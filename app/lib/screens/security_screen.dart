@@ -333,7 +333,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
                       _Row(
                         icon: Icons.block_rounded,
                         title: tr('Блокировка рекламы и трекеров'),
-                        subtitle: tr('На уровне DNS-фильтрации'),
+                        subtitle: tr('Реклама и трекеры в приложениях и на сайтах — 60 000+ доменов'),
                         trailing: NeonToggle(
                           value: _blockAds,
                           onChanged: (v) async {
