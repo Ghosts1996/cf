@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
-    show SessionOptions;
+    show OutboundGroup, OutboundGroupItem, SessionOptions;
 import 'package:vpnonline_app/services/singbox_runtime.dart';
 
 /// Управляемая заглушка нативного ядра.
@@ -84,6 +84,13 @@ class FakeRuntime implements SingboxRuntimeClient {
   /// настоящим ядром.
   String? lastConfig;
 
+  /// Сколько следующих стартов ядро провалит с этим сообщением, как плагин:
+  /// «starting», затем сообщение в faultStream и «stopped». Так выглядит
+  /// старт, пока прошлое ядро ещё держит служебный порт.
+  int failNextStarts = 0;
+  String failMessage = 'Start failed: listen command server: listen tcp '
+      '127.0.0.1:10086: bind: address already in use';
+
   @override
   Future<void> connect(SessionOptions options) async {
     calls.add('connect');
@@ -92,6 +99,14 @@ class FakeRuntime implements SingboxRuntimeClient {
     liveSessions++;
     if (liveSessions > maxLiveSessions) maxLiveSessions = liveSessions;
     _emit('ServiceState.starting');
+    if (failNextStarts > 0) {
+      failNextStarts--;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      _fault.add(failMessage);
+      liveSessions--;
+      _emit('ServiceState.stopped');
+      return;
+    }
     if (!willStart) return;
     await Future<void>.delayed(startDelay);
     _emit('ServiceState.started');
@@ -116,6 +131,21 @@ class FakeRuntime implements SingboxRuntimeClient {
     selected.add(outboundTag);
   }
 
+  /// Что ядро ответит на замер задержки группы: `{'out-1': 40}`. Кого нет в
+  /// списке — тот не ответил.
+  Map<String, int> groupDelays = {};
+
   @override
-  Future<void> urlTest(String groupTag) async => calls.add('urlTest');
+  Future<void> urlTest(String groupTag) async {
+    calls.add('urlTest');
+    if (groupDelays.isEmpty) return;
+    Timer(const Duration(milliseconds: 30), () {
+      _groups.add([
+        OutboundGroup(tag: groupTag, type: 'urltest', items: [
+          for (final e in groupDelays.entries)
+            OutboundGroupItem(tag: e.key, type: 'vless', urlTestDelayMs: e.value),
+        ]),
+      ]);
+    });
+  }
 }

@@ -1272,6 +1272,7 @@ class TunnelService {
     try {
       final blockConfig = _buildBlockAllConfig();
       await _client.checkConfig(blockConfig);
+      await waitCommandPortFree();
       await _client.connect(SessionOptions(
         config: blockConfig,
         networkMode: NetworkMode.vpn,
@@ -1464,6 +1465,7 @@ class TunnelService {
   void _restartLatencyProbe(bool shouldRun) {
     _latencyProbeTimer?.cancel();
     _latencyProbeTimer = null;
+    _restartLiveCheck(shouldRun && _sessionOutboundRemarks.length > 1);
     if (!shouldRun) {
       // Историю окна сбрасываем: следующая сессия — другие соединения, и
       // мешать замеры разных сессий в одном минимуме нельзя.
@@ -1647,6 +1649,128 @@ class TunnelService {
     return null;
   }
 
+  // ── Проверка живости туннеля ───────────────────────────────────────────
+  //
+  // Замер задержки идёт раз в две минуты, а самовосстановление ждёт двух
+  // молчаливых замеров подряд. Если сервер умирал посреди работы, интернета
+  // не было до четырёх минут — это и есть «слетает интернет сам по себе».
+  // Проверка живости смотрит чаще, но почти ничего не стоит: пока данные
+  // приходят, туннель заведомо жив и она молчит; пока телефон лежит без
+  // трафика в фоне, радио ради неё не будится.
+
+  static const _liveCheckInterval = Duration(seconds: 30);
+
+  /// Сколько байт должно прийти за интервал, чтобы считать туннель живым без
+  /// всякой проверки. Наш собственный запрос проверки — сотни байт.
+  static const _liveCheckAliveRxBytes = 32 * 1024;
+
+  Timer? _liveCheckTimer;
+  int _liveCheckRxMark = 0;
+  int _liveCheckTxMark = 0;
+  bool _liveCheckRunning = false;
+  IOClient? _liveClient;
+
+  @visibleForTesting
+  static LiveCheckAction liveCheckDecision({
+    required int rxDelta,
+    required int txDelta,
+    required bool foreground,
+  }) {
+    if (rxDelta >= _liveCheckAliveRxBytes) return LiveCheckAction.alive;
+    if (!foreground && rxDelta <= 0 && txDelta <= 0) {
+      return LiveCheckAction.skip;
+    }
+    return LiveCheckAction.probe;
+  }
+
+  @visibleForTesting
+  Future<void> debugLiveCheckTick() => _liveCheckTick();
+
+  void _restartLiveCheck(bool shouldRun) {
+    _liveCheckTimer?.cancel();
+    _liveCheckTimer = null;
+    _closeLiveClient();
+    if (!shouldRun) return;
+    _liveCheckRxMark = _downloadTotalBytes;
+    _liveCheckTxMark = _uploadTotalBytes;
+    _liveCheckTimer = Timer.periodic(
+        _liveCheckInterval, (_) => unawaited(_liveCheckTick()));
+  }
+
+  void _closeLiveClient() {
+    _liveClient?.close();
+    _liveClient = null;
+  }
+
+  /// Один маленький запрос через туннель. Соединение держим между проверками
+  /// (keep-alive), чтобы не платить каждые полминуты рукопожатием с сервером.
+  Future<bool> _liveProbe({required bool fresh}) async {
+    if (fresh) _closeLiveClient();
+    final client = _liveClient ??= IOClient(HttpClient()
+      ..idleTimeout = const Duration(seconds: 90)
+      ..findProxy = (_) => 'PROXY 127.0.0.1:$_proxyPort;');
+    try {
+      final response = await client
+          .head(Uri.parse(_probeUrls.first))
+          .timeout(const Duration(seconds: 4));
+      return response.statusCode > 0;
+    } catch (_) {
+      _closeLiveClient();
+      return false;
+    }
+  }
+
+  Future<void> _liveCheckTick() async {
+    if (_liveCheckRunning || !isConnected) return;
+    if (_connectInProgress || _switchInProgress || _probeInProgress || isBusy) {
+      return;
+    }
+    if (_sessionOutboundRemarks.length < 2) return; // переключаться некуда
+    final rxDelta = _downloadTotalBytes - _liveCheckRxMark;
+    final txDelta = _uploadTotalBytes - _liveCheckTxMark;
+    _liveCheckRxMark = _downloadTotalBytes;
+    _liveCheckTxMark = _uploadTotalBytes;
+    final action = liveCheckDecision(
+        rxDelta: rxDelta, txDelta: txDelta, foreground: _appInForeground);
+    if (action != LiveCheckAction.probe) return;
+
+    final generation = _sessionGeneration;
+    bool stillOurs() => _sessionGeneration == generation && isConnected;
+    _liveCheckRunning = true;
+    try {
+      if (await _liveProbe(fresh: false)) return;
+      // Старое соединение могло просто истечь — повторяем по свежему.
+      if (!stillOurs()) return;
+      if (await _liveProbe(fresh: true)) return;
+      await Future<void>.delayed(const Duration(seconds: 2));
+      if (!stillOurs()) return;
+      if (await _liveProbe(fresh: true)) return;
+      if (!stillOurs() || _latencyProbeRunning) return;
+
+      unawaited(AppLogService.instance.log(
+          'Связь через "${connectedServerName.value}" пропала — ищу живую '
+          'локацию, не дожидаясь планового замера',
+          level: AppLogLevel.warning));
+      _latencyProbeRunning = true;
+      Map<String, int> measured;
+      try {
+        // Окно короче планового: ядро проверяет дюжину локаций двумя
+        // пачками по пять секунд, а человек в это время сидит без интернета.
+        measured = await measureLatenciesThroughTunnel(
+            timeout: const Duration(seconds: 12));
+      } finally {
+        _latencyProbeRunning = false;
+      }
+      if (!stillOurs()) return;
+      if (measured.isNotEmpty) {
+        latencyByRemark.value = {...latencyByRemark.value, ...measured};
+      }
+      await _recoverIfActiveOutboundIsDead(measured, immediate: true);
+    } finally {
+      _liveCheckRunning = false;
+    }
+  }
+
   /// Самовосстановление: если активная локация перестала отвечать, а соседние
   /// по группе отвечают, переключаем селектор на живую.
   ///
@@ -1657,7 +1781,8 @@ class TunnelService {
   /// Переключение идёт внутри поднятой сессии, командой ядру: TUN не
   /// опускается, уведомление не моргает, уже открытые соединения доживают на
   /// прежнем сервере.
-  Future<void> _recoverIfActiveOutboundIsDead(Map<String, int> measured) async {
+  Future<void> _recoverIfActiveOutboundIsDead(Map<String, int> measured,
+      {bool immediate = false}) async {
     // По именам, а не по разобранным профилям: этот список переживает
     // перезапуск приложения, и восстановление работает и на сессии, которую
     // подняли до запуска.
@@ -1683,7 +1808,10 @@ class TunnelService {
     }
 
     _activeOutboundSilentRuns++;
-    if (_activeOutboundSilentRuns < 2) return;
+    // Два молчаливых замера подряд — по расписанию это четыре минуты без
+    // интернета. Проверка живости (_liveCheckTick) к этому моменту уже трижды
+    // убедилась, что связи нет, поэтому ей второй замер не нужен.
+    if (_activeOutboundSilentRuns < 2 && !immediate) return;
     _activeOutboundSilentRuns = 0;
 
     // Самая быстрая из ответивших.
@@ -1705,6 +1833,10 @@ class TunnelService {
       _lastPreferredHostName = bestRemark;
       _persistSessionRoute();
       unawaited(_markLocationDead(active));
+      // Соединение проверки живости осталось на прежнем сервере (уже
+      // открытые соединения ядро не переводит) — следующую проверку начинаем
+      // со свежего.
+      _closeLiveClient();
       unawaited(AppLogService.instance.log(
           'Локация "$active" перестала отвечать — сам переключился на '
           '"$bestRemark" ($bestDelay мс) без разрыва туннеля',
@@ -2692,9 +2824,24 @@ class TunnelService {
       if (selfPackage != null) selfPackage,
     }.toList();
 
+    // Время по этапам подготовки — в журнал вместе с итогом. Одно общее
+    // число («9796 мс») не говорит, чего ждали: разрешений, снятия
+    // блокировки Kill Switch или подписки.
+    final stages = <String>[];
+    var stageStarted = connectStarted;
+    void stage(String name) {
+      final now = DateTime.now();
+      final ms = now.difference(stageStarted).inMilliseconds;
+      if (ms >= 50) stages.add('$name $ms мс');
+      stageStarted = now;
+    }
+
+    stage('уведомления, настройки и опрос ядра');
+
     // Служебную блокирующую сессию Kill Switch нужно снять перед обычным
     // подключением — иначе новая сессия конкурирует с ней за системный TUN.
     await _disengageHardKillSwitch();
+    stage('снятие блокировки Kill Switch');
 
     // Системное разрешение на VPN обязано быть запрошено до connect() в
     // VPN-режиме (`if (!await client.requestVPNPermission()) return;` по README
@@ -2718,8 +2865,10 @@ class TunnelService {
       // долистать жизненный цикл.
       await Future.delayed(const Duration(milliseconds: 350));
     }
+    stage('разрешение VPN');
 
     final profiles = await _loadProfiles(connectionString);
+    stage('подписка');
     final ordered = await _orderProfilesForConnect(profiles, preferredHostName);
 
     // Локация с транспортом, которого ядро не знает, портит не только себя:
@@ -2732,6 +2881,7 @@ class TunnelService {
     // подряд ради горстки разных ответов.
     final supportFlags =
         await Future.wait(ordered.map(_isProfileSupported));
+    stage('проверка транспортов');
     final usable = <_ParsedVless>[];
     for (var i = 0; i < ordered.length; i++) {
       if (supportFlags[i]) usable.add(ordered[i]);
@@ -2751,7 +2901,8 @@ class TunnelService {
     // возможностях или сам подъём туннеля.
     unawaited(AppLogService.instance.log(
         'Подготовка подключения: ${DateTime.now().difference(connectStarted).inMilliseconds} мс '
-        '(из них опрос возможностей ядра $probeMs мс), '
+        '(из них опрос возможностей ядра $probeMs мс'
+        '${stages.isEmpty ? '' : '; ${stages.join(', ')}'}), '
         'в сессию пойдёт не больше ${_maxSessionAlternates + 1} локаций'));
     if (usable.isEmpty) {
       throw TunnelException(
@@ -2862,7 +3013,11 @@ class TunnelService {
         // говорят, с какими параметрами его пытались поднять.
         unawaited(AppLogService.instance.log('Конфиг ядра: ${_maskSecrets(config)}'));
 
-        Future<void> startSession() => _client.connect(SessionOptions(
+        Future<void> startSession() async {
+          await waitCommandPortFree();
+          // Ошибка прошлой попытки не должна прервать ожидание этой.
+          lastError.value = null;
+          return _client.connect(SessionOptions(
               config: config,
               networkMode: proxyOnly ? NetworkMode.proxy : NetworkMode.vpn,
               // На Android split-tunnel задаётся не только в JSON sing-box, но и на
@@ -2895,6 +3050,7 @@ class TunnelService {
                 stopButtonLabel: 'Отключить',
               ),
             ));
+        }
 
         try {
           await startSession();
@@ -2931,7 +3087,23 @@ class TunnelService {
         final startupWindow = Duration(
             seconds: (12 + sessionOrder.length).clamp(12, 25));
         final startupStarted = DateTime.now();
-        final reallyConnected = await _waitForConnected(startupWindow);
+        var reallyConnected = await _waitForConnected(startupWindow);
+        // Порт ещё держит прошлое ядро — сервер тут ни при чём. Ждём, пока
+        // порт освободится, и поднимаем ту же локацию заново, а не идём к
+        // следующей и не показываем ошибку.
+        if (!reallyConnected && isPortBusyFault(lastError.value)) {
+          unawaited(AppLogService.instance.log(
+              'Ядро не стартовало: служебный порт занят прошлой сессией — '
+              'жду и запускаю ещё раз',
+              level: AppLogLevel.warning));
+          await _settleAfterDisconnect();
+          try {
+            await startSession();
+            reallyConnected = await _waitForConnected(startupWindow);
+          } on PlatformException catch (e) {
+            if (e.code != 'CONNECT_FAILED') rethrow;
+          }
+        }
         unawaited(AppLogService.instance.log(
             'Подъём ядра с ${sessionOrder.isEmpty ? 1 : sessionOrder.length} '
             'локациями: ${DateTime.now().difference(startupStarted).inMilliseconds} мс, '
@@ -3114,7 +3286,7 @@ class TunnelService {
   /// Сколько помнить, что локация замолчала. Сервер, который лёг, обычно
   /// лежит часами; если он поднимется раньше, отметку снимет первый же замер,
   /// где он ответит.
-  static const _deadLocationTtl = Duration(hours: 3);
+  static const _deadLocationTtl = Duration(hours: 12);
 
   Future<Map<String, int>> _readDeadLocations() async {
     try {
@@ -3196,12 +3368,26 @@ class TunnelService {
           ...list.where(isDead),
         ];
 
+    // Выбранная вручную, но замолчавшая локация идёт второй: подключение
+    // начинается с живой, а выбранная остаётся в сессии — её проверяет каждый
+    // замер, и как только она ответит, отметка снимется и следующее
+    // подключение снова пойдёт в неё. В конце списка она в сессию из дюжины
+    // локаций не попала бы и не проверялась бы вовсе.
+    _ParsedVless? revisit;
+    List<_ParsedVless> withRevisit(List<_ParsedVless> list) {
+      final keep = revisit;
+      if (keep == null || list.length < 2) return list;
+      final rest = list.where((p) => !identical(p, keep)).toList();
+      return [rest.first, keep, ...rest.skip(1)];
+    }
+
     if (chosenManually) {
       final preferred = _matchProfile(profiles, preferredHostName);
       if (preferred != null && !isDead(preferred)) {
         return [preferred, ...profiles.where((p) => !identical(p, preferred))];
       }
       if (preferred != null) {
+        revisit = preferred;
         unawaited(AppLogService.instance.log(
             'Выбранная локация "${preferred.remark}" недавно перестала '
             'отвечать — подключаюсь к живой. Как только она снова ответит, '
@@ -3214,9 +3400,9 @@ class TunnelService {
     if (latency.isEmpty) {
       // Замеров ещё нет — оставляем порядок подписки, врать тут нечем.
       final preferred = _matchProfile(profiles, preferredHostName);
-      return deadLast(preferred != null
+      return withRevisit(deadLast(preferred != null
           ? [preferred, ...profiles.where((p) => !identical(p, preferred))]
-          : profiles);
+          : profiles));
     }
 
     int rank(_ParsedVless p) {
@@ -3235,8 +3421,8 @@ class TunnelService {
       return 1 << 20; // не измерена — в конец, но не выброшена
     }
 
-    final sorted = deadLast(
-        [...profiles]..sort((a, b) => rank(a).compareTo(rank(b))));
+    final sorted = withRevisit(deadLast(
+        [...profiles]..sort((a, b) => rank(a).compareTo(rank(b)))));
     unawaited(AppLogService.instance.log(
         'Локация не выбрана вручную — подключаемся к самой быстрой по '
         'последнему замеру: "${sorted.first.remark}" (${rank(sorted.first)} мс)'));
@@ -3505,6 +3691,7 @@ class TunnelService {
       });
 
       try {
+        await waitCommandPortFree();
         await _client.connect(SessionOptions(
           config: config,
           networkMode: NetworkMode.proxy,
@@ -3695,6 +3882,7 @@ class TunnelService {
       });
       var upped = false;
       try {
+        await waitCommandPortFree();
         await _client.connect(SessionOptions(
           config: config,
           networkMode: NetworkMode.proxy,
@@ -3863,6 +4051,56 @@ class TunnelService {
   }
 
   static const _proxyPort = 2080;
+
+  /// Порт, на котором ядро на Android поднимает свой служебный сервер команд
+  /// (значение по умолчанию в плагине, SingboxEngine.serverPort).
+  static const _commandServerPort = 10086;
+
+  /// Ждёт, пока ядро прошлой сессии отпустит служебный порт.
+  ///
+  /// Плагин гасит старое ядро не сразу: событие «остановлено» приходит
+  /// раньше, чем закрывается его сервер команд. Новое ядро, запущенное в эту
+  /// щель, падает на старте с «listen tcp 127.0.0.1:10086: bind: address
+  /// already in use», плагин отдаёт CONNECT_FAILED — и подключение
+  /// срывалось, хотя сервер и ключ в полном порядке. Именно так выглядело
+  /// «нажал подключить — ошибка, нажал ещё раз — заработало».
+  ///
+  /// Проверка прямая: пробуем занять порт сами и тут же отпускаем. Занять
+  /// удалось — старое ядро ушло.
+  @visibleForTesting
+  static Future<bool> waitCommandPortFree({
+    int port = _commandServerPort,
+    Duration timeout = const Duration(seconds: 8),
+    bool force = false,
+  }) async {
+    if (!force && !Platform.isAndroid) return true;
+    final started = DateTime.now();
+    var waited = false;
+    while (true) {
+      try {
+        final socket =
+            await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+        await socket.close();
+        if (waited) {
+          unawaited(AppLogService.instance.log(
+              'Ядро прошлой сессии отпустило служебный порт через '
+              '${DateTime.now().difference(started).inMilliseconds} мс — '
+              'запускаю новое'));
+        }
+        return true;
+      } on SocketException {
+        waited = true;
+        if (DateTime.now().difference(started) >= timeout) {
+          unawaited(AppLogService.instance.log(
+              'Ядро прошлой сессии не отпустило служебный порт за '
+              '${timeout.inSeconds} с',
+              level: AppLogLevel.warning));
+          return false;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+    }
+  }
 
   /// Группа, по которой ядро меряет задержку. В маршрутизации не участвует.
   static const _latencyGroupTag = 'latency';
@@ -4987,6 +5225,13 @@ class TunnelService {
     if (status.value?.state == TunnelConnState.connected) return true;
     final completer = Completer<bool>();
     VoidCallback? listener;
+    // Ядро не стартовало вовсе («Start failed», «Core failed») — ждать
+    // остаток окна незачем: подключения уже не будет. Раньше в таком случае
+    // экран висел со спиннером все двенадцать-двадцать пять секунд.
+    void onFault() {
+      if (completer.isCompleted) return;
+      if (isCoreStartFault(lastError.value)) completer.complete(false);
+    }
 
     final timer = Timer(timeout, () {
       if (!completer.isCompleted) completer.complete(false);
@@ -5007,13 +5252,26 @@ class TunnelService {
     };
 
     status.addListener(listener);
+    lastError.addListener(onFault);
     try {
       return await completer.future;
     } finally {
       timer.cancel();
       status.removeListener(listener);
+      lastError.removeListener(onFault);
     }
   }
+
+  /// Сообщение плагина о том, что ядро не смогло стартовать.
+  @visibleForTesting
+  static bool isCoreStartFault(String? message) =>
+      message != null &&
+      (message.startsWith('Start failed') || message.startsWith('Core failed'));
+
+  /// Ядро не стартовало, потому что служебный порт ещё занят прошлым.
+  @visibleForTesting
+  static bool isPortBusyFault(String? message) =>
+      message != null && message.contains('address already in use');
 
   /// Проверяет, что пакеты действительно доходят до интернета через только
   /// что поднятый туннель. Возвращает true, только если удалённый сервер
@@ -5928,4 +6186,16 @@ class _WsPath {
   const _WsPath(this.path, this.maxEarlyData);
   final String path;
   final int maxEarlyData;
+}
+
+/// Что делать проверке живости туннеля на очередном шаге.
+enum LiveCheckAction {
+  /// Данные приходят — туннель жив, проверять нечего.
+  alive,
+
+  /// Телефон лежит без трафика в фоне — не будим радио.
+  skip,
+
+  /// Проверить запросом через туннель.
+  probe,
 }

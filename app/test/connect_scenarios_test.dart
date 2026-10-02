@@ -239,4 +239,48 @@ void main() {
     expect(AppLogService.instance.debugWriteCount, before + 1,
         reason: 'строка ядра должна попасть в журнал один раз');
   }, timeout: const Timeout(Duration(seconds: 90)));
+
+  test('ядро не стартовало: порт занят прошлой сессией — подключаемся с '
+      'первого нажатия и быстро, без ошибки', () async {
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    core.failNextStarts = 1;
+    final sw = Stopwatch()..start();
+    await tunnel.connect(_subscription);
+    sw.stop();
+    expect(tunnel.isConnected, isTrue);
+    expect(core.connectCount, 2, reason: 'одна неудачная попытка и повтор');
+    expect(tunnel.connectedServerName.value, 'Германия',
+        reason: 'сервер не виноват — повторяем ту же локацию, а не соседнюю');
+    expect(core.maxLiveSessions, 1);
+    // Раньше после такого сбоя ждали всё окно подъёма — 12+ секунд.
+    expect(sw.elapsedMilliseconds, lessThan(6000));
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 40)));
+
+  test('сервер умер посреди работы — проверка живости уводит на живой сразу, '
+      'а живой туннель не трогает', () async {
+    var server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    tunnel.appInForeground = true;
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    core.selected.clear();
+
+    // Туннель жив — никаких переключений.
+    await tunnel.debugLiveCheckTick();
+    expect(core.selected, isEmpty);
+    expect(tunnel.connectedServerName.value, 'Германия');
+
+    // Сервер умер: запросы через туннель не проходят, а соседи по группе
+    // отвечают.
+    await server.close(force: true);
+    core.groupDelays = {'out-1': 60, 'out-2': 40};
+    await tunnel.debugLiveCheckTick();
+    expect(core.selected, contains('out-2'),
+        reason: 'переключение на самую быструю живую локацию');
+    expect(tunnel.connectedServerName.value, 'Латвия');
+    server = await startWorkingTunnel();
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
 }

@@ -56,11 +56,12 @@ void main() {
   });
 
   group('замолчавшая локация', () {
-    test('выбрана вручную, но недавно замолчала — начинаем с живой, '
-        'она сама — последней', () async {
+    test('выбрана вручную, но недавно замолчала — начинаем с самой быстрой '
+        'живой, а выбранная второй: её проверит замер в этой же сессии',
+        () async {
       await TunnelService.instance.debugMarkLocationDead('Япония');
       final result = await order(chosenManually: true, preferred: 'Япония');
-      expect(result, ['Германия', 'США', 'Япония']);
+      expect(result, ['Германия', 'Япония', 'США']);
     });
 
     test('ответила на замер — снова первая, выбор пользователя в силе',
@@ -78,9 +79,9 @@ void main() {
       expect(await order(chosenManually: false), ['США', 'Япония', 'Германия']);
     });
 
-    test('старая отметка (больше трёх часов) не мешает', () async {
+    test('старая отметка (больше двенадцати часов) не мешает', () async {
       final old = DateTime.now()
-          .subtract(const Duration(hours: 4))
+          .subtract(const Duration(hours: 13))
           .millisecondsSinceEpoch;
       await LocalPrefs.instance.setString(
           PrefKeys.deadLocationsJson, jsonEncode({'Япония': old}));
