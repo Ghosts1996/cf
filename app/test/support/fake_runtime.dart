@@ -70,8 +70,13 @@ class FakeRuntime implements SingboxRuntimeClient {
   @override
   Stream<dynamic> get outboundGroupStream => _groups.stream;
 
+  /// Хвост прошлой сессии: плагин отвечает «работает», пока его не
+  /// попросят остановиться.
+  bool leftoverSession = false;
+
   @override
-  Future<dynamic> getServiceState() async => stateOverride ?? current;
+  Future<dynamic> getServiceState() async =>
+      leftoverSession ? 'ServiceState.started' : (stateOverride ?? current);
 
   @override
   Future<dynamic> getTrafficStats() async => const <String, dynamic>{};
@@ -114,6 +119,7 @@ class FakeRuntime implements SingboxRuntimeClient {
 
   @override
   Future<void> disconnect() async {
+    leftoverSession = false;
     calls.add('disconnect');
     disconnectCount++;
     if (liveSessions > 0) liveSessions--;
@@ -134,6 +140,14 @@ class FakeRuntime implements SingboxRuntimeClient {
   /// Что ядро ответит на замер задержки группы: `{'out-1': 40}`. Кого нет в
   /// списке — тот не ответил.
   Map<String, int> groupDelays = {};
+
+  int closeAllCount = 0;
+
+  @override
+  Future<void> closeAllConnections() async {
+    calls.add('closeAll');
+    closeAllCount++;
+  }
 
   @override
   Future<void> urlTest(String groupTag) async {

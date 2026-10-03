@@ -150,6 +150,10 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
         'Замер задержки через ядро доступен только на Android.');
   }
 
+  /// Командного канала у отдельного процесса нет — закрывать нечем.
+  @override
+  Future<void> closeAllConnections() async {}
+
   /// Пустой поток, а не заглушка с фейковыми данными: вызывающий увидит,
   /// что групп нет, и просто не будет предлагать этот способ замера.
   @override

@@ -309,9 +309,13 @@ class TunnelService {
   // столько же VLESS/Reality-рукопожатий, сколько серверов в подписке. Пока их
   // было четыре, это было незаметно. С двумя десятками внешних нод раз в 25
   // секунд телефон получал полсотни рукопожатий на мобильном канале — отсюда
-  // «дико лагает» и «через раз подключается». Раз в две минуты для числа,
-  // которое и так сглаживается по окну замеров, более чем достаточно.
-  static const Duration _latencyProbeInterval = Duration(minutes: 2);
+  // «дико лагает» и «через раз подключается».
+  //
+  // Раз в пять минут, а не в две: замер больше не отвечает за то, чтобы
+  // заметить умерший сервер, — это делает проверка живости раз в 30 секунд
+  // (_liveCheckTick), и стоит она одного маленького запроса, а не дюжины
+  // рукопожатий. Плановому замеру остаётся только число пинга на экране.
+  static const Duration _latencyProbeInterval = Duration(minutes: 5);
   /// Сколько последних замеров участвует в выборе минимума. Больше окно —
   /// устойчивее число, но дольше реакция на реальное ухудшение канала.
   static const int _latencySampleWindow = 5;
@@ -324,8 +328,14 @@ class TunnelService {
   /// прогрето, и честный круговой путь оказывается заметно короче. Раньше
   /// второй замер приходил через две минуты, третий — через четыре, и всё
   /// это время пользователь смотрел на завышенное число.
-  static const int _latencyWarmupRuns = 3;
-  static const Duration _latencyWarmupSpacing = Duration(seconds: 6);
+  ///
+  /// Два прогона через полминуты, а не три подряд через шесть секунд. Каждый
+  /// прогон — рукопожатие с каждой локацией сессии, и три прогона за первые
+  /// двадцать секунд — три дюжины рукопожатий ровно тогда, когда человек
+  /// только начал пользоваться интернетом: отсюда «после включения моросит и
+  /// лагает». Второе, уже прогретое число всё равно приходит в первую минуту.
+  static const int _latencyWarmupRuns = 2;
+  static const Duration _latencyWarmupSpacing = Duration(seconds: 30);
   // Выше этой скорости (байт/с в любую сторону) прогон пропускается —
   // пробник встанет в очередь за реальными данными и измерит не сеть.
   static const int _latencyProbeBusyBps = 300 * 1024;
@@ -1119,13 +1129,50 @@ class TunnelService {
       _stateWatchdogTimer?.cancel();
       _stateWatchdogTimer = null;
       _watchdogNegativeReads = 0;
+      _vpnInterfaceSeen = false;
       return;
     }
     if (_stateWatchdogTimer != null) return; // уже сторожим
     _watchdogNegativeReads = 0;
+    _vpnInterfaceSeen = false;
     _stateWatchdogTimer =
         Timer.periodic(_stateWatchdogInterval, (_) => unawaited(_checkRealState()));
   }
+
+  /// Проверка VPN-интерфейса в самом Android — независимая от плагина.
+  /// null — спросить не удалось (не Android, старая сборка без метода).
+  @visibleForTesting
+  Future<bool?> Function() vpnInterfaceProbe = _askAndroidVpnActive;
+
+  static Future<bool?> _askAndroidVpnActive() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return await _nativeStatsChannel
+          .invokeMethod<bool>('isVpnActive')
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Видели ли мы VPN-интерфейс в этой сессии. Пока не видели ни разу,
+  /// его отсутствию не верим: на прошивке, которая прячет от приложения его
+  /// же VPN, сторож иначе объявлял бы мёртвой каждую живую сессию.
+  bool _vpnInterfaceSeen = false;
+
+  Future<bool> _vpnInterfaceVanished() async {
+    // В proxy-режиме VPN-интерфейса нет по определению.
+    if (localProxyAddress.value != null) return false;
+    final up = await vpnInterfaceProbe();
+    if (up == true) {
+      _vpnInterfaceSeen = true;
+      return false;
+    }
+    return up == false && _vpnInterfaceSeen;
+  }
+
+  @visibleForTesting
+  Future<void> debugCheckRealState() => _checkRealState();
 
   Future<void> _checkRealState() async {
     // Во время подключения, смены сервера и проверки серверов состояние
@@ -1140,6 +1187,25 @@ class TunnelService {
       return; // нативная сторона не ответила — это не повод объявлять обрыв
     }
     if (_mapServiceState(actual) == TunnelConnState.connected) {
+      // Плагин считает сессию живой, пока к нему подключён клиент команд
+      // ядра. Ядро, осиротевшее после неудачной гонки старта и остановки,
+      // этому клиенту отвечает исправно — а VPN-интерфейса у него уже нет:
+      // на экране «Подключено», в шторке пусто, интернета нет. Поэтому в
+      // VPN-режиме сверяемся ещё и с самим Android.
+      if (await _vpnInterfaceVanished()) {
+        _watchdogNegativeReads++;
+        if (_watchdogNegativeReads < 2) return;
+        _watchdogNegativeReads = 0;
+        unawaited(AppLogService.instance.log(
+            'Плагин считает VPN включённым, но VPN-интерфейса в системе нет — '
+            'гашу остатки сессии и показываю «отключено»',
+            level: AppLogLevel.warning));
+        try {
+          await _disconnectNative();
+        } catch (_) {}
+        _applyServiceState('ServiceState.stopped');
+        return;
+      }
       _watchdogNegativeReads = 0;
       return;
     }
@@ -1272,7 +1338,7 @@ class TunnelService {
     try {
       final blockConfig = _buildBlockAllConfig();
       await _client.checkConfig(blockConfig);
-      await waitCommandPortFree();
+      await _awaitCoreFullyStopped();
       await _client.connect(SessionOptions(
         config: blockConfig,
         networkMode: NetworkMode.vpn,
@@ -1837,6 +1903,13 @@ class TunnelService {
       // открытые соединения ядро не переводит) — следующую проверку начинаем
       // со свежего.
       _closeLiveClient();
+      // И не только наше: все открытые соединения висели бы на мёртвом
+      // сервере до своих таймаутов — минуту после переключения браузер и
+      // мессенджеры «моросили». Закрытые, они тут же переоткрываются уже
+      // через живой.
+      try {
+        await _client.closeAllConnections().timeout(_nativeCallTimeout);
+      } catch (_) {}
       unawaited(AppLogService.instance.log(
           'Локация "$active" перестала отвечать — сам переключился на '
           '"$bestRemark" ($bestDelay мс) без разрыва туннеля',
@@ -2678,6 +2751,7 @@ class TunnelService {
       {String? preferredHostName}) async {
     final connectStarted = DateTime.now();
     lastError.value = null;
+    _corePortStuck = false;
     await _ensureInitialized();
     // На Android 13+ одного объявления POST_NOTIFICATIONS в манифесте
     // недостаточно: пока пользователь не подтвердит runtime-разрешение,
@@ -2939,9 +3013,18 @@ class TunnelService {
         // под группой-селектором — это и позволяет менять страну без разрыва (см.
         // построение `outbounds` в _buildSingBoxConfig и switchPreferredHost).
         // Порядок здесь и порядок тегов out-N обязаны совпадать.
+        // Одноимённые локации в одну сессию не берём. В подписках, собранных
+        // из нескольких источников, «Италия» или «Мобильный интернет»
+        // встречаются по два раза — это разные серверы, а замеры, отметки о
+        // замолчавших и выбор пользователя приложение ведёт по имени. С двумя
+        // «Италиями» в сессии самовосстановление «уходило на живую Италию» и
+        // попадало на мёртвую с тем же именем.
+        final sessionNames = <String>{profile.remark};
         final alternates = (_selectorSupported && !proxyOnly)
             ? usable
-                .where((e) => !identical(e, profile))
+                .where((e) =>
+                    !identical(e, profile) &&
+                    (e.remark.isEmpty || sessionNames.add(e.remark)))
                 .take(_maxSessionAlternates)
                 .toList()
             : const <_ParsedVless>[];
@@ -3014,7 +3097,7 @@ class TunnelService {
         unawaited(AppLogService.instance.log('Конфиг ядра: ${_maskSecrets(config)}'));
 
         Future<void> startSession() async {
-          await waitCommandPortFree();
+          await _awaitCoreFullyStopped();
           // Ошибка прошлой попытки не должна прервать ожидание этой.
           lastError.value = null;
           return _client.connect(SessionOptions(
@@ -3140,6 +3223,15 @@ class TunnelService {
         // «Подключено», а подбор рабочей локации идёт в фоне. Раньше здесь
         // ждали до восьми секунд на проверку и ещё столько же на каждого
         // соседа, и всё это время экран висел со спиннером.
+        if (sessionOrder.length > 1) {
+          // Подстраховка к `cache_id`: ядро обязано стоять ровно на той
+          // локации, название которой мы сейчас покажем.
+          try {
+            await _client
+                .selectOutbound('proxy', 'out-0')
+                .timeout(_nativeCallTimeout);
+          } catch (_) {}
+        }
         if (sessionOrder.length > 1 && !proxyOnly) {
           final connectedName = profile.remark.isNotEmpty
               ? profile.remark
@@ -3233,7 +3325,7 @@ class TunnelService {
         // Отказ Android поднять VpnService — не про сервер. Перебирать
         // остальные локации бессмысленно: каждая упрётся в то же самое.
         await _settleAfterDisconnect();
-        throw TunnelException(e.message);
+        throw TunnelException(_corePortStuck ? _corePortStuckMessage : e.message);
       } catch (e) {
         lastFailure = e;
         await _settleAfterDisconnect();
@@ -3245,6 +3337,9 @@ class TunnelService {
     // продолжаться, даже когда одна из них не удалась (сети нет, телефон в
     // метро). А если сессии и не было, флаг и так false: первая же неудачная
     // попытка вручную не превратится в бесконечный фоновый цикл.
+    if (_corePortStuck && isPortBusyFault(lastError.value)) {
+      throw TunnelException(_corePortStuckMessage);
+    }
     throw TunnelException(
       'Не удалось подключиться ни к одному серверу (${usable.length} исп.'
       '${skippedCount > 0 ? ', ещё $skippedCount пропущено — ядро не поддерживает их транспорт' : ''}'
@@ -3510,58 +3605,36 @@ class TunnelService {
     if (!stillOurs()) return;
     if (await _verifyInternetReachable(proxyOnly: proxyOnly)) return;
 
-    final startName = connectedServerName.value;
-
-    // Не больше трёх соседей: если четыре локации подряд молчат, дело не в
-    // локациях, и перебирать всю подписку — только тратить батарею.
-    final limit = sessionOrder.length < 4 ? sessionOrder.length : 4;
-    for (var next = 1; next < limit; next++) {
-      if (!stillOurs()) return;
-      final candidate = sessionOrder[next];
-      try {
-        await _client
-            .selectOutbound('proxy', 'out-$next')
-            .timeout(_nativeCallTimeout);
-      } catch (_) {
-        break; // селектор не отвечает — возвращаемся на исходную ниже
-      }
-      unawaited(AppLogService.instance.log(
-          'Локация не ответила на фоновую проверку — переключаюсь внутри '
-          'поднятой сессии на "${candidate.remark}"'));
-      final name = candidate.remark.isNotEmpty
-          ? candidate.remark
-          : (preferredHostName ?? 'VPNOnline');
-      connectedServerName.value = name;
-      _persistSessionRoute();
-      if (await _verifyInternetReachable(
-          proxyOnly: proxyOnly, timeout: _switchProbeTimeout)) {
-        // Сосед ответил, а исходная — нет: запоминаем, чтобы следующее
-        // подключение с неё не начиналось.
-        unawaited(_markLocationDead(sessionOrder.first.remark));
-        return;
-      }
-    }
-
-    // Ни один сосед не подтвердил связь — возвращаем сессию на ту локацию, с
-    // которой начинали. Оставить её на последнем перебранном кандидате было бы
-    // хуже всего: связь не подтвердил никто, но ушли мы при этом с локации,
-    // которую пользователь выбрал сам и которая вполне могла работать — просто
-    // проверочные адреса на этой сети недоступны.
-    if (stillOurs()) {
-      try {
-        await _client
-            .selectOutbound('proxy', 'out-0')
-            .timeout(_nativeCallTimeout);
-        if (startName != null) connectedServerName.value = startName;
-        _persistSessionRoute();
-      } catch (_) {
-        // Селектор не отвечает — сессия остаётся как есть, рвать её нельзя.
-      }
-    }
+    // Исходная локация молчит. Раньше здесь по очереди переключались на
+    // трёх соседей вслепую — не зная, живы ли они, — и на каждом ждали ответа.
+    // Человек в это время сидел на мёртвых серверах, а со стороны это и было
+    // «переключается на сервера, которые не работают». Теперь сначала один
+    // замер всех локаций сессии, потом сразу на самую быструю из ответивших.
+    if (!stillOurs() || _latencyProbeRunning) return;
     unawaited(AppLogService.instance.log(
-        'Фоновая проверка: ни одна локация сессии не подтвердила связь, '
-        'сессия возвращена на исходную локацию',
+        'Связь через "${connectedServerName.value}" не подтвердилась — '
+        'меряю локации сессии и перехожу на живую',
         level: AppLogLevel.warning));
+    _latencyProbeRunning = true;
+    Map<String, int> measured;
+    try {
+      measured = await measureLatenciesThroughTunnel(
+          timeout: const Duration(seconds: 12));
+    } finally {
+      _latencyProbeRunning = false;
+    }
+    if (!stillOurs()) return;
+    if (measured.isNotEmpty) {
+      latencyByRemark.value = {...latencyByRemark.value, ...measured};
+    }
+    if (measured.isEmpty) {
+      unawaited(AppLogService.instance.log(
+          'Фоновая проверка: не ответила ни одна локация — похоже, нет сети '
+          'у самого телефона; остаёмся на выбранной',
+          level: AppLogLevel.warning));
+      return;
+    }
+    await _recoverIfActiveOutboundIsDead(measured, immediate: true);
   }
 
   /// Настоящая проверка одной локации подписки: поднимает временную сессию
@@ -3691,7 +3764,7 @@ class TunnelService {
       });
 
       try {
-        await waitCommandPortFree();
+        await _awaitCoreFullyStopped();
         await _client.connect(SessionOptions(
           config: config,
           networkMode: NetworkMode.proxy,
@@ -3882,7 +3955,7 @@ class TunnelService {
       });
       var upped = false;
       try {
-        await waitCommandPortFree();
+        await _awaitCoreFullyStopped();
         await _client.connect(SessionOptions(
           config: config,
           networkMode: NetworkMode.proxy,
@@ -4055,6 +4128,67 @@ class TunnelService {
   /// Порт, на котором ядро на Android поднимает свой служебный сервер команд
   /// (значение по умолчанию в плагине, SingboxEngine.serverPort).
   static const _commandServerPort = 10086;
+
+  /// Перед любым стартом ядра прошлая сессия должна умереть целиком.
+  ///
+  /// Плагин останавливает сервис в фоне: шлёт «остановлено», закрывает
+  /// сервер команд и только потом гасит сам сервис Android. Если новый старт
+  /// приходит в эту щель, сервис перезаписывает ссылку на старое ядро новым и
+  /// останавливает уже новое — а старое остаётся жить без VPN-интерфейса,
+  /// держит служебный порт и отвечает «работаю». Отсюда сразу две беды:
+  /// «address already in use» на каждом следующем подключении и «Подключено»
+  /// на экране без значка VPN в шторке.
+  ///
+  /// Поэтому ждём по порядку: плагин сказал «остановлено» → порт свободен →
+  /// короткая пауза, чтобы Android добил сам сервис.
+  Future<bool> _awaitCoreFullyStopped() async {
+    final started = DateTime.now();
+    var waited = false;
+    var asked = false;
+    while (true) {
+      dynamic raw;
+      try {
+        raw = await _getServiceStateNative();
+      } catch (_) {
+        break; // нативная сторона не ответила — дальше решит проверка порта
+      }
+      if (_mapServiceState(raw) == TunnelConnState.disconnected) break;
+      if (DateTime.now().difference(started) >= const Duration(seconds: 5)) {
+        break;
+      }
+      // Мы ничего не запускали, а плагин говорит «работает» — это хвост
+      // прошлой сессии. Просим его остановиться (один раз) и ждём.
+      if (!asked) {
+        asked = true;
+        try {
+          await _disconnectNative();
+        } catch (_) {}
+      }
+      waited = true;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+    final portStarted = DateTime.now();
+    final portFree = await waitCommandPortFree();
+    if (DateTime.now().difference(portStarted) >
+        const Duration(milliseconds: 150)) {
+      waited = true;
+    }
+    if (waited) {
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+    }
+    if (!portFree) _corePortStuck = true;
+    return portFree;
+  }
+
+  /// Прошлое ядро так и не отпустило служебный порт — его не остановить
+  /// ничем, кроме перезапуска приложения. Нужен, чтобы сказать об этом
+  /// пользователю прямо, а не «не удалось подключиться».
+  bool _corePortStuck = false;
+
+  static const _corePortStuckMessage =
+      'Ядро VPN от прошлой сессии зависло и не даёт запустить новое. '
+      'Закройте приложение из списка недавних (смахните его) и откройте снова — '
+      'после этого подключение заработает.';
 
   /// Ждёт, пока ядро прошлой сессии отпустит служебный порт.
   ///
@@ -4826,6 +4960,19 @@ class TunnelService {
         'cache_file': {
           'enabled': true,
           if (fakeIpDns) 'store_fakeip': true,
+          // Ядро запоминает выбранного участника группы `proxy` в этом файле
+          // и при следующем старте восстанавливает его, не глядя на
+          // `default`. А `out-3` в новой сессии — уже другой сервер: порядок
+          // локаций меняется от замеров, отметок о замолчавших и ручного
+          // выбора. Ядро стартовало на случайном, часто мёртвом сервере, а
+          // приложение показывало название первого — «подключено, а не
+          // работает» и «само переключилось на неработающий сервер».
+          // Проверено на настоящем ядре.
+          //
+          // Свой `cache_id` на каждый набор серверов хранит выбор отдельно:
+          // новый набор стартует строго с `out-0`. Таблицу Fake IP ядро
+          // держит вне этого раздела, она переживает перезапуск как раньше.
+          if (useSelector) 'cache_id': selectionCacheId(outbounds),
         },
         // Счётчики «принято/отдано» ядро ведёт внутри Clash API: без этого
         // блока оно вообще не считает трафик и отдаёт нули, отчего на главном
@@ -4849,6 +4996,25 @@ class TunnelService {
     };
 
     return jsonEncode(config);
+  }
+
+  /// Имя раздела кэша ядра для выбора в группе `proxy`: короткий хэш
+  /// участников группы — их серверов, портов и ключей, в порядке `out-N`.
+  /// Тот же набор в том же порядке — тот же раздел, любой другой — новый.
+  @visibleForTesting
+  static String selectionCacheId(List<Map<String, dynamic>> outbounds) {
+    final members = outbounds
+        .where((o) => '${o['tag']}'.startsWith('out-'))
+        .map((o) => '${o['tag']}|${o['type']}|${o['server']}|'
+            '${o['server_port']}|${o['uuid'] ?? o['password'] ?? ''}')
+        .join(';');
+    // FNV-1a, 32 бита: стабилен между запусками (в отличие от hashCode).
+    var hash = 0x811c9dc5;
+    for (final unit in utf8.encode(members)) {
+      hash ^= unit;
+      hash = (hash * 0x01000193) & 0xffffffff;
+    }
+    return 'sel-${hash.toRadixString(16).padLeft(8, '0')}';
   }
 
   /// Конфиг служебной блокирующей сессии строгого Kill Switch — для тестов:
@@ -4971,6 +5137,24 @@ class TunnelService {
     // предсказуемо падал.
     final isUrl =
         source.startsWith('http://') || source.startsWith('https://');
+    // Сохранённая копия подписки. Раньше каждое подключение (если с прошлого
+    // прошло больше 45 секунд) ждало сеть: до двенадцати секунд на медленном
+    // канале, а если сервер подписки недоступен — подключение не начиналось
+    // вовсе, хотя сами VPN-серверы живы. Теперь подключаемся сразу по копии,
+    // а свежую подтягиваем в фоне — к следующему разу.
+    final saved = isUrl ? await _loadSavedSubscription(source) : null;
+    if (isUrl && !forceRefresh && saved != null) {
+      final profiles = _parseSubscriptionBody(saved.body);
+      if (profiles.isNotEmpty) {
+        _cachedSource = source;
+        _cachedProfiles = profiles;
+        _cachedAt = DateTime.now();
+        if (DateTime.now().difference(saved.savedAt) > _subscriptionRefreshAge) {
+          unawaited(_refreshSubscriptionInBackground(source));
+        }
+        return profiles;
+      }
+    }
     if (!isUrl) {
       body = source;
     } else {
@@ -4991,11 +5175,20 @@ class TunnelService {
               'Подписка недоступна (${res.statusCode}). Попробуйте позднее.');
         }
         body = res.body;
-      } on TunnelException {
-        rethrow;
       } catch (e) {
-        throw TunnelException(
-            'Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
+        // Сеть или сервер подписки подвели — подключаемся по сохранённой
+        // копии, если она есть: серверы в ней почти наверняка те же.
+        if (saved != null && _parseSubscriptionBody(saved.body).isNotEmpty) {
+          unawaited(AppLogService.instance.log(
+              'Подписка не загрузилась ($e) — подключаюсь по сохранённой копии',
+              level: AppLogLevel.warning));
+          body = saved.body;
+        } else if (e is TunnelException) {
+          rethrow;
+        } else {
+          throw TunnelException(
+              'Не удалось загрузить конфигурацию подписки. Проверьте ссылку или интернет.');
+        }
       }
     }
 
@@ -5004,11 +5197,89 @@ class TunnelService {
       throw TunnelException(
           'Конфигурация не содержит рабочих серверов VLESS+Reality.');
     }
+    if (isUrl && (saved == null || saved.body != body)) {
+      unawaited(_saveSubscription(source, body));
+    }
 
     _cachedSource = source;
     _cachedProfiles = profiles;
     _cachedAt = DateTime.now();
     return profiles;
+  }
+
+  /// Сохранённую копию подписки старше этого обновляем в фоне.
+  static const _subscriptionRefreshAge = Duration(minutes: 10);
+
+  bool _subscriptionRefreshRunning = false;
+
+  Future<({String body, DateTime savedAt})?> _loadSavedSubscription(
+      String source) async {
+    try {
+      final raw =
+          await LocalPrefs.instance.getString(PrefKeys.subscriptionCacheJson);
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map || decoded['source'] != source) return null;
+      final body = decoded['body'];
+      final savedAt = decoded['savedAt'];
+      if (body is! String || body.isEmpty || savedAt is! num) return null;
+      return (
+        body: body,
+        savedAt: DateTime.fromMillisecondsSinceEpoch(savedAt.toInt()),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _saveSubscription(String source, String body) async {
+    try {
+      await LocalPrefs.instance.setString(
+          PrefKeys.subscriptionCacheJson,
+          jsonEncode({
+            'source': source,
+            'body': body,
+            'savedAt': DateTime.now().millisecondsSinceEpoch,
+          }));
+    } catch (_) {}
+  }
+
+  /// Тихо обновляет сохранённую копию подписки. Ошибки не наружу: копия
+  /// остаётся прежней, следующее подключение возьмёт её же.
+  Future<void> _refreshSubscriptionInBackground(String source) async {
+    if (_subscriptionRefreshRunning) return;
+    _subscriptionRefreshRunning = true;
+    try {
+      final res = await http.get(
+        Uri.parse(source),
+        headers: const {
+          'User-Agent': 'VPNonLine/1.0 (sing-box-client; compatible)',
+          'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
+        },
+      ).timeout(const Duration(seconds: 20));
+      if (res.statusCode >= 400) return;
+      final profiles = _parseSubscriptionBody(res.body);
+      if (profiles.isEmpty) return;
+      await _saveSubscription(source, res.body);
+      if (_cachedSource == source) {
+        _cachedProfiles = profiles;
+        _cachedAt = DateTime.now();
+      }
+    } catch (_) {
+    } finally {
+      _subscriptionRefreshRunning = false;
+    }
+  }
+
+  @visibleForTesting
+  Future<int> debugLoadProfileCount(String source,
+          {bool forceRefresh = false}) async =>
+      (await _loadProfiles(source, forceRefresh: forceRefresh)).length;
+
+  @visibleForTesting
+  void debugDropMemoryCache() {
+    _cachedProfiles = null;
+    _cachedAt = null;
   }
 
   /// Схемы ссылок, по которым видно, что перед нами список узлов подписки, —

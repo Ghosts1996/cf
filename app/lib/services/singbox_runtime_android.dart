@@ -48,5 +48,8 @@ class AndroidSingboxRuntime implements SingboxRuntimeClient {
   Future<void> urlTest(String groupTag) => _client.urlTest(groupTag);
 
   @override
+  Future<void> closeAllConnections() => _client.closeAllConnections();
+
+  @override
   Stream<dynamic> get outboundGroupStream => _client.outboundGroupStream;
 }

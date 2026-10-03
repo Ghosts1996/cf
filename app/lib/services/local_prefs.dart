@@ -171,6 +171,11 @@ class PrefKeys {
   /// свежая или пока локация снова не ответит на замер.
   static const deadLocationsJson = 'servers.dead_locations';
 
+  /// Последняя успешно загруженная подписка: `{source, body, savedAt}`.
+  /// Подключение берёт серверы отсюда сразу, не дожидаясь сети, а свежую
+  /// копию подтягивает в фоне (TunnelService._loadProfiles).
+  static const subscriptionCacheJson = 'subscription.cache';
+
   /// Проверка обновлений приложения (UpdateService): когда спрашивали
   /// последний раз, какая сборка оказалась последней и какую пользователь
   /// скрыл кнопкой «×» — для неё плашка больше не показывается.

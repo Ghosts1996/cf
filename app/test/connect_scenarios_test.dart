@@ -12,6 +12,7 @@ import 'package:flutter_singbox_client/flutter_singbox_client.dart'
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vpnonline_app/services/app_log_service.dart';
+import 'package:vpnonline_app/services/local_prefs.dart';
 import 'package:vpnonline_app/services/tunnel_service.dart';
 
 import 'support/fake_runtime.dart';
@@ -58,8 +59,19 @@ void main() {
   late FakeRuntime core;
   late TunnelService tunnel;
 
-  setUp(() {
+  setUp(() async {
     SharedPreferences.setMockInitialValues({});
+    // LocalPrefs держит значения в памяти между тестами: замеры, отметки о
+    // замолчавших локациях и копия подписки из прошлого сценария меняли бы
+    // порядок подключения в следующем.
+    for (final key in [
+      PrefKeys.cachedLatencyJson,
+      PrefKeys.deadLocationsJson,
+      PrefKeys.subscriptionCacheJson,
+    ]) {
+      await LocalPrefs.instance.setString(key, '');
+    }
+    await LocalPrefs.instance.setBool(PrefKeys.serverChosenManually, false);
     // Тестовая привязка Flutter подменяет весь HTTP и отвечает на любой запрос
     // кодом 400. Проверка связи считает любой ответ признаком интернета — и с
     // такой подменой туннель на стенде всегда выглядел рабочим. Возвращаем
@@ -180,7 +192,9 @@ void main() {
       await tunnel.connect(_subscription);
       // Фоновая проверка ждёт 3 с и спрашивает дважды.
       await Future<void>.delayed(const Duration(seconds: 6));
-      expect(core.selected, isEmpty,
+      // Единственный выбор — закрепление первой локации сразу после старта
+      // (ядро не должно стартовать на выбранном в прошлой сессии сервере).
+      expect(core.selected, ['out-0'],
           reason: 'связь есть — переключать локацию незачем');
       expect(tunnel.isConnected, isTrue);
       await tunnel.disconnect();
@@ -189,34 +203,52 @@ void main() {
     }
   }, timeout: const Timeout(Duration(seconds: 30)));
 
-  test('нет интернета ни на одной локации — сессия возвращается на исходную',
-      () async {
+  test('нет интернета ни на одной локации — остаёмся на выбранной, по мёртвым '
+      'не скачем', () async {
     await tunnel.connect(_subscription);
-    final heal = await waitUntil(() => core.selected.contains('out-0'),
-        timeout: const Duration(seconds: 20));
-    expect(heal, isTrue);
-    expect(core.selected.last, 'out-0',
-        reason: 'не оставлять сессию на последнем перебранном кандидате');
+    // Проверка: 3 с паузы, две попытки, замер с окном 12 с.
+    await Future<void>.delayed(const Duration(seconds: 20));
+    expect(core.selected, ['out-0'],
+        reason: 'никто не ответил — это сеть телефона, а не сервер: '
+            'переключаться некуда');
+    expect(tunnel.isConnected, isTrue);
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 40)));
+
+  test('выбранная локация молчит, соседи живы — сразу на самую быструю живую, '
+      'мёртвых соседей не пробуем', () async {
+    // Ответила только третья локация; вторая (out-1) мертва.
+    core.groupDelays = {'out-2': 45};
+    await tunnel.connect(_subscription);
+    final healed = await waitUntil(() => core.selected.contains('out-2'),
+        timeout: const Duration(seconds: 25));
+    expect(healed, isTrue);
+    expect(core.selected, ['out-0', 'out-2'],
+        reason: 'на мёртвую out-1 заходить нельзя: ${core.selected}');
+    expect(tunnel.connectedServerName.value, 'Латвия');
+    expect(core.closeAllCount, 1,
+        reason: 'старые соединения на мёртвом сервере закрываются сразу');
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 40)));
 
   test('задача от старой сессии не трогает новую', () async {
+    core.groupDelays = {'out-1': 50};
     // Подключились, фоновая проверка уснула на 3 секунды…
     await tunnel.connect(_subscription);
     // …а пользователь тут же отключился и подключился заново.
     await tunnel.disconnect();
     await tunnel.connect(_subscription);
     // Дождёмся, пока отработает проверка новой сессии.
-    await waitUntil(() => core.selected.contains('out-0'),
-        timeout: const Duration(seconds: 20));
-    await Future<void>.delayed(const Duration(seconds: 2));
-    // Одна живая проверка: out-1, out-2, затем возврат на out-0 — три
-    // переключения. Две (старая + новая) дали бы шесть.
-    expect(core.selected.length, 3,
+    await waitUntil(() => core.selected.contains('out-1'),
+        timeout: const Duration(seconds: 25));
+    await Future<void>.delayed(const Duration(seconds: 3));
+    // Закрепление out-0 при каждом из двух стартов и одно переключение от
+    // проверки новой сессии. Проснувшаяся старая дала бы второе.
+    expect(core.selected, ['out-0', 'out-0', 'out-1'],
         reason: 'проснувшаяся задача от старой сессии полезла в новую: '
             '${core.selected}');
     await tunnel.disconnect();
-  }, timeout: const Timeout(Duration(seconds: 40)));
+  }, timeout: const Timeout(Duration(seconds: 50)));
 
   test('после проверки серверов журнал ядра снова доходит, ровно по разу',
       () async {

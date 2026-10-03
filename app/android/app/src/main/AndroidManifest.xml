@@ -29,6 +29,10 @@
          системному установщику (UpdateInstaller → MainActivity.installApk).
          Без этого разрешения Android 8+ молча не откроет окно установки. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- Проверка, есть ли в системе VPN-интерфейс (MainActivity.isVpnActive):
+         сторож состояния сверяет с ней экран «Подключено». Разрешение и так
+         приходит из connectivity_plus, здесь объявлено явно. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
         android:label="VPNonLine"
         android:name="${applicationName}"

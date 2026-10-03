@@ -111,6 +111,17 @@ void main() {
               adBlockRuleSetPath: srs,
               fakeIpDns: true,
               monitoringOptionsSupported: true));
+      File('${dir.path}/session.json').writeAsStringSync(TunnelService
+          .instance
+          .buildConfigFromUri(_link,
+              blockAds: true,
+              adBlockRuleSetPath: srs,
+              fakeIpDns: true,
+              monitoringOptionsSupported: true,
+              alternateUris: [
+                'vless://22222222-2222-2222-2222-222222222222@127.0.0.1:24444'
+                    '?type=tcp&security=none#NL',
+              ]));
       File('${dir.path}/proxy.json').writeAsStringSync(TunnelService.instance
           .buildConfigFromUri(_link,
               blockAds: true, adBlockRuleSetPath: srs, proxyOnly: true));

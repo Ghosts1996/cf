@@ -3,6 +3,8 @@ package su.vpnonline.vpnonline_app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.TrafficStats
 import android.net.Uri
 import android.os.Build
@@ -58,6 +60,7 @@ class MainActivity : FlutterActivity() {
                     // addDisallowedApplication с NameNotFoundException —
                     // VPN перестанет подниматься.
                     "getPackageName" -> result.success(packageName)
+                    "isVpnActive" -> result.success(isVpnActive())
                     "getUpdatesDir" -> result.success(updatesDir().absolutePath)
                     "canInstallPackages" -> result.success(canInstallPackages())
                     "openInstallPermissionSettings" -> {
@@ -112,6 +115,21 @@ class MainActivity : FlutterActivity() {
             grantResults[0] == PackageManager.PERMISSION_GRANTED
         pendingPermissionResult?.success(granted)
         pendingPermissionResult = null
+    }
+
+    /// Есть ли сейчас в системе VPN-сеть. Независимая от плагина проверка:
+    /// плагин считает сессию живой, пока к нему подключён клиент команд ядра,
+    /// и может сказать «работает», когда самого VPN-интерфейса уже нет.
+    /// null — спросить не удалось.
+    @Suppress("DEPRECATION")
+    private fun isVpnActive(): Boolean? = try {
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        cm.allNetworks.any {
+            cm.getNetworkCapabilities(it)
+                ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        }
+    } catch (e: Exception) {
+        null
     }
 
     /// Папка для загруженного обновления. Та же, что открыта наружу в
