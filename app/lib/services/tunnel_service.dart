@@ -1623,6 +1623,9 @@ class TunnelService {
   // застывает навсегда. После двух пропусков меряем несмотря на нагрузку.
   int _latencyProbeSkips = 0;
 
+  @visibleForTesting
+  Future<void> debugRunLatencyProbe() => _runLatencyProbe(force: true);
+
   Future<void> _runLatencyProbe({bool force = false}) async {
     if (_latencyProbeRunning || !isConnected) return;
     final current = status.value;
@@ -1701,12 +1704,20 @@ class TunnelService {
       latencyByRemark.value = smoothed;
       unawaited(_saveLatencySnapshot(smoothed));
       unawaited(_clearDeadMarks(raw.keys));
+      // Не ответившие на замер участники сессии — кандидаты в мёртвые: в
+      // следующую сессию они идут в конец и не занимают места живых. Только
+      // если ответил хоть кто-то: иначе это сеть телефона, а не серверы.
+      if (raw.isNotEmpty) {
+        unawaited(_markLocationsDead(
+            _sessionOutboundRemarks.where((r) => !raw.containsKey(r))));
+      }
       // Результат замера в журнал: если ядро не достучалось ни до одной
       // локации, это первое, что стоит увидеть при разборе.
       unawaited(AppLogService.instance.log(
           'Задержка через туннель: '
           '${smoothed.entries.map((e) => '${e.key} — ${e.value} мс').join('; ')}'));
       await _recoverIfActiveOutboundIsDead(raw);
+      await _preferFasterIfAuto(smoothed);
     } finally {
       _latencyProbeRunning = false;
     }
@@ -3438,6 +3449,67 @@ class TunnelService {
     };
   }
 
+  Future<void> _markLocationsDead(Iterable<String> remarks) async {
+    final list = remarks.where((r) => r.isNotEmpty).toList();
+    if (list.isEmpty) return;
+    try {
+      final marks = await _readDeadLocations();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final r in list) {
+        marks[r] = now;
+      }
+      await LocalPrefs.instance
+          .setString(PrefKeys.deadLocationsJson, jsonEncode(marks));
+    } catch (_) {}
+  }
+
+  /// Пользователь страну не выбирал — держим сессию на самой быстрой живой.
+  ///
+  /// Самовосстановление уводит только с молчащей локации; медленная, но
+  /// отвечающая оставалась навсегда: по журналу — «Турция, 1460 мс» при
+  /// живой «Швеции» на 87 мс, и мессенджеры висели на «Соединение…».
+  /// Переходим, когда текущая вдвое медленнее лучшей и разница больше
+  /// 200 мс — чтобы не прыгать туда-сюда из-за случайного всплеска. Числа —
+  /// сглаженные (минимум по окну замеров). Открытые соединения не рвём:
+  /// они доживают на прежней, новые идут через быструю.
+  Future<void> _preferFasterIfAuto(Map<String, int> smoothed) async {
+    final order = _sessionOutboundRemarks;
+    if (order.length < 2 || !isConnected || smoothed.length < 2) return;
+    if (_switchInProgress || _connectInProgress || isBusy) return;
+    if (await LocalPrefs.instance
+        .getBool(PrefKeys.serverChosenManually, fallback: false)) {
+      return;
+    }
+    final activeName = connectedServerName.value;
+    if (activeName == null) return;
+    final active = _matchRemark(order, activeName);
+    if (active == null) return;
+    final current = smoothed[active];
+    if (current == null) return; // молчит — это дело самовосстановления
+    final best = smoothed.entries.reduce((a, b) => a.value <= b.value ? a : b);
+    if (best.key == active) return;
+    if (!shouldPreferFaster(current: current, best: best.value)) return;
+    final index = order.indexOf(best.key);
+    if (index < 0) return;
+    try {
+      await _client
+          .selectOutbound('proxy', 'out-$index')
+          .timeout(_nativeCallTimeout);
+      connectedServerName.value = best.key;
+      _lastPreferredHostName = best.key;
+      _persistSessionRoute();
+      _closeLiveClient();
+      unawaited(AppLogService.instance.log(
+          'Локация "$active" медленная ($current мс) — перешёл на '
+          '"${best.key}" (${best.value} мс) без разрыва туннеля'));
+    } catch (_) {}
+  }
+
+  /// Стоит ли уходить с отвечающей локации на более быструю.
+  @visibleForTesting
+  static bool shouldPreferFaster({required int current, required int best}) =>
+      current >= best * 2 && current - best >= 200;
+
   Future<void> _markLocationDead(String remark) async {
     if (remark.isEmpty) return;
     try {
@@ -3507,30 +3579,7 @@ class TunnelService {
       return [rest.first, keep, ...rest.skip(1)];
     }
 
-    if (chosenManually) {
-      final preferred = _matchProfile(profiles, preferredHostName);
-      if (preferred != null && !isDead(preferred)) {
-        return [preferred, ...profiles.where((p) => !identical(p, preferred))];
-      }
-      if (preferred != null) {
-        revisit = preferred;
-        unawaited(AppLogService.instance.log(
-            'Выбранная локация "${preferred.remark}" недавно перестала '
-            'отвечать — подключаюсь к живой. Как только она снова ответит, '
-            'подключение опять пойдёт в неё.',
-            level: AppLogLevel.warning));
-      }
-    }
-
     final latency = await _loadLatencySnapshot();
-    if (latency.isEmpty) {
-      // Замеров ещё нет — оставляем порядок подписки, врать тут нечем.
-      final preferred = _matchProfile(profiles, preferredHostName);
-      return withRevisit(deadLast(preferred != null
-          ? [preferred, ...profiles.where((p) => !identical(p, preferred))]
-          : profiles));
-    }
-
     int rank(_ParsedVless p) {
       final own = latency[p.remark];
       if (own != null) return own;
@@ -3544,11 +3593,53 @@ class TunnelService {
           return entry.value;
         }
       }
-      return 1 << 20; // не измерена — в конец, но не выброшена
+      return 1 << 20; // не измерена — после измеренных, но не выброшена
     }
 
-    final sorted = withRevisit(deadLast(
-        [...profiles]..sort((a, b) => rank(a).compareTo(rank(b)))));
+    // Один порядок для всех случаев: живые по последнему замеру — от самой
+    // быстрой, потом не измеренные в порядке подписки, замолчавшие — в самом
+    // конце. Сортировка устойчивая (по индексу при равенстве): без замеров
+    // порядок подписки не перемешивается.
+    //
+    // Раньше при выбранной вручную стране остальные места в сессии брались
+    // просто по порядку подписки — а там первыми шли мёртвые серверы и семь
+    // «Мобильных интернетов» с несовпадающими ключами. Выбранная оказывалась
+    // медленной — и переключаться было некуда: живые Швеция и Италия в
+    // дюжину сессии не попадали.
+    final indexed = [
+      for (var i = 0; i < profiles.length; i++) (p: profiles[i], i: i),
+    ]..sort((a, b) {
+        final da = isDead(a.p) ? 1 : 0;
+        final db = isDead(b.p) ? 1 : 0;
+        if (da != db) return da - db;
+        final byRank = rank(a.p).compareTo(rank(b.p));
+        if (byRank != 0) return byRank;
+        return a.i.compareTo(b.i);
+      });
+    final sorted = [for (final e in indexed) e.p];
+    final preferred = _matchProfile(profiles, preferredHostName);
+
+    if (chosenManually && preferred != null) {
+      if (!isDead(preferred)) {
+        return [preferred, ...sorted.where((p) => !identical(p, preferred))];
+      }
+      revisit = preferred;
+      unawaited(AppLogService.instance.log(
+          'Выбранная локация "${preferred.remark}" недавно перестала '
+          'отвечать — подключаюсь к живой. Как только она снова ответит, '
+          'подключение опять пойдёт в неё.',
+          level: AppLogLevel.warning));
+      return withRevisit(sorted);
+    }
+
+    if (latency.isEmpty) {
+      // Замеров ещё нет — врать про «самую быструю» нечем: начинаем с
+      // последней локации, на которой были (если она не замолчала).
+      if (preferred != null && !isDead(preferred)) {
+        return [preferred, ...sorted.where((p) => !identical(p, preferred))];
+      }
+      return sorted;
+    }
     unawaited(AppLogService.instance.log(
         'Локация не выбрана вручную — подключаемся к самой быстрой по '
         'последнему замеру: "${sorted.first.remark}" (${rank(sorted.first)} мс)'));

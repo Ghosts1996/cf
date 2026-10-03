@@ -98,4 +98,29 @@ void main() {
       expect(result, ['Япония', 'Германия', 'США']);
     });
   });
+
+  test('страну выбрали сами — запасные места в сессии занимают самые '
+      'быстрые, а не первые по подписке', () async {
+    // Подписка: США, Япония, Германия; по замеру Германия быстрее США.
+    final result = await order(chosenManually: true, preferred: 'Япония');
+    expect(result, ['Япония', 'Германия', 'США']);
+  });
+
+  test('не ответившие на замер уходят в конец даже без ухода с них', () async {
+    await TunnelService.instance.debugMarkLocationDead('США');
+    expect(await order(chosenManually: false), ['Германия', 'Япония', 'США']);
+  });
+
+  group('переход на более быструю', () {
+    test('вдвое медленнее и на 200+ мс — переходим', () {
+      expect(TunnelService.shouldPreferFaster(current: 1460, best: 87), isTrue);
+      expect(TunnelService.shouldPreferFaster(current: 467, best: 87), isTrue);
+    });
+    test('мелкая разница или всплеск — остаёмся', () {
+      expect(TunnelService.shouldPreferFaster(current: 150, best: 87), isFalse);
+      expect(TunnelService.shouldPreferFaster(current: 300, best: 200), isFalse);
+      expect(TunnelService.shouldPreferFaster(current: 260, best: 87), isFalse,
+          reason: 'втрое медленнее, но разница меньше 200 мс');
+    });
+  });
 }

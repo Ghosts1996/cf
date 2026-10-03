@@ -315,4 +315,28 @@ void main() {
     server = await startWorkingTunnel();
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('страну не выбирали, текущая медленная — переходим на быструю; '
+      'выбрали сами — остаёмся', () async {
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    core.selected.clear();
+    core.groupDelays = {'out-0': 1460, 'out-1': 600, 'out-2': 87};
+    await tunnel.debugRunLatencyProbe();
+    expect(core.selected, ['out-2']);
+    expect(tunnel.connectedServerName.value, 'Латвия');
+    await tunnel.disconnect();
+
+    // Тот же расклад, но страну человек выбрал сам — его выбор важнее.
+    await LocalPrefs.instance.setBool(PrefKeys.serverChosenManually, true);
+    await tunnel.connect(_subscription, preferredHostName: 'Германия');
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    core.selected.clear();
+    await tunnel.debugRunLatencyProbe();
+    expect(core.selected, isEmpty);
+    expect(tunnel.connectedServerName.value, 'Германия');
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 40)));
 }
