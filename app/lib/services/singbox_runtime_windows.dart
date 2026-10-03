@@ -29,11 +29,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
-    show SessionOptions;
+    show OutboundGroup, OutboundGroupItem, SessionOptions;
 import 'package:http/http.dart' as http;
 
+import 'clash_api.dart';
 import 'singbox_runtime.dart';
 
 class WindowsSingboxRuntime implements SingboxRuntimeClient {
@@ -47,6 +49,8 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
       StreamController<_WinTrafficStats>.broadcast();
   final StreamController<String> _faultCtrl =
       StreamController<String>.broadcast();
+  final StreamController<dynamic> _groupsCtrl =
+      StreamController<dynamic>.broadcast();
 
   String _state = 'disconnected';
   int _lastDownload = 0;
@@ -130,34 +134,55 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   @override
   Future<bool> requestVPNPermission() async => true;
 
-  /// На Windows не поддерживается: ядро работает отдельным процессом
-  /// sing-box.exe без командного канала libbox, через который идёт
-  /// переключение outbound'а на лету. Бросаем осознанно —
-  /// TunnelService.switchPreferredHost поймает и сменит сервер
-  /// переподключением. Молчаливый no-op отрапортовал бы о смене сервера,
-  /// которой не было.
+  late final ClashApiClient _clash = ClashApiClient(port: _clashApiPort);
+
+  /// Адрес проверки задержки — тот же, что у группы `latency` в конфиге
+  /// текущей сессии.
+  String _latencyUrl = 'http://cp.cloudflare.com/';
+
+  /// Переключение сервера на лету — через Clash API работающего
+  /// sing-box.exe. Раньше на Windows его не было вовсе: туннель вставал на
+  /// первый сервер списка и, если тот был мёртв, так на нём и оставался.
   @override
   Future<void> selectOutbound(String groupTag, String outboundTag) async {
-    throw UnsupportedError(
-        'Переключение outbound на лету доступно только на Android.');
+    if (_process == null) {
+      throw StateError('sing-box.exe не запущен — переключать нечего.');
+    }
+    await _clash.select(groupTag, outboundTag);
   }
 
-  /// Не поддерживается по той же причине, что и selectOutbound: командного
-  /// канала libbox у отдельного процесса sing-box.exe нет.
+  /// Замер задержки участников группы через Clash API. Результат уходит в
+  /// [outboundGroupStream] в том же виде, что присылает плагин на Android,
+  /// — остальной код приложения разницы не видит.
   @override
   Future<void> urlTest(String groupTag) async {
-    throw UnsupportedError(
-        'Замер задержки через ядро доступен только на Android.');
+    if (_process == null) {
+      throw StateError('sing-box.exe не запущен — мерить нечего.');
+    }
+    final members = await _clash.members(groupTag);
+    final delays = await _clash.groupDelay(groupTag, url: _latencyUrl);
+    _groupsCtrl.add([
+      OutboundGroup(tag: groupTag, type: 'urltest', items: [
+        for (final tag in members.isEmpty ? delays.keys : members)
+          OutboundGroupItem(
+              tag: tag,
+              type: 'vless',
+              // 65535 — так libbox помечает не ответившего участника.
+              urlTestDelayMs: delays[tag] ?? 65535),
+      ]),
+    ]);
   }
 
-  /// Командного канала у отдельного процесса нет — закрывать нечем.
   @override
-  Future<void> closeAllConnections() async {}
+  Future<void> closeAllConnections() async {
+    if (_process == null) return;
+    try {
+      await _clash.closeAllConnections();
+    } catch (_) {}
+  }
 
-  /// Пустой поток, а не заглушка с фейковыми данными: вызывающий увидит,
-  /// что групп нет, и просто не будет предлагать этот способ замера.
   @override
-  Stream<dynamic> get outboundGroupStream => const Stream<dynamic>.empty();
+  Stream<dynamic> get outboundGroupStream => _groupsCtrl.stream;
 
   void _setState(String s) {
     _state = s;
@@ -353,8 +378,10 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   ///    Windows валидный конфиг их просто не должен содержать;
   ///  - включает Clash API (127.0.0.1) — нужен, чтобы это же приложение
   ///    могло спросить у процесса sing-box "жив ли ты" и "сколько трафика".
-  Map<String, dynamic> _prepareWindowsConfig(String androidStyleConfig) {
+  @visibleForTesting
+  static Map<String, dynamic> prepareWindowsConfig(String androidStyleConfig) {
     final map = jsonDecode(androidStyleConfig) as Map<String, dynamic>;
+    _adaptDnsForWindows(map);
     final inbounds = (map['inbounds'] as List?)?.cast<Map<String, dynamic>>();
     if (inbounds != null) {
       for (final inbound in inbounds) {
@@ -373,6 +400,42 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     return map;
   }
 
+  /// DNS на Windows — всегда через туннель и по TCP.
+  ///
+  /// На Android при выключенной «Защите от DNS-протечек» имена резолвятся
+  /// напрямую составным резолвером: 1.1.1.1 по UDP и системный DNS
+  /// одновременно (тип `multi` из форка ядра). У штатного sing-box.exe на
+  /// Windows такого резолвера нет, и прямой DNS сводился к одному UDP к
+  /// 1.1.1.1 — а его у многих провайдеров режут или подменяют. Проверка при
+  /// подключении идёт через прокси-порт и DNS компьютера не касается, поэтому
+  /// проходила, а браузер не мог узнать адрес ни одного сайта: «VPN
+  /// подключён, а интернет не работает».
+  ///
+  /// Через туннель DNS не зависит от провайдера вовсе, а TCP — от того,
+  /// пропускает ли VPN-сервер UDP: TCP через VLESS проходит всегда, и ядро
+  /// держит одно соединение на много запросов.
+  static void _adaptDnsForWindows(Map<String, dynamic> map) {
+    final dns = map['dns'];
+    if (dns is! Map) return;
+    final servers = dns['servers'];
+    if (servers is List) {
+      servers.removeWhere((s) => s is Map && s['type'] == 'multi');
+      for (final s in servers) {
+        if (s is Map && s['tag'] == 'dns-remote' && s['type'] == 'udp') {
+          s['type'] = 'tcp';
+        }
+      }
+    }
+    dns['final'] = 'dns-remote';
+    final route = map['route'];
+    if (route is Map) {
+      final resolver = route['default_domain_resolver'];
+      if (resolver is Map && resolver['server'] == 'dns-direct-multi') {
+        resolver['server'] = 'dns-direct';
+      }
+    }
+  }
+
   Future<Directory> _writeConfig(Map<String, dynamic> config) async {
     final dir = await Directory.systemTemp.createTemp('vpnonline_sb_');
     final file = File(_joinPath([dir.path, 'config.json']));
@@ -380,31 +443,30 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     return dir;
   }
 
+  /// Только проверка конфига — состояние сессии не трогает. Раньше здесь
+  /// ставилось «connecting» (и при отказе — «disconnected»), а приложение
+  /// перед каждым подключением задаёт ядру с полдюжины таких проверок:
+  /// экран мигал «Подключение…» без всякого подключения, а проваленная
+  /// проверка возможностей ядра выглядела как обрыв сессии.
   @override
   Future<void> checkConfig(String config) async {
-    _setState('connecting');
+    await _ensureBinary();
+    final map = prepareWindowsConfig(config);
+    final dir = await _writeConfig(map);
     try {
-      await _ensureBinary();
-      final map = _prepareWindowsConfig(config);
-      final dir = await _writeConfig(map);
-      try {
-        final result = await Process.run(
-          _singboxExe,
-          ['check', '-c', _joinPath([dir.path, 'config.json'])],
+      final result = await Process.run(
+        _singboxExe,
+        ['check', '-c', _joinPath([dir.path, 'config.json'])],
+      );
+      if (result.exitCode != 0) {
+        throw PlatformException(
+          code: 'INVALID_CONFIG',
+          message:
+              'sing-box отклонил конфиг: ${result.stderr}\n${result.stdout}',
         );
-        if (result.exitCode != 0) {
-          throw PlatformException(
-            code: 'INVALID_CONFIG',
-            message:
-                'sing-box отклонил конфиг: ${result.stderr}\n${result.stdout}',
-          );
-        }
-      } finally {
-        await dir.delete(recursive: true).catchError((_) => dir);
       }
-    } catch (_) {
-      _setState('disconnected');
-      rethrow;
+    } finally {
+      await dir.delete(recursive: true).catchError((_) => dir);
     }
   }
 
@@ -415,7 +477,8 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     await disconnect();
     _setState('connecting');
     try {
-      final map = _prepareWindowsConfig(options.config);
+      final map = prepareWindowsConfig(options.config);
+      _latencyUrl = _latencyUrlOf(map) ?? _latencyUrl;
       _tempDir = await _writeConfig(map);
       final configPath = _joinPath([_tempDir!.path, 'config.json']);
 
@@ -475,7 +538,12 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
               'сессии — перезагрузи компьютер.',
         );
       }
-      if (!trafficOk) {
+      // Когда в конфиге группа серверов, первый может просто молчать — и
+      // гасить из-за этого sing-box.exe незачем: приложение само перейдёт на
+      // живой участник группы через Clash API (как на Android, без разрыва
+      // туннеля). Раньше здесь всё гасилось и поднималось заново с другим
+      // сервером, по десятку секунд на каждую попытку.
+      if (!trafficOk && !_hasServerGroup(map)) {
         await disconnect();
         throw PlatformException(
           code: 'TUNNEL_NOT_PASSING_TRAFFIC',
@@ -492,6 +560,24 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
       _setState('disconnected');
       rethrow;
     }
+  }
+
+  static String? _latencyUrlOf(Map<String, dynamic> config) {
+    final outbounds = config['outbounds'];
+    if (outbounds is! List) return null;
+    for (final o in outbounds) {
+      if (o is Map && o['type'] == 'urltest' && o['url'] is String) {
+        return o['url'] as String;
+      }
+    }
+    return null;
+  }
+
+  static bool _hasServerGroup(Map<String, dynamic> config) {
+    final outbounds = config['outbounds'];
+    if (outbounds is! List) return false;
+    return outbounds.any((o) =>
+        o is Map && o['type'] == 'selector' && o['tag'] == 'proxy');
   }
 
   Future<bool> _waitForClashApi(Duration timeout) async {

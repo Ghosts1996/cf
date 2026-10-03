@@ -59,6 +59,16 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Перезапуск приложения, когда ядро прошлой сессии зависло в
+             процессе (см. RestartActivity.kt). Отдельный процесс — чтобы
+             завершить основной вместе с ядром и открыть приложение заново. -->
+        <activity
+            android:name=".RestartActivity"
+            android:process=":restart"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <!-- Отдаёт системному установщику загруженное обновление. Свой
              подкласс, а не FileProvider напрямую, — см. UpdateFileProvider.kt.
              Наружу открыта только папка updates/ в кэше. -->

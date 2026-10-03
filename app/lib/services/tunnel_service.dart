@@ -2035,6 +2035,11 @@ class TunnelService {
     Timer? deadline;
     Timer? cancelWatch;
     final collected = <String, int>{};
+    // Кто уже отчитался — включая тех, кто отчитался отказом (0xFFFF). Без
+    // них сбор ждал ответа и от мёртвых участников, которые не ответят
+    // никогда, и каждый замер с мёртвым сервером в сессии досиживал окно
+    // целиком.
+    final reported = <String>{};
 
     void finish() {
       if (completer.isCompleted) return;
@@ -2057,9 +2062,12 @@ class TunnelService {
             // недоступный outbound. Показанное как есть, оно превращалось на
             // экране в "65535 мс · медленно" у полностью мёртвого сервера.
             if (tag == null || delay == null || delay <= 0) continue;
-            if (delay >= _urlTestFailedDelayMs) continue;
             final index = _indexOfOutboundTag(tag);
             if (index == null || index >= order.length) continue;
+            if (delay >= _urlTestFailedDelayMs) {
+              if (order[index].isNotEmpty) reported.add(order[index]);
+              continue;
+            }
             // Ключ — remark из VLESS-ссылки ("VPNonLine | 🇩🇪 Германия — Франкфурт").
             // Он не совпадает с host_name из /hosts ("🇩🇪 Германия — Франкфурт"):
             // панель 3x-ui дописывает в remark название сервиса. Сопоставление имён —
@@ -2071,9 +2079,10 @@ class TunnelService {
             // http://cp.cloudflare.com/ через VLESS — ровно то же число, что
             // показывает Hiddify.
             collected[remark] = delay;
+            reported.add(remark);
           }
-          // Все, кого ждали, ответили — досиживать окно незачем.
-          if (collected.length >= expected.length) finish();
+          // Все, кого ждали, отчитались — досиживать окно незачем.
+          if (reported.containsAll(expected)) finish();
         }
       }, onError: (_) => finish());
 
@@ -3097,7 +3106,11 @@ class TunnelService {
         unawaited(AppLogService.instance.log('Конфиг ядра: ${_maskSecrets(config)}'));
 
         Future<void> startSession() async {
-          await _awaitCoreFullyStopped();
+          if (!await _awaitCoreFullyStopped() && await _restartIfCoreStuck()) {
+            throw _VpnServiceStartException(
+                'Перезапускаю приложение, чтобы убрать зависшее ядро VPN — '
+                'подключение продолжится само.');
+          }
           // Ошибка прошлой попытки не должна прервать ожидание этой.
           lastError.value = null;
           return _client.connect(SessionOptions(
@@ -4167,6 +4180,18 @@ class TunnelService {
       waited = true;
       await Future<void>.delayed(const Duration(milliseconds: 150));
     }
+    // Плагин сказал «остановлено» — но сам сервис Android может быть ещё жив
+    // (плагин сообщает раньше, чем сервис уничтожен). Старт в эту щель и
+    // теряет старое ядро. Ждём, пока сервиса не станет.
+    final serviceStarted = DateTime.now();
+    while (await coreServiceAliveProbe() == true) {
+      waited = true;
+      if (DateTime.now().difference(serviceStarted) >=
+          const Duration(seconds: 5)) {
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
     final portStarted = DateTime.now();
     final portFree = await waitCommandPortFree();
     if (DateTime.now().difference(portStarted) >
@@ -4178,6 +4203,51 @@ class TunnelService {
     }
     if (!portFree) _corePortStuck = true;
     return portFree;
+  }
+
+  /// Жив ли сервис ядра плагина в Android. null — спросить не удалось.
+  @visibleForTesting
+  Future<bool?> Function() coreServiceAliveProbe = _askCoreServiceAlive;
+
+  static Future<bool?> _askCoreServiceAlive() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return await _nativeStatsChannel
+          .invokeMethod<bool>('isCoreServiceAlive')
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Перезапускает приложение, если в его процессе застряло ядро прошлой
+  /// сессии: порт занят, а сервиса, которому он мог бы принадлежать, нет.
+  /// Остановить такое ядро изнутри нечем — оно умирает только вместе с
+  /// процессом. После перезапуска подключение продолжится само
+  /// (PrefKeys.connectAfterRestartAt). Не чаще раза в десять минут — чтобы
+  /// никакая неожиданность не превратилась в бесконечный цикл перезапусков.
+  Future<bool> _restartIfCoreStuck() async {
+    if (!Platform.isAndroid) return false;
+    if (await coreServiceAliveProbe() != false) return false;
+    final prefs = LocalPrefs.instance;
+    final last = await prefs.getInt(PrefKeys.coreRestartAt, fallback: 0);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - last < const Duration(minutes: 10).inMilliseconds) return false;
+    await prefs.setInt(PrefKeys.coreRestartAt, now);
+    await prefs.setInt(PrefKeys.connectAfterRestartAt, now);
+    unawaited(AppLogService.instance.log(
+        'Ядро прошлой сессии зависло в процессе приложения и держит служебный '
+        'порт — перезапускаю приложение, подключение продолжится само',
+        level: AppLogLevel.warning));
+    try {
+      await _nativeStatsChannel.invokeMethod<void>('restartApp');
+      // Сообщение «закройте приложение сами» больше не нужно — закрываем мы.
+      _corePortStuck = false;
+      return true;
+    } catch (_) {
+      await prefs.setInt(PrefKeys.connectAfterRestartAt, 0);
+      return false;
+    }
   }
 
   /// Прошлое ядро так и не отпустило служебный порт — его не остановить

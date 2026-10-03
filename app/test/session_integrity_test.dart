@@ -112,6 +112,26 @@ void main() {
     await tunnel.disconnect();
   });
 
+  test('сервис прошлой сессии ещё жив в Android — ядро не стартует, пока '
+      'его не уничтожат', () async {
+    final server = await _workingTunnel();
+    addTearDown(() => server.close(force: true));
+    var aliveReads = 0;
+    tunnel.coreServiceAliveProbe = () async {
+      aliveReads++;
+      return aliveReads <= 3; // три опроса подряд сервис ещё жив
+    };
+    final probeConnect = core.calls.length;
+    await tunnel.connect('$_de\n$_nl');
+    // К моменту первого connect() сервис должен был уже уйти.
+    final firstConnect = core.calls.indexOf('connect', probeConnect);
+    expect(firstConnect, greaterThanOrEqualTo(0));
+    expect(aliveReads, greaterThanOrEqualTo(4),
+        reason: 'ждали, пока сервис не уйдёт');
+    expect(tunnel.isConnected, isTrue);
+    await tunnel.disconnect();
+  });
+
   group('сторож: «Подключено» без VPN в системе', () {
     test('VPN-интерфейс был и пропал — показываем «отключено»', () async {
       final server = await _workingTunnel();

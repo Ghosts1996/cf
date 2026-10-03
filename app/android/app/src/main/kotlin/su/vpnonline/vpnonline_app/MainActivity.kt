@@ -1,6 +1,7 @@
 package su.vpnonline.vpnonline_app
 
 import android.Manifest
+import android.app.ActivityManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -61,6 +62,11 @@ class MainActivity : FlutterActivity() {
                     // VPN перестанет подниматься.
                     "getPackageName" -> result.success(packageName)
                     "isVpnActive" -> result.success(isVpnActive())
+                    "isCoreServiceAlive" -> result.success(isCoreServiceAlive())
+                    "restartApp" -> {
+                        result.success(null)
+                        restartApp()
+                    }
                     "getUpdatesDir" -> result.success(updatesDir().absolutePath)
                     "canInstallPackages" -> result.success(canInstallPackages())
                     "openInstallPermissionSettings" -> {
@@ -130,6 +136,32 @@ class MainActivity : FlutterActivity() {
         }
     } catch (e: Exception) {
         null
+    }
+
+    /// Жив ли ещё сервис ядра (VPN или прокси) из плагина. Плагин сообщает
+    /// «остановлено» раньше, чем Android уничтожает сам сервис, и новый старт
+    /// в эту щель теряет старое ядро — оно остаётся жить без VPN. Приложение
+    /// ждёт по этому ответу, пока сервис не уйдёт целиком.
+    /// getRunningServices устарел, но свои сервисы приложению отдаёт.
+    @Suppress("DEPRECATION")
+    private fun isCoreServiceAlive(): Boolean? = try {
+        val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        am.getRunningServices(Int.MAX_VALUE).any {
+            it.service.packageName == packageName &&
+                (it.service.className.endsWith("SingboxVPNService") ||
+                    it.service.className.endsWith("SingboxProxyService"))
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /// Перезапуск процесса приложения — см. RestartActivity.
+    private fun restartApp() {
+        val intent = Intent(this, RestartActivity::class.java).apply {
+            putExtra(RestartActivity.EXTRA_MAIN_PID, Process.myPid())
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
     }
 
     /// Папка для загруженного обновления. Та же, что открыта наружу в

@@ -418,7 +418,19 @@ class _ConnectScreenState extends State<ConnectScreen>
       if (!_autoConnectTried) {
         _autoConnectTried = true;
         // По умолчанию выключено — автоподключение пользователь включает сам.
-        final autoConnect = await LocalPrefs.instance.getBool(PrefKeys.autoConnect, fallback: false);
+        final autoConnectSetting = await LocalPrefs.instance.getBool(PrefKeys.autoConnect, fallback: false);
+        // Приложение только что перезапустило само себя, чтобы убрать
+        // зависшее ядро VPN, — подключение, ради которого это делалось,
+        // продолжаем без нового нажатия.
+        final restartedAt = await LocalPrefs.instance
+            .getInt(PrefKeys.connectAfterRestartAt, fallback: 0);
+        final resumeAfterRestart = restartedAt > 0 &&
+            DateTime.now().millisecondsSinceEpoch - restartedAt <
+                const Duration(minutes: 2).inMilliseconds;
+        if (restartedAt > 0) {
+          await LocalPrefs.instance.setInt(PrefKeys.connectAfterRestartAt, 0);
+        }
+        final autoConnect = autoConnectSetting || resumeAfterRestart;
         // `_runtimeStateKnown` обязателен: если реальное состояние нативного
         // сервиса прочитать не удалось, isConnected ниже равен false просто
         // потому, что мы ничего не знаем, а не потому что VPN выключен — и
