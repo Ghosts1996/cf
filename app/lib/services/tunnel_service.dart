@@ -964,6 +964,7 @@ class TunnelService {
       }
       final severity = coreLogSeverity(pluginLevel, message);
       if (severity == null) continue;
+      if (isCoreLogNoise(message)) continue;
       keep.add((
         message: 'Ядро: ${cleanCoreLogMessage(message)}',
         level: severity,
@@ -974,6 +975,23 @@ class TunnelService {
 
   @visibleForTesting
   void debugHandleCoreLogs(List<dynamic> entries) => _handleCoreLogs(entries);
+
+  /// Строки ядра, которые в журнал не пишем: они помечены как предупреждения
+  /// и ошибки, но ни о какой проблеме не говорят, а их пачки забивали журнал
+  /// и диск при каждом подключении.
+  ///  * «Failed … to get IP info» — фоновый мониторинг форка ядра узнаёт IP у
+  ///    сторонних сервисов, те отвечают 429/403/307; на работу VPN не влияет.
+  ///  * «monitoring: outbound … URL test failed» — тот же мониторинг; что
+  ///    сервер не отвечает, приложение видит своим замером и пишет само,
+  ///    одной строкой и по-русски.
+  ///  * «use of closed network connection» — так ядро сообщает о
+  ///    соединениях, которые приложение само закрыло, уводя сессию с
+  ///    замолчавшего сервера: десятки «ERROR» ровно в момент починки.
+  @visibleForTesting
+  static bool isCoreLogNoise(String message) =>
+      message.contains('to get IP info') ||
+      (message.contains('monitoring:') && message.contains('URL test failed')) ||
+      message.contains('use of closed network connection');
 
   TunnelConnState _mapServiceState(dynamic state) {
     final s = state.toString().toLowerCase();
@@ -3610,13 +3628,18 @@ class TunnelService {
     // она объявляла хорошую локацию молчащей и уводила сессию на соседнюю, а
     // там могла оказаться мёртвая. Со стороны это выглядело так: «Подключено»,
     // интернета нет, помогает только выключить и включить заново.
-    await Future<void>.delayed(const Duration(seconds: 3));
+    await Future<void>.delayed(const Duration(seconds: 2));
     if (!stillOurs()) return;
 
-    // Два захода, а не один: первый может не успеть по той же причине.
-    if (await _verifyInternetReachable(proxyOnly: proxyOnly)) return;
-    if (!stillOurs()) return;
-    if (await _verifyInternetReachable(proxyOnly: proxyOnly)) return;
+    // Одна проба, а не две: вторая раньше страховала от ложной тревоги на
+    // ещё не прогретом туннеле, но теперь за пробой идёт не слепое
+    // переключение, а замер — и если исходная локация на нём ответит, она и
+    // останется. Лишняя проба только добавляла пять секунд без интернета
+    // перед переходом на живой сервер.
+    if (await _verifyInternetReachable(
+        proxyOnly: proxyOnly, timeout: const Duration(seconds: 4))) {
+      return;
+    }
 
     // Исходная локация молчит. Раньше здесь по очереди переключались на
     // трёх соседей вслепую — не зная, живы ли они, — и на каждом ждали ответа.

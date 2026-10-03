@@ -101,4 +101,26 @@ void main() {
       expect(logs.any((e) => e.message.contains('\x1B')), isFalse);
     });
   });
+
+  group('шум ядра в журнал не идёт', () {
+    test('мониторинг форка и закрытые нами соединения — шум', () {
+      for (final m in [
+        'WARN[0014] monitoring: Failed try 3 to get IP info: https://ipapi.co/json/ non-200 response from [https://ipapi.co/json/]: 429',
+        'WARN[0011] monitoring: outbound out-1 URL test failed: dial wlan0 (23): dial tcp 144.31.12.98:8443: i/o timeout',
+        'ERROR[0013] [909037642 9.15s] connection: open connection to 149.154.167.41:443 using outbound/vless[out-0]: read tcp 192.168.1.50:51054->163.5.41.30:8443: use of closed network connection',
+      ]) {
+        expect(TunnelService.isCoreLogNoise(m), isTrue, reason: m);
+      }
+    });
+
+    test('настоящие ошибки остаются', () {
+      for (final m in [
+        'ERROR[0024] [3567303879 15.5s] connection: open connection to 142.250.120.136:443 using outbound/vless[out-0]: context deadline exceeded',
+        'ERROR[0001] outbound/vless[out-4]: reality verification failed',
+        'ERROR dns: exchange failed for example.com: timeout',
+      ]) {
+        expect(TunnelService.isCoreLogNoise(m), isFalse, reason: m);
+      }
+    });
+  });
 }
