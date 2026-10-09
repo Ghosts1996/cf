@@ -28,6 +28,17 @@ Map<String, dynamic> _windowsConfig({bool dnsProtection = false}) =>
       adBlockRuleSetPath: File('assets/adblock/adblock.srs').absolute.path,
     ));
 
+/// Сессия проверки всех серверов — как её строит экран «Серверы».
+Map<String, dynamic> _probeConfig() =>
+    WindowsSingboxRuntime.prepareWindowsConfig(
+        TunnelService.instance.buildConfigFromUri(
+      _de,
+      alternateUris: const [_nl],
+      proxyOnly: true,
+      blockAds: false,
+      dnsProtection: false,
+    ));
+
 void main() {
   group('конфиг под sing-box.exe', () {
     test('DNS через туннель по TCP, даже если «Защита от DNS-протечек» '
@@ -57,12 +68,29 @@ void main() {
       expect(tun.containsKey('exclude_package'), isFalse);
     });
 
+    test('проверка серверов поднимает ядро без TUN — адаптер от неё не '
+        'требуется', () {
+      // Раньше sing-box.exe ждал адаптер «VPNonLine» у любой сессии, а
+      // проверка с экрана «Серверы» его не создаёт: каждая такая проверка
+      // заканчивалась отказом, и все локации на Windows были «нет ответа».
+      expect(WindowsSingboxRuntime.hasTunInbound(_windowsConfig()), isTrue);
+      expect(WindowsSingboxRuntime.hasTunInbound(_probeConfig()), isFalse);
+      final inbounds = (_probeConfig()['inbounds'] as List).cast<Map>();
+      expect(inbounds.map((i) => i['type']), ['mixed']);
+      final groups = (_probeConfig()['outbounds'] as List)
+          .cast<Map>()
+          .where((o) => o['tag'] == 'latency');
+      expect(groups.single['outbounds'], ['out-0', 'out-1']);
+    });
+
     test('конфиг для проверки штатным ядром', () {
       final dir = Directory('/tmp/vpnonline-win')..createSync(recursive: true);
       File('${dir.path}/config.json')
           .writeAsStringSync(jsonEncode(_windowsConfig()));
       File('${dir.path}/config-dnsprot.json')
           .writeAsStringSync(jsonEncode(_windowsConfig(dnsProtection: true)));
+      File('${dir.path}/probe.json')
+          .writeAsStringSync(jsonEncode(_probeConfig()));
     });
   });
 

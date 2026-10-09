@@ -114,6 +114,43 @@ jobs:
       # `-v` оставлен намеренно: без детального вывода MSBuild видна только
       # финальная сводка линкера, без настоящей команды mt.exe и текста её
       # ошибки. Попытка одна — три одинаковых лога времени раннера не стоят.
+      # sing-box.exe и wintun.dll — прямо в установщик. Без них приложение
+      # качало оба файла с GitHub при первом подключении после каждой
+      # установки — без VPN это минуты, а то и отказ, и всё это время на
+      # экране крутилась загрузка. Версия sing-box та же, что приложение
+      # скачало бы само: последний стабильный релиз. Шаг не роняет сборку —
+      # при сбое приложение по-прежнему докачает файлы у себя.
+      - name: Bundle sing-box.exe and wintun.dll
+        shell: pwsh
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $PWD 'windows\sing-box'
+          $tmp = Join-Path $env:RUNNER_TEMP 'sing-box-bundle'
+          New-Item -ItemType Directory -Force -Path $dest, $tmp | Out-Null
+
+          $headers = @{ 'User-Agent' = 'VPNonLine-CI'; 'Authorization' = "Bearer $env:GH_TOKEN" }
+          $rel = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
+          $asset = $rel.assets | Where-Object { $_.name -like '*-windows-amd64.zip' } | Select-Object -First 1
+          if (-not $asset) { throw "В релизе $($rel.tag_name) нет *-windows-amd64.zip" }
+          Write-Host "sing-box $($rel.tag_name): $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$tmp\sing-box.zip"
+          Expand-Archive -LiteralPath "$tmp\sing-box.zip" -DestinationPath "$tmp\sing-box" -Force
+          $exe = Get-ChildItem -Path "$tmp\sing-box" -Recurse -Filter 'sing-box.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'sing-box.exe не нашёлся в архиве' }
+          Copy-Item $exe.FullName (Join-Path $dest 'sing-box.exe') -Force
+
+          Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile "$tmp\wintun.zip"
+          Expand-Archive -LiteralPath "$tmp\wintun.zip" -DestinationPath "$tmp\wintun" -Force
+          $dll = Get-ChildItem -Path "$tmp\wintun" -Recurse -Filter 'wintun.dll' | Where-Object { $_.FullName -match '\\amd64\\' } | Select-Object -First 1
+          if (-not $dll) { throw 'wintun.dll (amd64) не нашёлся в архиве' }
+          Copy-Item $dll.FullName (Join-Path $dest 'wintun.dll') -Force
+
+          & (Join-Path $dest 'sing-box.exe') version
+          Get-ChildItem $dest
+
       - name: Build Windows release (verbose diagnostic)
         shell: pwsh
         env:

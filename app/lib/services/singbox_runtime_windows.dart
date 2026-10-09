@@ -61,24 +61,6 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   // (127.0.0.1).
   static const int _clashApiPort = 9095;
 
-  // Конфиг, который строит _buildSingBoxConfig(), всегда поднимает ещё один
-  // локальный 'mixed' (SOCKS5+HTTP) инбаунд на 127.0.0.1:2080, и
-  // _prepareWindowsConfig его не трогает.
-  //
-  // Ответ Clash API (/version) доказывает только, что процесс sing-box.exe
-  // запустился и слушает служебный порт, — но не что TUN поднялся и трафик
-  // идёт. Если создание TUN тихо не удалось (нет прав у фактически
-  // запущенного процесса, антивирус блокирует wintun.dll, конфликт со старым
-  // зависшим адаптером), sing-box.exe и его API продолжают работать, а
-  // приложение показывает "подключено" при нулевом трафике. Поэтому
-  // _verifyTunnelPassesTraffic ниже делает настоящий HTTP-запрос через этот
-  // локальный прокси-порт: он идёт тем же VLESS/Reality outbound'ом, что и
-  // боевой трафик, но не зависит от TUN.
-  //
-  // Порт захардкожен намеренно — в общем конфиге он всегда 2080, см.
-  // tunnel_service.dart::_proxyPort.
-  static const int _localProxyPort = 2080;
-
   String get _sep => Platform.pathSeparator;
   String get _exeDir => File(Platform.resolvedExecutable).parent.path;
   String get _singboxDir => _joinPath([_exeDir, 'sing-box']);
@@ -151,26 +133,44 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     await _clash.select(groupTag, outboundTag);
   }
 
-  /// Замер задержки участников группы через Clash API. Результат уходит в
-  /// [outboundGroupStream] в том же виде, что присылает плагин на Android,
-  /// — остальной код приложения разницы не видит.
+  /// Замер задержки участников группы через Clash API.
+  ///
+  /// Как и на Android, вызов только запускает замер и сразу возвращается, а
+  /// результаты приходят в [outboundGroupStream] по мере готовности — каждый
+  /// раз полным снимком группы: ответившие со своим числом, отказавшие с
+  /// 65535 (так libbox помечает не ответившего), ещё не измеренные с нулём.
+  /// Раньше замер шёл внутри вызова целиком и упирался в восьмисекундный
+  /// предел ожидания приложения: результатов не доходило ни одного, и экран
+  /// «Серверы» на Windows помечал «нет ответа» все локации подряд.
   @override
   Future<void> urlTest(String groupTag) async {
     if (_process == null) {
       throw StateError('sing-box.exe не запущен — мерить нечего.');
     }
-    final members = await _clash.members(groupTag);
-    final delays = await _clash.groupDelay(groupTag, url: _latencyUrl);
-    _groupsCtrl.add([
-      OutboundGroup(tag: groupTag, type: 'urltest', items: [
-        for (final tag in members.isEmpty ? delays.keys : members)
-          OutboundGroupItem(
-              tag: tag,
-              type: 'vless',
-              // 65535 — так libbox помечает не ответившего участника.
-              urlTestDelayMs: delays[tag] ?? 65535),
-      ]),
-    ]);
+    unawaited(_measureGroup(groupTag));
+  }
+
+  Future<void> _measureGroup(String groupTag) async {
+    final List<String> members;
+    try {
+      members = await _clash.members(groupTag);
+    } catch (_) {
+      return;
+    }
+    if (members.isEmpty) return;
+    final delays = <String, int>{};
+    void emit() => _groupsCtrl.add([
+          OutboundGroup(tag: groupTag, type: 'urltest', items: [
+            for (final tag in members)
+              OutboundGroupItem(
+                  tag: tag, type: 'vless', urlTestDelayMs: delays[tag] ?? 0),
+          ]),
+        ]);
+    await Future.wait(members.map((tag) async {
+      final d = await _clash.delay(tag, url: _latencyUrl);
+      delays[tag] = d ?? 65535;
+      emit();
+    }));
   }
 
   @override
@@ -222,12 +222,24 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
       }
       final data = jsonDecode(apiRes.body) as Map<String, dynamic>;
       final assets = (data['assets'] as List).cast<Map<String, dynamic>>();
+      // Сначала обычная сборка (*-windows-amd64.zip): по алфавиту раньше неё
+      // идёт сборка для Windows 7 (*-windows-amd64-legacy-windows-7.zip), и
+      // прежний поиск «первый подходящий» брал её.
       Map<String, dynamic>? asset;
       for (final a in assets) {
         final name = (a['name'] as String).toLowerCase();
-        if (name.contains('windows-amd64') && name.endsWith('.zip')) {
+        if (name.endsWith('-windows-amd64.zip')) {
           asset = a;
           break;
+        }
+      }
+      if (asset == null) {
+        for (final a in assets) {
+          final name = (a['name'] as String).toLowerCase();
+          if (name.contains('windows-amd64') && name.endsWith('.zip')) {
+            asset = a;
+            break;
+          }
         }
       }
       if (asset == null) {
@@ -510,48 +522,32 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
         );
       }
 
-      // См. _localProxyPort выше: без этой проверки "connected" означало бы
-      // только "процесс жив", а не "трафик идёт".
-      final trafficOk = await _verifyTunnelPassesTraffic();
-
-      // Проверка выше идёт через локальный прокси-порт, то есть прямо в outbound
-      // sing-box'а, в обход TUN. Она доказывает, что VLESS/Reality-сервер жив, но
-      // не то, что поднялся адаптер `VPNonLine`, через который идёт системный
-      // трафик компьютера. Поэтому спрашиваем у самой Windows через
-      // Get-NetAdapter, существует ли адаптер и в состоянии ли он "Up".
-      final adapterOk = await _verifyTunAdapterUp();
-      if (!adapterOk) {
-        await disconnect();
-        throw PlatformException(
-          code: 'TUN_ADAPTER_NOT_UP',
-          message:
-              'sing-box и VLESS-сервер работают, но сетевой адаптер '
-              '"VPNonLine" в Windows не поднялся (или не в состоянии Up) — '
-              'весь обычный трафик компьютера идёт в обход туннеля. Обычно '
-              'причина одна из: 1) приложение реально запущено НЕ от имени '
-              'администратора (проверь — при старте должен был появиться '
-              'UAC-запрос, если его не было, значит exe запущен в обход '
-              'этого требования, например ярлыком со старыми правами '
-              'совместимости); 2) антивирус/Windows Defender блокирует '
-              'драйвер wintun.dll — добавь папку с sing-box.exe в '
-              'исключения; 3) завис адаптер "VPNonLine" от предыдущей '
-              'сессии — перезагрузи компьютер.',
-        );
-      }
-      // Когда в конфиге группа серверов, первый может просто молчать — и
-      // гасить из-за этого sing-box.exe незачем: приложение само перейдёт на
-      // живой участник группы через Clash API (как на Android, без разрыва
-      // туннеля). Раньше здесь всё гасилось и поднималось заново с другим
-      // сервером, по десятку секунд на каждую попытку.
-      if (!trafficOk && !_hasServerGroup(map)) {
-        await disconnect();
-        throw PlatformException(
-          code: 'TUNNEL_NOT_PASSING_TRAFFIC',
-          message:
-              'Сетевой адаптер поднялся, но VLESS-сервер не отвечает через '
-              'него. Проверь интернет-соединение или попробуй сменить '
-              'сервер.',
-        );
+      // Связь через сервер здесь больше не проверяем: это делает само
+      // приложение (как и на Android) — и умеет при этом перейти на живой
+      // сервер без перезапуска ядра. Своя проверка здесь стоила до трёх
+      // попыток по четыре секунды на мёртвом первом сервере, а при её провале
+      // sing-box.exe гасился и поднимался заново.
+      //
+      // Сетевой адаптер — только для сессии с TUN. Проверка серверов с экрана
+      // «Серверы» поднимает ядро без него (только локальный прокси), и
+      // прежнее требование адаптера валило каждую такую проверку: все
+      // локации на Windows были «нет ответа».
+      if (hasTunInbound(map)) {
+        final adapterOk = await _verifyTunAdapterUp();
+        if (!adapterOk) {
+          await disconnect();
+          throw PlatformException(
+            code: 'TUN_ADAPTER_NOT_UP',
+            message:
+                'sing-box работает, но сетевой адаптер "VPNonLine" в Windows '
+                'не поднялся — весь трафик компьютера идёт в обход туннеля. '
+                'Обычно причина одна из: 1) приложение запущено НЕ от имени '
+                'администратора; 2) антивирус/Windows Defender блокирует '
+                'драйвер wintun.dll — добавь папку с sing-box.exe в '
+                'исключения; 3) завис адаптер "VPNonLine" от предыдущей '
+                'сессии — перезагрузи компьютер.',
+          );
+        }
       }
 
       _setState('connected');
@@ -573,11 +569,13 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     return null;
   }
 
-  static bool _hasServerGroup(Map<String, dynamic> config) {
-    final outbounds = config['outbounds'];
-    if (outbounds is! List) return false;
-    return outbounds.any((o) =>
-        o is Map && o['type'] == 'selector' && o['tag'] == 'proxy');
+  /// Сессия с TUN (боевое подключение), а не проверка серверов, которой
+  /// хватает локального прокси.
+  @visibleForTesting
+  static bool hasTunInbound(Map<String, dynamic> config) {
+    final inbounds = config['inbounds'];
+    if (inbounds is! List) return false;
+    return inbounds.any((i) => i is Map && i['type'] == 'tun');
   }
 
   Future<bool> _waitForClashApi(Duration timeout) async {
@@ -597,69 +595,45 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     return false;
   }
 
-  /// Проверяет, что трафик реально идёт через VLESS/Reality outbound: запрос
-  /// уходит через локальный SOCKS/HTTP-прокси sing-box'а
-  /// (127.0.0.1:$_localProxyPort), а не напрямую, — та же логика, что и в
-  /// честном замере пинга (tunnel_service.dart::connectedDelayMs()).
-  /// До трёх коротких попыток: сразу после старта outbound-соединению иногда
-  /// нужна секунда-другая.
-  Future<bool> _verifyTunnelPassesTraffic() async {
-    for (var attempt = 0; attempt < 3; attempt++) {
-      final client = HttpClient();
-      client.findProxy = (_) => 'PROXY 127.0.0.1:$_localProxyPort';
-      client.connectionTimeout = const Duration(seconds: 4);
-      try {
-        final req = await client
-            .getUrl(Uri.parse('http://cp.cloudflare.com/generate_204'))
-            .timeout(const Duration(seconds: 4));
-        final res = await req.close().timeout(const Duration(seconds: 4));
-        await res.drain<void>();
-        if (res.statusCode == 204 || res.statusCode == 200) {
-          return true;
-        }
-      } catch (_) {
-        // Пробуем ещё раз ниже — процесс мог ещё не успеть полностью
-        // поднять outbound-соединение сразу после старта.
-      } finally {
-        client.close(force: true);
-      }
-      if (attempt < 2) {
-        await Future.delayed(const Duration(milliseconds: 700));
-      }
-    }
-    return false;
-  }
-
-  /// Спрашивает у Windows, поднялся ли TUN-адаптер `VPNonLine` и в каком он
-  /// состоянии — см. комментарий в connect() выше. Get-NetAdapter есть в
-  /// PowerShell из коробки. До трёх попыток с паузой: адаптеру иногда нужна
-  /// секунда-другая, чтобы перейти из "Disconnected" в "Up".
+  /// Поднялся ли в Windows TUN-адаптер `VPNonLine`. Без него sing-box.exe и
+  /// его API работают, а трафик компьютера идёт мимо туннеля (нет прав
+  /// администратора, антивирус держит wintun.dll, завис старый адаптер).
+  /// Адаптеру иногда нужна секунда-другая после старта ядра.
   Future<bool> _verifyTunAdapterUp() async {
-    for (var attempt = 0; attempt < 3; attempt++) {
+    // Сначала дешёвый способ — список сетевых интерфейсов из самого Dart: без
+    // запуска PowerShell, который на Windows с антивирусом стартует по
+    // секунде-три на каждую попытку. Адаптер получает адрес 172.19.0.1 почти
+    // сразу после старта ядра.
+    final deadline = DateTime.now().add(const Duration(seconds: 6));
+    while (DateTime.now().isBefore(deadline)) {
       try {
-        final result = await Process.run(
-          'powershell',
-          [
-            '-NoProfile',
-            '-NonInteractive',
-            '-Command',
-            "(Get-NetAdapter -Name 'VPNonLine' -ErrorAction Stop).Status",
-          ],
-        ).timeout(const Duration(seconds: 5));
-        final status = (result.stdout as String? ?? '').trim();
-        if (status.toLowerCase() == 'up') {
-          return true;
-        }
+        final list = await NetworkInterface.list(
+            includeLoopback: false, type: InternetAddressType.IPv4);
+        final found = list.any((i) =>
+            i.name.toLowerCase().contains('vpnonline') ||
+            i.addresses.any((a) => a.address == '172.19.0.1'));
+        if (found) return true;
       } catch (_) {
-        // Адаптера ещё нет / PowerShell недоступен / ошибка — пробуем ещё
-        // раз ниже, а если попытки кончатся — вызывающий код честно
-        // сообщит об ошибке вместо фальшивого "Подключено".
+        break; // список недоступен — спросим у PowerShell ниже
       }
-      if (attempt < 2) {
-        await Future.delayed(const Duration(milliseconds: 700));
-      }
+      await Future.delayed(const Duration(milliseconds: 300));
     }
-    return false;
+    // Запасной путь — тот же вопрос через Get-NetAdapter, один раз.
+    try {
+      final result = await Process.run(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          "(Get-NetAdapter -Name 'VPNonLine' -ErrorAction Stop).Status",
+        ],
+      ).timeout(const Duration(seconds: 8));
+      final status = (result.stdout as String? ?? '').trim();
+      return status.toLowerCase() == 'up';
+    } catch (_) {
+      return false;
+    }
   }
 
   void _startStatsPolling() {
