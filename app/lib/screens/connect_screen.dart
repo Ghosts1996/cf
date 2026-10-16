@@ -162,6 +162,7 @@ class _ConnectScreenState extends State<ConnectScreen>
     // Тикаем чаще, чем проверка ключа, но не каждую секунду — это
     // TCP-connect до реального VLESS-узла.
     _latencyTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!_appVisible) return; // число на экране, которого сейчас не видно
       if (_tunnel.isConnected && !_latencyChecking) _measureLatency();
     });
     _connectivitySub =

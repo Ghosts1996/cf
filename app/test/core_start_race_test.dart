@@ -87,6 +87,31 @@ void main() {
           LiveCheckAction.probe);
     });
 
+    test('в кармане мессенджер шлёт и получает понемногу — туннель жив, '
+        'радио не будим', () {
+      expect(
+          TunnelService.liveCheckDecision(
+              rxDelta: 4 * 1024, txDelta: 2 * 1024, foreground: false),
+          LiveCheckAction.alive);
+    });
+
+    test('в кармане проверка не чаще раза в три минуты', () {
+      expect(
+          TunnelService.liveCheckDecision(
+              rxDelta: 0,
+              txDelta: 8 * 1024,
+              foreground: false,
+              sinceLastProbe: const Duration(seconds: 30)),
+          LiveCheckAction.skip);
+      expect(
+          TunnelService.liveCheckDecision(
+              rxDelta: 0,
+              txDelta: 8 * 1024,
+              foreground: false,
+              sinceLastProbe: const Duration(minutes: 4)),
+          LiveCheckAction.probe);
+    });
+
     test('пользователь смотрит на экран приложения — проверяем даже без '
         'трафика', () {
       expect(

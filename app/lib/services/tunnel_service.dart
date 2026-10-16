@@ -1078,6 +1078,11 @@ class TunnelService {
           _persistConnectStart(startedAt);
         }
       }
+      // Счётчик времени и опрос байтов нужны только экрану. С выключенным
+      // экраном и свёрнутым приложением они будили процессор каждую секунду
+      // ради цифр, которых никто не видит; при возврате всё досчитается на
+      // ближайшем тике.
+      if (!_appInForeground) return;
       status.value = TunnelStatus(
         state: current.state,
         duration: DateTime.now()
@@ -1226,7 +1231,14 @@ class TunnelService {
   @visibleForTesting
   Future<void> debugCheckRealState() => _checkRealState();
 
+  /// Тики сторожа: в свёрнутом приложении он работает раз в шесть тиков
+  /// (30 с), а не каждые 5 с — два вызова в систему каждые пять секунд
+  /// с выключенным экраном заметны на батарее.
+  int _watchdogTicks = 0;
+
   Future<void> _checkRealState() async {
+    _watchdogTicks++;
+    if (!_appInForeground && _watchdogTicks % 6 != 0) return;
     // Во время подключения, смены сервера и проверки серверов состояние
     // меняется само по себе и постоянно — сторожу там делать нечего.
     if (_connectInProgress || _switchInProgress || _probeInProgress) return;
@@ -1828,18 +1840,36 @@ class TunnelService {
   bool _liveCheckRunning = false;
   IOClient? _liveClient;
 
+  /// Сколько байт ответа за интервал в свёрнутом приложении достаточно, чтобы
+  /// считать туннель живым. Мессенджеры в кармане держат связь короткими
+  /// пакетами: раньше любой такой обмен меньше 32 КБ запускал проверочный
+  /// запрос каждые 30 секунд, и радиомодуль телефона не засыпал вовсе.
+  /// Ответ пришёл — значит, туннель его и доставил.
+  static const _liveCheckBackgroundAliveRxBytes = 1024;
+
+  /// Не чаще одной проверки за это время в свёрнутом приложении.
+  static const _liveCheckBackgroundGap = Duration(minutes: 3);
+
   @visibleForTesting
   static LiveCheckAction liveCheckDecision({
     required int rxDelta,
     required int txDelta,
     required bool foreground,
+    Duration? sinceLastProbe,
   }) {
     if (rxDelta >= _liveCheckAliveRxBytes) return LiveCheckAction.alive;
-    if (!foreground && rxDelta <= 0 && txDelta <= 0) {
+    if (foreground) return LiveCheckAction.probe;
+    if (rxDelta <= 0 && txDelta <= 0) return LiveCheckAction.skip;
+    if (rxDelta >= _liveCheckBackgroundAliveRxBytes) {
+      return LiveCheckAction.alive;
+    }
+    if (sinceLastProbe != null && sinceLastProbe < _liveCheckBackgroundGap) {
       return LiveCheckAction.skip;
     }
     return LiveCheckAction.probe;
   }
+
+  DateTime? _liveCheckLastProbeAt;
 
   @visibleForTesting
   Future<void> debugLiveCheckTick() => _liveCheckTick();
@@ -1888,9 +1918,15 @@ class TunnelService {
     final txDelta = _uploadTotalBytes - _liveCheckTxMark;
     _liveCheckRxMark = _downloadTotalBytes;
     _liveCheckTxMark = _uploadTotalBytes;
+    final lastProbe = _liveCheckLastProbeAt;
     final action = liveCheckDecision(
-        rxDelta: rxDelta, txDelta: txDelta, foreground: _appInForeground);
+        rxDelta: rxDelta,
+        txDelta: txDelta,
+        foreground: _appInForeground,
+        sinceLastProbe:
+            lastProbe == null ? null : DateTime.now().difference(lastProbe));
     if (action != LiveCheckAction.probe) return;
+    _liveCheckLastProbeAt = DateTime.now();
 
     final generation = _sessionGeneration;
     bool stillOurs() => _sessionGeneration == generation && isConnected;
@@ -3252,7 +3288,11 @@ class TunnelService {
               notification: NotificationConfig(
                 title: 'VPN подключён',
                 channelName: 'VPNOnline — подключение',
-                showTrafficStats: true,
+                // Скорость в уведомлении плагин обновляет каждую секунду —
+                // это перерисовка шторки раз в секунду всё время, пока VPN
+                // включён, в том числе с выключенным экраном. Скорость и
+                // объём трафика видны в приложении.
+                showTrafficStats: false,
                 showStopButton: true,
                 stopButtonLabel: 'Отключить',
               ),
