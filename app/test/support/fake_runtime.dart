@@ -50,11 +50,22 @@ class FakeRuntime implements SingboxRuntimeClient {
   /// Строки журнала ядра — как их присылает плагин.
   void emitCoreLog(List<dynamic> entries) => _coreLog.add(entries);
 
-  /// Ядро упало само — сеть пропала, Android усыпил сервис.
+  /// Сервис остановлен не приложением: кнопка «Отключить» в уведомлении,
+  /// переключатель в настройках Android, другой VPN. Плагин просто
+  /// присылает «stopped», без сообщения об ошибке.
   void simulateDrop() {
     liveSessions = 0;
     _emit('ServiceState.stopped');
   }
+
+  /// Ядро упало само: сообщение об аварии, затем «stopped».
+  void simulateCrash({String message = 'Core failed: runtime error'}) {
+    liveSessions = 0;
+    _fault.add(message);
+    _emit('ServiceState.stopped');
+  }
+
+  int permissionRequests = 0;
 
   @override
   Future<void> initialize() async => calls.add('initialize');
@@ -129,7 +140,10 @@ class FakeRuntime implements SingboxRuntimeClient {
   }
 
   @override
-  Future<bool> requestVPNPermission() async => true;
+  Future<bool> requestVPNPermission() async {
+    permissionRequests++;
+    return true;
+  }
 
   @override
   Future<void> selectOutbound(String groupTag, String outboundTag) async {

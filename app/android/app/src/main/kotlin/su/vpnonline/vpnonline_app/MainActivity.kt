@@ -8,6 +8,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.TrafficStats
 import android.net.Uri
+import android.net.VpnService
 import android.os.Build
 import android.os.Process
 import android.provider.Settings
@@ -62,6 +63,7 @@ class MainActivity : FlutterActivity() {
                     // VPN перестанет подниматься.
                     "getPackageName" -> result.success(packageName)
                     "isVpnActive" -> result.success(isVpnActive())
+                    "hasVpnPermission" -> result.success(hasVpnPermission())
                     "isCoreServiceAlive" -> result.success(isCoreServiceAlive())
                     "restartApp" -> {
                         result.success(null)
@@ -134,6 +136,16 @@ class MainActivity : FlutterActivity() {
             cm.getNetworkCapabilities(it)
                 ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
         }
+    } catch (e: Exception) {
+        null
+    }
+
+    /// Есть ли у приложения разрешение на VPN — без системного диалога.
+    /// Восстановление туннеля из фона спрашивает здесь: запрос разрешения
+    /// через плагин открыл бы системное окно поверх чужого приложения (так
+    /// бывает, когда VPN забрало другое VPN-приложение).
+    private fun hasVpnPermission(): Boolean? = try {
+        VpnService.prepare(this) == null
     } catch (e: Exception) {
         null
     }

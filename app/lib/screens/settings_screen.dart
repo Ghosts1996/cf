@@ -36,7 +36,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Дефолты: автоподключение, Kill Switch и режим прокси выключены; умное
   // подключение на Wi-Fi и обход DPI — включены.
   bool _autoConnect = false;
-  bool _smartWifi = true;
+  bool _smartWifi = false;
   bool _killSwitch = false;
   bool _dpiBypass = true;
   bool _proxyOnly = false;

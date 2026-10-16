@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'local_prefs.dart';
@@ -90,62 +91,100 @@ class AppLogService {
     await applyRetention();
   }
 
-  // log() делает read-modify-write всего списка, а main.dart слушает сразу
-  // два независимых ValueNotifier туннеля (status и lastError) — оба могут
-  // вызвать log() в одну миллисекунду. Без сериализации второй вызов
-  // прочитает список до записи первого и затрёт его. Цепочка Future
-  // заставляет каждый следующий log() дождаться предыдущего.
+  // Журнал целиком живёт в памяти, а в хранилище уходит пачкой.
+  //
+  // Раньше каждая строка стоила полного круга: прочитать весь журнал из
+  // хранилища, разобрать JSON, дописать, собрать JSON заново, записать, а
+  // затем ещё раз прочитать и разобрать ради очистки старого. В журнале до
+  // пятисот записей, среди них полные конфиги ядра по десятку килобайт, —
+  // это мегабайты JSON в главном потоке на каждую строку. Подключение пишет
+  // их десяток подряд: экран замирал, а приложение «зависало как-то сильно».
+  List<AppLogEntry>? _cache;
+  Future<List<AppLogEntry>>? _loading;
+
+  // Цепочка нужна, чтобы записи шли строго по порядку и не терялись, даже
+  // когда несколько событий приходят в одну миллисекунду.
   Future<void> _writeChain = Future.value();
+  Timer? _persistTimer;
+  DateTime? _lastRetentionAt;
+
+  /// Пауза перед записью в хранилище: строки одного всплеска (подключение,
+  /// пачка журнала ядра) уходят на диск одной записью.
+  static const _persistDelay = Duration(milliseconds: 150);
+
+  /// Потолок размера журнала в символах. Хранилище настроек целиком
+  /// читается при каждом запуске приложения и целиком переписывается при
+  /// каждой записи — многомегабайтный журнал замедлял и то, и другое.
+  static const _maxTotalChars = 600000;
+
+  /// Одна запись не длиннее этого — конфиг ядра с запасом помещается.
+  static const _maxMessageChars = 30000;
 
   /// Сколько раз журнал реально переписывался в хранилище. Нужен тестам:
   /// по нему видно, что пачка строк ядра стоит одну запись, а не сотню.
   @visibleForTesting
   int debugWriteCount = 0;
 
+  /// Забыть журнал в памяти — как после перезапуска приложения.
+  @visibleForTesting
+  Future<void> debugDropCache() async {
+    await _writeChain;
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    _cache = null;
+    _loading = null;
+    _lastRetentionAt = null;
+  }
+
+  Future<List<AppLogEntry>> _entries() {
+    final cached = _cache;
+    if (cached != null) return Future.value(cached);
+    return _loading ??= _readAll().then((entries) {
+      _cache = entries;
+      _loading = null;
+      return entries;
+    });
+  }
+
   /// Добавляет сразу несколько записей за одну запись в хранилище.
-  ///
-  /// Каждый вызов [log] — это чтение всего журнала, разбор JSON, запись
-  /// обратно на диск и ещё одно чтение для очистки старого. Для редких
-  /// событий приложения это незаметно. Журнал ядра приходит пачками по
-  /// десятку-сотне строк, и построчная запись превращалась в сотни полных
-  /// перезаписей в секунду: приложение без остановки гоняло JSON и диск,
-  /// пока пользователь листал сайты. Отсюда и лаги.
   Future<void> logBatch(List<({String message, AppLogLevel level})> items) {
     if (items.isEmpty) return _writeChain;
-    final next = _writeChain.then((_) async {
-      try {
-        final entries = await _readAll();
-        final now = DateTime.now();
-        for (final item in items) {
-          entries.add(AppLogEntry(
-              timestamp: now, message: item.message, level: item.level));
-        }
-        final trimmed = entries.length > _maxEntries
-            ? entries.sublist(entries.length - _maxEntries)
-            : entries;
-        await _writeAll(trimmed);
-        await applyRetention();
-      } catch (_) {
-        // Лог — вспомогательная функция, не критичная для работы VPN.
-      }
-    });
-    _writeChain = next;
-    return next;
+    final now = DateTime.now();
+    return _enqueue([
+      for (final item in items)
+        AppLogEntry(
+            timestamp: now, message: _clip(item.message), level: item.level),
+    ]);
   }
 
   /// Добавляет запись в журнал. Безопасна для вызова откуда угодно —
   /// ошибки чтения/записи хранилища не пробрасываются наружу, чтобы сбой
   /// логирования никогда не мешал основной функциональности приложения.
-  Future<void> log(String message, {AppLogLevel level = AppLogLevel.info}) {
+  Future<void> log(String message, {AppLogLevel level = AppLogLevel.info}) =>
+      _enqueue([
+        AppLogEntry(
+            timestamp: DateTime.now(), message: _clip(message), level: level),
+      ]);
+
+  static String _clip(String message) => message.length <= _maxMessageChars
+      ? message
+      : '${message.substring(0, _maxMessageChars)}…';
+
+  Future<void> _enqueue(List<AppLogEntry> items) {
     final next = _writeChain.then((_) async {
       try {
-        final entries = await _readAll();
-        entries.add(AppLogEntry(timestamp: DateTime.now(), message: message, level: level));
-        final trimmed = entries.length > _maxEntries
-            ? entries.sublist(entries.length - _maxEntries)
-            : entries;
-        await _writeAll(trimmed);
-        await applyRetention();
+        final entries = await _entries();
+        entries.addAll(items);
+        _trim(entries);
+        // Срок хранения проверяем не на каждой строке — раз в десять минут
+        // хватает: записи старше суток или недели от этого не задержатся.
+        final last = _lastRetentionAt;
+        if (last == null ||
+            DateTime.now().difference(last) > const Duration(minutes: 10)) {
+          await _applyRetentionTo(entries);
+        }
+        entryCount.value = entries.length;
+        _schedulePersist();
       } catch (_) {
         // Лог — вспомогательная функция, не критичная для работы VPN.
       }
@@ -154,15 +193,50 @@ class AppLogService {
     return next;
   }
 
+  /// Старые записи уходят первыми — и по числу, и по общему размеру.
+  static void _trim(List<AppLogEntry> entries) {
+    if (entries.length > _maxEntries) {
+      entries.removeRange(0, entries.length - _maxEntries);
+    }
+    var total = 0;
+    for (final e in entries) {
+      total += e.message.length;
+    }
+    var drop = 0;
+    while (total > _maxTotalChars && drop < entries.length - 1) {
+      total -= entries[drop].message.length;
+      drop++;
+    }
+    if (drop > 0) entries.removeRange(0, drop);
+  }
+
+  void _schedulePersist() {
+    _persistTimer ??= Timer(_persistDelay, () {
+      _persistTimer = null;
+      _writeChain = _writeChain.then((_) async {
+        final entries = _cache;
+        if (entries == null) return;
+        try {
+          await _writeAll(entries);
+        } catch (_) {}
+      });
+    });
+  }
+
   /// Все записи, новые сверху, уже с применённым сроком хранения.
   Future<List<AppLogEntry>> getAll() async {
+    await _writeChain;
     await applyRetention();
-    final entries = await _readAll();
+    final entries = await _entries();
     return entries.reversed.toList();
   }
 
   /// Ручное удаление — кнопка "Удалить все логи" на экране "Безопасность".
   Future<void> clearAll() async {
+    await _writeChain;
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    _cache = <AppLogEntry>[];
     await LocalPrefs.instance.setString(_storageKey, '[]');
     entryCount.value = 0;
     await LocalPrefs.instance.setInt(
@@ -174,13 +248,18 @@ class AppLogService {
   /// Стирает записи старше выбранного срока хранения. Безопасна для
   /// повторного вызова — если удалять нечего, просто ничего не делает.
   Future<void> applyRetention() async {
+    final entries = await _entries();
+    await _applyRetentionTo(entries);
+    entryCount.value = entries.length;
+  }
+
+  Future<void> _applyRetentionTo(List<AppLogEntry> entries) async {
+    _lastRetentionAt = DateTime.now();
     final days = await getRetentionDays();
-    final entries = await _readAll();
     final cutoff = DateTime.now().subtract(Duration(days: days));
-    final kept = entries.where((e) => e.timestamp.isAfter(cutoff)).toList();
-    if (kept.length != entries.length) {
-      await _writeAll(kept);
-    }
+    final before = entries.length;
+    entries.removeWhere((e) => !e.timestamp.isAfter(cutoff));
+    if (entries.length != before) _schedulePersist();
     await LocalPrefs.instance.setInt(
       _lastCleanupKey,
       DateTime.now().millisecondsSinceEpoch,
@@ -201,7 +280,10 @@ class AppLogService {
     }
     try {
       final decoded = jsonDecode(raw) as List<dynamic>;
-      final entries = decoded.map(AppLogEntry.tryFromJson).whereType<AppLogEntry>().toList();
+      final entries = decoded.map(AppLogEntry.tryFromJson).whereType<AppLogEntry>().toList()
+        ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      // Журнал прошлых версий мог разрастись до мегабайтов — ужимаем сразу.
+      _trim(entries);
       entryCount.value = entries.length;
       return entries;
     } catch (_) {
@@ -213,7 +295,6 @@ class AppLogService {
   }
 
   Future<void> _writeAll(List<AppLogEntry> entries) async {
-    entries.sort((a, b) => a.timestamp.compareTo(b.timestamp));
     final raw = jsonEncode(entries.map((e) => e.toJson()).toList());
     debugWriteCount++;
     await LocalPrefs.instance.setString(_storageKey, raw);

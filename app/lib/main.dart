@@ -305,8 +305,16 @@ class _RootShellState extends State<RootShell> {
         child: IndexedStack(
           index: _index,
           children: [
+            // TickerMode выключает анимации и сообщает экрану, что его
+            // вкладка скрыта: скрытые вкладки не крутят анимации и не гоняют
+            // свои периодические замеры (см. ServersScreen._onScreen).
             for (var i = 0; i < screens.length; i++)
-              _visited.contains(i) ? screens[i] : const SizedBox.shrink(),
+              TickerMode(
+                enabled: i == _index,
+                child: _visited.contains(i)
+                    ? screens[i]
+                    : const SizedBox.shrink(),
+              ),
           ],
         ),
       ),

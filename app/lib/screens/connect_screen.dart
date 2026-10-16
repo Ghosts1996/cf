@@ -66,6 +66,16 @@ class _ConnectScreenState extends State<ConnectScreen>
   // "Автоподключение уже пробовали в этой сессии экрана": иначе оно
   // срабатывало бы при каждом обновлении _activeKey, а не один раз.
   bool _autoConnectTried = false;
+  DateTime? _lastKeyRecheckAt;
+
+  /// Приложение на экране (inactive — тоже: опущенная шторка, окно без
+  /// фокуса). Из свёрнутого приложения подключения идут без системных окон.
+  static bool get _appVisible {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    return lifecycle == null ||
+        lifecycle == AppLifecycleState.resumed ||
+        lifecycle == AppLifecycleState.inactive;
+  }
   // "Умное подключение на публичном Wi-Fi": слушаем смену сети через
   // connectivity_plus и подключаемся при переходе на Wi-Fi (именно переходе,
   // иначе сработает на каждое обновление состояния связи), если тумблер
@@ -135,7 +145,20 @@ class _ConnectScreenState extends State<ConnectScreen>
     // дольше, чем остаток срока текущего ключа, об истечении иначе никто не
     // узнает. Истёк ключ живого туннеля — переключаемся на следующий по сроку
     // или отключаемся и предлагаем купить.
-    _keyWatchTimer = Timer.periodic(const Duration(minutes: 1), (_) => _recheckKeyExpiry());
+    //
+    // Свёрнутое приложение спрашивает реже — раз в 15 минут: запрос к серверу
+    // каждую минуту в кармане это сеть и батарея ради экрана, которого никто
+    // не видит. При возврате в приложение проверка идёт на ближайшей минуте.
+    _keyWatchTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      final last = _lastKeyRecheckAt;
+      if (!_appVisible &&
+          last != null &&
+          DateTime.now().difference(last) < const Duration(minutes: 15)) {
+        return;
+      }
+      _lastKeyRecheckAt = DateTime.now();
+      _recheckKeyExpiry();
+    });
     // Тикаем чаще, чем проверка ключа, но не каждую секунду — это
     // TCP-connect до реального VLESS-узла.
     _latencyTimer = Timer.periodic(const Duration(seconds: 15), (_) {
@@ -231,7 +254,10 @@ class _ConnectScreenState extends State<ConnectScreen>
         (_activeKey != null || _hasManualKey) &&
         !_tunnel.isConnected &&
         !_tunnel.isBusy) {
-      unawaited(_toggleConnection());
+      // Сеть сменилась, пока приложение свёрнуто, — подключаемся без
+      // системных окон: запрос разрешения не должен вылезать поверх чужого
+      // приложения.
+      unawaited(_toggleConnection(interactive: _appVisible));
     }
   }
 
@@ -528,7 +554,9 @@ class _ConnectScreenState extends State<ConnectScreen>
         });
         try {
           await _tunnel.disconnect();
-          await _tunnel.connect(connectionString, preferredHostName: SelectedServer.hostName.value);
+          await _tunnel.connect(connectionString,
+              preferredHostName: SelectedServer.hostName.value,
+              interactive: _appVisible);
           _connectedKeyId = (newBest['key_id'] as num?)?.toInt();
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -625,7 +653,7 @@ class _ConnectScreenState extends State<ConnectScreen>
     }
   }
 
-  Future<void> _toggleConnection() async {
+  Future<void> _toggleConnection({bool interactive = true}) async {
     if (_connecting || _tunnel.isBusy) return;
     // Проверка наличия ключа нужна только для подключения. Отключение живого
     // туннеля не должно зависеть от того, ответил ли backend: список ключей не
@@ -668,7 +696,9 @@ class _ConnectScreenState extends State<ConnectScreen>
     try {
       // Передаём сервер, выбранный на ServersScreen, иначе туннель всегда
       // поднимается на первом сервере из подписки ключа.
-      await _tunnel.connect(connectionString, preferredHostName: SelectedServer.hostName.value);
+      await _tunnel.connect(connectionString,
+          preferredHostName: SelectedServer.hostName.value,
+          interactive: interactive);
       // Запоминаем, к какому key_id реально подключился туннель — по нему
       // _recheckKeyExpiry() отличает "истёк рабочий ключ" от "появился ключ
       // подлиннее". У ручного ключа key_id нет, там null, и перепроверка такое

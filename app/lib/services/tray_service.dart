@@ -79,10 +79,21 @@ class TrayService with TrayListener, WindowListener {
     );
   }
 
+  /// Что последним показано в трее: подключено ли, занято ли, сервер.
+  String? _shownTrayState;
+
   void _onTunnelChanged() {
     if (!_supported) return;
     final connected = TunnelService.instance.isConnected;
+    final busy = TunnelService.instance.isBusy;
     final serverName = TunnelService.instance.connectedServerName.value;
+    // Статус туннеля обновляется каждую секунду (счётчик времени и скорости).
+    // Раньше на каждый такой тик заново собиралось меню трея и подсказка —
+    // вызовы в Windows раз в секунду, а открытое меню пересоздавалось прямо
+    // под курсором. Трогаем трей только когда показанное в нём изменилось.
+    final shown = '$connected|$busy|$serverName';
+    if (shown == _shownTrayState) return;
+    _shownTrayState = shown;
     unawaited(trayManager.setToolTip(
       connected
           ? 'VPN onLine — подключено${serverName != null ? ' ($serverName)' : ''}'
@@ -136,9 +147,16 @@ class TrayService with TrayListener, WindowListener {
     // Выход из трея должен остановить туннель: на Windows это отдельный
     // процесс sing-box.exe, иначе он осиротеет и продолжит держать
     // TUN-адаптер (см. disconnect() в tunnel_service.dart).
-    if (TunnelService.instance.isConnected) {
-      await TunnelService.instance.disconnect();
-    }
+    //
+    // Не только при «подключено»: выход посреди подключения оставлял
+    // sing-box.exe работать без приложения — VPN жил сам по себе до
+    // следующего запуска. disconnect() гасит процесс и по имени, так что
+    // безопасен и без сессии; предел по времени — чтобы выход не завис.
+    try {
+      await TunnelService.instance
+          .disconnect()
+          .timeout(const Duration(seconds: 6));
+    } catch (_) {}
     await windowManager.setPreventClose(false);
     await windowManager.destroy();
   }

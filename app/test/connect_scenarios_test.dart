@@ -119,16 +119,62 @@ void main() {
     expect(tunnel.isConnected, isFalse);
   });
 
-  test('обрыв при свёрнутом приложении поднимается обратно сам', () async {
+  test('выключение из шторки при свёрнутом приложении не отменяется',
+      () async {
+    // Так и выглядела жалоба «VPN сам по себе включается»: человек в другом
+    // приложении нажимает «Отключить» в уведомлении, а через три секунды
+    // VPN включается обратно.
     tunnel.appInForeground = false;
     await tunnel.connect(_subscription);
     final before = core.connectCount;
-    core.simulateDrop(); // сеть пропала, Android усыпил сервис
+    core.simulateDrop();
+    await Future<void>.delayed(const Duration(seconds: 5));
+    expect(core.connectCount, before,
+        reason: 'остановка без аварии ядра — решение человека или системы');
+    expect(tunnel.isConnected, isFalse);
+  });
+
+  test('авария ядра при свёрнутом приложении поднимается обратно сама',
+      () async {
+    tunnel.appInForeground = false;
+    // Как на телефоне с выданным разрешением: молча отвечает «есть».
+    tunnel.vpnPermissionProbe = () async => true;
+    await tunnel.connect(_subscription);
+    final before = core.connectCount;
+    final asked = core.permissionRequests;
+    core.simulateCrash();
     final restored = await waitUntil(() => core.connectCount > before,
         timeout: const Duration(seconds: 8));
     expect(restored, isTrue, reason: 'туннель обязан вернуться сам');
     expect(await waitUntil(() => tunnel.isConnected), isTrue);
+    expect(core.permissionRequests, asked,
+        reason: 'из фона системное окно разрешения не открывается');
     await tunnel.disconnect();
+  });
+
+  test('без разрешения на VPN восстановление из фона не крутится', () async {
+    tunnel.appInForeground = false;
+    await tunnel.connect(_subscription);
+    tunnel.vpnPermissionProbe = () async => false; // VPN забрало другое приложение
+    final before = core.connectCount;
+    core.simulateCrash();
+    await Future<void>.delayed(const Duration(seconds: 5));
+    expect(core.connectCount, before);
+    expect(tunnel.killSwitchBlocking.value, isFalse);
+  });
+
+  test('сбой на пути к сессии не делает её обрыв аварией', () async {
+    // Первая попытка упала на занятом порту — это сообщение об аварии, но
+    // оно было до подключения. Выключение из шторки после него не должно
+    // включать VPN обратно.
+    tunnel.appInForeground = false;
+    core.failNextStarts = 1;
+    await tunnel.connect(_subscription);
+    expect(tunnel.isConnected, isTrue);
+    final before = core.connectCount;
+    core.simulateDrop();
+    await Future<void>.delayed(const Duration(seconds: 5));
+    expect(core.connectCount, before);
   });
 
   test('экран не врёт «подключено», когда сервиса уже нет', () async {

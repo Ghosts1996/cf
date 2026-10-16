@@ -106,9 +106,45 @@ class TunnelService {
   /// цена ошибки в обе стороны высокая — либо приложение включает VPN, который
   /// только что выключили руками, либо не возвращает туннель, оборвавшийся в
   /// кармане.
+  ///
+  /// Свёрнутого приложения мало. Кнопка «Отключить» в уведомлении VPN,
+  /// переключатель в настройках Android и запуск другого VPN тоже приходят
+  /// сюда простым «отключено» — и почти всегда, когда открыто какое-то другое
+  /// приложение. Прежнее правило «свёрнуто — значит обрыв» включало VPN
+  /// обратно через три секунды после того, как человек выключил его сам, а
+  /// при другом VPN ещё и выводило поверх него системный запрос разрешения:
+  /// «VPN сам по себе включается». Поэтому обратно поднимаем только то, что
+  /// упало у нас: перед «отключено» ядро сообщило об аварии.
   @visibleForTesting
-  static bool shouldAutoReconnectAfterDrop({required bool appInForeground}) =>
-      !appInForeground;
+  static bool shouldAutoReconnectAfterDrop(
+          {required bool appInForeground, required bool coreCrashed}) =>
+      !appInForeground && coreCrashed;
+
+  /// Когда ядро последний раз сообщило об аварии (см. [isCoreCrashFault]).
+  DateTime? _lastCoreCrashAt;
+
+  /// Сколько после аварии ядра «отключено» считается её следствием.
+  static const _coreCrashWindow = Duration(seconds: 30);
+
+  bool get _coreCrashedRecently {
+    final at = _lastCoreCrashAt;
+    return at != null && DateTime.now().difference(at) < _coreCrashWindow;
+  }
+
+  /// Сообщение ядра об аварии, а не о нормальной остановке: плагин на
+  /// Android шлёт «Start failed…»/«Core failed…», на Windows процесс
+  /// sing-box.exe завершился сам. Просьба о разрешении на VPN сюда не
+  /// относится — без человека её всё равно не выполнить.
+  @visibleForTesting
+  static bool isCoreCrashFault(String? message) =>
+      isCoreStartFault(message) ||
+      (message != null && message.contains('неожиданно завершился'));
+
+  void _onCoreFault(dynamic error) {
+    final message = error.toString();
+    if (isCoreCrashFault(message)) _lastCoreCrashAt = DateTime.now();
+    lastError.value = message;
+  }
   /// Просьба свернуть «Реальную проверку»: пользователь нажал «Подключить».
   ///
   /// Проверка поднимает собственную временную сессию тем же единственным
@@ -423,9 +459,7 @@ class TunnelService {
     try {
       _stateSub = _client.serviceStateStream.listen(_applyServiceState);
       _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
-      _faultSub = _client.faultStream.listen((error) {
-        lastError.value = error.toString();
-      });
+      _faultSub = _client.faultStream.listen(_onCoreFault);
       // Предупреждения и ошибки самого ядра — единственное место, где видно
       // настоящую причину "подключено, а трафика нет": отказ сервера в
       // рукопожатии, непонятый транспорт, сорванный резолв. Без этой
@@ -1221,6 +1255,9 @@ class TunnelService {
         try {
           await _disconnectNative();
         } catch (_) {}
+        // Это не выключение человеком: плагин VPN считает включённым, а
+        // интерфейса нет — сессия сломалась у нас, и её можно поднимать.
+        _lastCoreCrashAt = DateTime.now();
         _applyServiceState('ServiceState.stopped');
         return;
       }
@@ -1256,11 +1293,16 @@ class TunnelService {
     // включённом Kill Switch; теперь оно работает всегда, и проверку нужно
     // исключить явно.
     if (_probeInProgress) return;
-    // Выключили при открытом приложении — считаем, что этого и хотели.
-    if (!shouldAutoReconnectAfterDrop(appInForeground: _appInForeground)) {
-      unawaited(AppLogService.instance.log(
-          'Туннель отключён при открытом приложении — считаем это намеренным '
-          'и не поднимаем его обратно сами'));
+    // Выключили при открытом приложении или не из приложения (уведомление,
+    // настройки Android, другой VPN) — считаем, что этого и хотели.
+    final crashed = _coreCrashedRecently;
+    if (!shouldAutoReconnectAfterDrop(
+        appInForeground: _appInForeground, coreCrashed: crashed)) {
+      unawaited(AppLogService.instance.log(_appInForeground
+          ? 'Туннель отключён при открытом приложении — считаем это '
+              'намеренным и не поднимаем его обратно сами'
+          : 'Туннель выключен не из приложения (кнопка в уведомлении, '
+              'настройки Android или другой VPN) — обратно не включаю'));
       _sessionEstablished = false;
       killSwitchBlocking.value = false;
       return;
@@ -1305,11 +1347,28 @@ class TunnelService {
       // "Подключить", смена сервера, автоподключение при возврате Wi-Fi).
       if (_connectInProgress) return;
       if (isConnected) return;
+      // За паузу пользователь мог открыть приложение и увидеть «отключено» —
+      // дальше решает он сам.
+      if (_appInForeground) {
+        _sessionEstablished = false;
+        killSwitchBlocking.value = false;
+        return;
+      }
+      final connectionString = _lastConnectionString;
+      if (connectionString == null) return;
       try {
-        await connect(_lastConnectionString!,
-            preferredHostName: _lastPreferredHostName);
+        await connect(connectionString,
+            preferredHostName: _lastPreferredHostName, interactive: false);
         killSwitchBlocking.value = false;
         _autoReconnectAttempt = 0;
+      } on _NeedsUserException catch (e) {
+        // Без человека не подняться (нет разрешения на VPN) — прекращаем
+        // попытки, а не крутим их в фоне.
+        unawaited(AppLogService.instance.log(
+            'Восстановление туннеля остановлено: ${e.message}',
+            level: AppLogLevel.warning));
+        _sessionEstablished = false;
+        killSwitchBlocking.value = false;
       } catch (_) {
         // connect() сам исчерпает попытки и снова придёт сюда через
         // _onStatusChanged при следующем disconnected — здесь ничего не делаем,
@@ -1628,6 +1687,10 @@ class TunnelService {
 
   Future<void> _runLatencyProbe({bool force = false}) async {
     if (_latencyProbeRunning || !isConnected) return;
+    // Свёрнутое приложение плановый замер не делает: дюжина рукопожатий раз
+    // в пять минут в кармане — это сеть и батарея ради чисел, которых никто
+    // не видит. Мёртвый сервер в фоне ловит проверка живости по трафику.
+    if (!force && !_appInForeground) return;
     final current = status.value;
     final busy = current != null &&
         (current.download > _latencyProbeBusyBps ||
@@ -2714,8 +2777,12 @@ class TunnelService {
   /// `_connecting`, но цикл авто-переподключения Kill Switch
   /// (`_onStatusChanged`) и автобалансировка (`switchPreferredHost`) зовут
   /// connect() мимо любого UI-флага.
+  ///
+  /// [interactive] false — подключение без человека у экрана
+  /// (восстановление после аварии в фоне): никаких системных окон
+  /// (разрешения на уведомления и на VPN) и никакого перезапуска приложения.
   Future<String> connect(String connectionString,
-      {String? preferredHostName}) async {
+      {String? preferredHostName, bool interactive = true}) async {
     if (_connectInProgress) {
       throw TunnelException(
           'Подключение уже выполняется — дождись его завершения.');
@@ -2738,7 +2805,7 @@ class TunnelService {
       // своего finally. Без них подключение не увидит события «поднялось».
       _ensureStateSubscriptions();
       return await _connectInternal(connectionString,
-          preferredHostName: preferredHostName);
+          preferredHostName: preferredHostName, interactive: interactive);
     } finally {
       _connectInProgress = false;
       if (_nativeOwner == 'connect') _nativeOwner = null;
@@ -2762,9 +2829,7 @@ class TunnelService {
   void _ensureStateSubscriptions() {
     _stateSub ??= _client.serviceStateStream.listen(_applyServiceState);
     _statsSub ??= _client.trafficStatsStream.listen(_applyTrafficStats);
-    _faultSub ??= _client.faultStream.listen((error) {
-      lastError.value = error.toString();
-    });
+    _faultSub ??= _client.faultStream.listen(_onCoreFault);
     // Журнал ядра проверка серверов снимает вместе с остальными подписками,
     // а возвращался он только при запуске приложения: после первой же
     // проверки предупреждения и ошибки ядра переставали попадать в журнал.
@@ -2786,7 +2851,7 @@ class TunnelService {
   }
 
   Future<String> _connectInternal(String connectionString,
-      {String? preferredHostName}) async {
+      {String? preferredHostName, bool interactive = true}) async {
     final connectStarted = DateTime.now();
     lastError.value = null;
     _corePortStuck = false;
@@ -2796,7 +2861,7 @@ class TunnelService {
     // foreground VPN продолжает работать, но его карточка скрыта в шторке.
     // Запрашиваем его до старта VpnService, чтобы первое подключение уже
     // показало постоянное уведомление с кнопкой отключения.
-    if (Platform.isAndroid) {
+    if (Platform.isAndroid && interactive) {
       try {
         final notificationsAllowed = await _nativeStatsChannel
                 .invokeMethod<bool>('requestNotificationPermission') ??
@@ -2961,7 +3026,19 @@ class TunnelService {
     // VpnService.prepare() и падает нативно, минуя Dart try/catch целиком — со
     // стороны это выглядит как вылет приложения без единого сообщения. В
     // proxy-only режиме системного интерфейса нет и диалог не нужен.
-    if (!proxyOnly) {
+    if (!proxyOnly && !interactive) {
+      // Из фона системный диалог разрешения открывать нельзя: он вылезает
+      // поверх того, чем человек сейчас занят. Спрашиваем молча; на Android
+      // без ответа — не рискуем. На Windows диалога нет вовсе.
+      final allowed = await vpnPermissionProbe();
+      if (allowed == false ||
+          (allowed == null &&
+              (Platform.isAndroid || !await _client.requestVPNPermission()))) {
+        throw _NeedsUserException(
+            'нет разрешения на VPN — его забрало другое VPN-приложение или '
+            'настройки Android');
+      }
+    } else if (!proxyOnly) {
       final granted = await _client.requestVPNPermission();
       if (!granted) {
         throw TunnelException(
@@ -3135,7 +3212,12 @@ class TunnelService {
         unawaited(AppLogService.instance.log('Конфиг ядра: ${_maskSecrets(config)}'));
 
         Future<void> startSession() async {
-          if (!await _awaitCoreFullyStopped() && await _restartIfCoreStuck()) {
+          // Перезапуск приложения — только при человеке у экрана: из фона
+          // он выбрасывал бы приложение поверх того, чем человек занят.
+          if (!await _awaitCoreFullyStopped() &&
+              interactive &&
+              _appInForeground &&
+              await _restartIfCoreStuck()) {
             throw _VpnServiceStartException(
                 'Перезапускаю приложение, чтобы убрать зависшее ядро VPN — '
                 'подключение продолжится само.');
@@ -3687,6 +3769,9 @@ class TunnelService {
     killSwitchBlocking.value = false;
     _autoReconnectAttempt = 0;
     _sessionEstablished = true;
+    // Сбои ядра на пути к этой сессии (занятый порт на первой попытке и т.п.)
+    // к её будущему обрыву отношения не имеют.
+    _lastCoreCrashAt = null;
     _sessionGeneration++;
   }
 
@@ -4317,6 +4402,22 @@ class TunnelService {
     }
     if (!portFree) _corePortStuck = true;
     return portFree;
+  }
+
+  /// Есть ли у приложения разрешение на VPN — без системного диалога.
+  /// null — спросить не удалось.
+  @visibleForTesting
+  Future<bool?> Function() vpnPermissionProbe = _askVpnPermission;
+
+  static Future<bool?> _askVpnPermission() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return await _nativeStatsChannel
+          .invokeMethod<bool>('hasVpnPermission')
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Жив ли сервис ядра плагина в Android. null — спросить не удалось.
@@ -6635,6 +6736,11 @@ class TunnelException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+/// Подключение без человека невозможно — нужен его ответ в системном окне.
+class _NeedsUserException extends TunnelException {
+  _NeedsUserException(super.message);
 }
 /// Путь ws/httpupgrade, из которого вынесен параметр ранних данных.
 class _WsPath {

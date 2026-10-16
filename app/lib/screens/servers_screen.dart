@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
@@ -218,15 +219,83 @@ class _ServersScreenState extends State<ServersScreen> {
     unawaited(_measureThroughTunnel());
   }
 
+  /// Последнее состояние туннеля, на которое экран уже отреагировал.
+  TunnelConnState? _seenTunnelState;
+
+  /// Статус туннеля обновляется каждую секунду — счётчик времени и скорости.
+  /// Экрану нужны только смены состояния: раньше на каждый тик перестраивался
+  /// весь список локаций, причём и на скрытой вкладке, и в свёрнутом
+  /// приложении, — отсюда часть лагов.
   void _onTunnelStatusChangedForPing() {
+    if (!mounted) return;
+    final state = _tunnel.status.value?.state;
+    if (state == _seenTunnelState) return;
+    _seenTunnelState = state;
+    _onConnectedServerChanged();
+    // VPN только что выключили — можно перепроверить локации по-настоящему,
+    // пока туннель был поднят, это было невозможно. Только если экран на
+    // виду: иначе сразу после «Отключить» в фоне поднималась временная
+    // сессия ядра со своим уведомлением — «VPN сам включается».
+    if (!_tunnel.isConnected && !_tunnel.isBusy) _maybeAutoRealCheck();
+  }
+
+  void _onConnectedServerChanged() {
     if (!mounted) return;
     setState(() {}); // обновить, какая карточка сейчас считается "текущей"
     unawaited(_measureThroughTunnel());
-    // VPN только что выключили — можно перепроверить локации по-настоящему,
-    // пока туннель был поднят, это было невозможно. Пауза внутри
-    // `_realCheckCooldown` не даст запускать проверку на каждое промежуточное
-    // событие статуса.
-    if (!_tunnel.isConnected && !_tunnel.isBusy) _maybeAutoRealCheck();
+  }
+
+  /// Вкладка «Серверы» видна (IndexedStack в main.dart и стек навигации
+  /// выключают TickerMode у скрытых экранов).
+  ValueListenable<bool>? _tickerEnabled;
+
+  /// Экран на виду: его вкладка выбрана и приложение не свёрнуто. Все
+  /// периодические замеры и проверки работают только тогда — вкладка
+  /// смонтирована всегда, и раньше её таймер раз в минуту стучался ко всем
+  /// серверам, а раз в 15 минут поднимал ядро для проверки даже в кармане.
+  bool get _onScreen {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    final appVisible = lifecycle == null ||
+        lifecycle == AppLifecycleState.resumed ||
+        lifecycle == AppLifecycleState.inactive;
+    return appVisible && (_tickerEnabled?.value ?? true);
+  }
+
+  DateTime? _lastPeriodicRefreshAt;
+
+  void _periodicRefresh() {
+    if (!mounted || !_onScreen) return;
+    final hosts = _allHosts;
+    if (hosts == null || hosts.isEmpty) return;
+    _lastPeriodicRefreshAt = DateTime.now();
+    _measureAllPings(hosts);
+    // Здесь же пробуем полную проверку. Раньше её запускала только загрузка
+    // экрана, а теперь загрузка попадает в окно придержки после старта
+    // приложения — без этого вызова первая проверка не случилась бы вовсе
+    // до ближайшего включения или выключения VPN.
+    _maybeAutoRealCheck();
+  }
+
+  /// Вкладку открыли — если замеры устарели, обновляем сразу, а не ждём
+  /// следующего тика таймера.
+  void _onVisibilityChanged() {
+    if (!mounted || !_onScreen) return;
+    final last = _lastPeriodicRefreshAt;
+    if (last != null &&
+        DateTime.now().difference(last) < _pingRefreshInterval) {
+      return;
+    }
+    _periodicRefresh();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final notifier = TickerMode.getNotifier(context);
+    if (!identical(notifier, _tickerEnabled)) {
+      _tickerEnabled?.removeListener(_onVisibilityChanged);
+      _tickerEnabled = notifier..addListener(_onVisibilityChanged);
+    }
   }
 
   ({String? host, int? port, String? security, String? sni}) _pingEndpoint(
@@ -973,6 +1042,10 @@ class _ServersScreenState extends State<ServersScreen> {
 
     // Туннель поднят. Сравниваем реальный текущий сервер с лучшим найденным.
     if (bestId == connectedId) return; // уже и так на лучшем сервере
+    // Живой туннель переключаем только на глазах у пользователя. Свёрнутое
+    // приложение и скрытая вкладка этим не занимаются: там на медленную
+    // локацию реагирует сам TunnelService, внутри сессии и без переподключения.
+    if (!_onScreen) return;
     if (_switching || _realChecking || _tunnel.isBusy) {
       return; // уже идёт подключение, отключение или реальная проверка
     }
@@ -1097,22 +1170,14 @@ class _ServersScreenState extends State<ServersScreen> {
     _loadPrefs();
     unawaited(_restoreRealCheckResults());
     _load();
-    _pingRefreshTimer = Timer.periodic(_pingRefreshInterval, (_) {
-      final hosts = _allHosts;
-      if (hosts == null || hosts.isEmpty) return;
-      _measureAllPings(hosts);
-      // Здесь же пробуем полную проверку. Раньше её запускала только загрузка
-      // экрана, а теперь загрузка попадает в окно придержки после старта
-      // приложения — без этого вызова первая проверка не случилась бы вовсе
-      // до ближайшего включения или выключения VPN.
-      _maybeAutoRealCheck();
-    });
+    _pingRefreshTimer =
+        Timer.periodic(_pingRefreshInterval, (_) => _periodicRefresh());
     // Обновляет реальный пинг текущего сервера сразу при
     // подключении/отключении, а не раз в 25 секунд по таймеру.
     _tunnel.status.addListener(_onTunnelStatusChangedForPing);
     // Новая порция замеров от единого замерщика — перерисовать подписи.
     _tunnel.latencyByRemark.addListener(_onTunnelLatencyChanged);
-    _tunnel.connectedServerName.addListener(_onTunnelStatusChangedForPing);
+    _tunnel.connectedServerName.addListener(_onConnectedServerChanged);
   }
 
   @override
@@ -1120,7 +1185,8 @@ class _ServersScreenState extends State<ServersScreen> {
     _pingRefreshTimer?.cancel();
     _tunnel.status.removeListener(_onTunnelStatusChangedForPing);
     _tunnel.latencyByRemark.removeListener(_onTunnelLatencyChanged);
-    _tunnel.connectedServerName.removeListener(_onTunnelStatusChangedForPing);
+    _tunnel.connectedServerName.removeListener(_onConnectedServerChanged);
+    _tickerEnabled?.removeListener(_onVisibilityChanged);
     super.dispose();
   }
 
@@ -1199,6 +1265,7 @@ class _ServersScreenState extends State<ServersScreen> {
   static const _autoCheckStartupDelay = Duration(seconds: 25);
 
   void _maybeAutoRealCheck() {
+    if (!_onScreen) return;
     if (DateTime.now().difference(_openedAt) < _autoCheckStartupDelay) return;
     if (_realChecking || _switching) return;
     if (_tunnel.isConnected || _tunnel.isBusy) return;
@@ -1269,7 +1336,13 @@ class _ServersScreenState extends State<ServersScreen> {
         _loading = false;
       });
       await _loadActiveConnectionString();
-      _measureAllPings(hosts);
+      // Вкладка строится сразу после запуска, ещё невидимой. Стучаться в этот
+      // момент ко всем серверам незачем — это сеть в самые загруженные
+      // секунды старта; замер пройдёт, когда вкладку откроют.
+      if (_onScreen) {
+        _lastPeriodicRefreshAt = DateTime.now();
+        _measureAllPings(hosts);
+      }
       // Хосты и подписка получены — можно запускать автоматическую реальную
       // проверку. Один раз за сессию экрана; дальше её перезапустит отключение
       // VPN или кнопка.
