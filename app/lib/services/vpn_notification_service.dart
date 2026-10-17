@@ -27,6 +27,14 @@ class VpnNotificationService {
 
   static const _channel = MethodChannel('vpnonline/native_stats');
 
+  /// События экрана от MainActivity: включён ли он сейчас.
+  static const _screen = MethodChannel('vpnonline/screen');
+
+  /// Включён ли экран. С погасшим экраном шторку никто не видит —
+  /// уведомление не обновляется вовсе, а при включении сразу получает
+  /// свежие числа.
+  bool _screenOn = true;
+
   bool _started = false;
   DateTime? _keyExpiry;
   String? _lastPosted;
@@ -35,15 +43,21 @@ class VpnNotificationService {
   TunnelConnState? _lastState;
   DateTime? _lastPostAt;
 
-  /// Не чаще раза в столько уведомление обновляется ради трафика. Скорость
-  /// и объём меняются каждую секунду, но перерисовывать шторку так часто —
-  /// это батарея; раз в 10 секунд числа остаются живыми.
-  static const trafficRefresh = Duration(seconds: 10);
+  /// Как часто уведомление обновляется ради трафика — только пока экран
+  /// включён и числа меняются. Простой VPN и погасший экран шторку не
+  /// перерисовывают вовсе.
+  static const trafficRefresh = Duration(seconds: 2);
 
   /// Подключить к событиям туннеля. Только Android: на Windows шторки нет.
   void start() {
     if (_started || !Platform.isAndroid) return;
     _started = true;
+    _screen.setMethodCallHandler((call) async {
+      if (call.method != 'screenChanged') return;
+      _screenOn = call.arguments == true;
+      if (_screenOn) _schedule();
+    });
+    unawaited(_readScreen());
     final tunnel = TunnelService.instance;
     tunnel.status.addListener(_onStatus);
     tunnel.connectedServerName.addListener(_schedule);
@@ -88,7 +102,16 @@ class VpnNotificationService {
     });
   }
 
+  Future<void> _readScreen() async {
+    try {
+      _screenOn = await _screen.invokeMethod<bool>('isScreenOn') ?? true;
+    } catch (_) {
+      _screenOn = true;
+    }
+  }
+
   void _scheduleTraffic() {
+    if (!_screenOn) return;
     if (_debounce?.isActive ?? false) return; // обновление и так в пути
     final last = _lastPostAt;
     final wait = last == null
@@ -102,6 +125,8 @@ class VpnNotificationService {
   Future<void> _post() async {
     final tunnel = TunnelService.instance;
     if (!tunnel.isConnected) return;
+    // Экран погашен — ничего не рисуем; при включении придут свежие числа.
+    if (!_screenOn) return;
     final server = tunnel.connectedServerName.value;
     final blockAds =
         await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: true);

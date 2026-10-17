@@ -4,7 +4,10 @@ import android.Manifest
 import android.app.ActivityManager
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -14,6 +17,7 @@ import android.net.TrafficStats
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
 import androidx.annotation.NonNull
@@ -55,8 +59,58 @@ class MainActivity : FlutterActivity() {
     // между двумя методами.
     private var pendingPermissionResult: MethodChannel.Result? = null
 
+    // ── Экран включён или выключен ───────────────────────────────────────
+    //
+    // Уведомление VPN с трафиком обновляется каждые две секунды, но только
+    // пока экран включён: с погасшим экраном шторку никто не видит, и каждая
+    // перерисовка — зря потраченная батарея. Приложение узнаёт о смене
+    // состояния экрана здесь, без опроса.
+    private var screenChannel: MethodChannel? = null
+    private var screenReceiver: BroadcastReceiver? = null
+
+    private fun isScreenOn(): Boolean =
+        (getSystemService(POWER_SERVICE) as PowerManager).isInteractive
+
+    private fun watchScreen(flutterEngine: FlutterEngine) {
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "vpnonline/screen")
+        channel.setMethodCallHandler { call, result ->
+            if (call.method == "isScreenOn") result.success(isScreenOn())
+            else result.notImplemented()
+        }
+        screenChannel = channel
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                screenChannel?.invokeMethod(
+                    "screenChanged",
+                    intent?.action == Intent.ACTION_SCREEN_ON,
+                )
+            }
+        }
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                receiver,
+                IntentFilter().apply {
+                    addAction(Intent.ACTION_SCREEN_ON)
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                },
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            screenReceiver = receiver
+        } catch (_: Exception) {
+        }
+    }
+
+    override fun cleanUpFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
+        screenChannel = null
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
+
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        watchScreen(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
