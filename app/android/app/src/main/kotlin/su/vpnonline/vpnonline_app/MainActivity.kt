@@ -2,6 +2,8 @@ package su.vpnonline.vpnonline_app
 
 import android.Manifest
 import android.app.ActivityManager
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -14,11 +16,13 @@ import android.os.Process
 import android.provider.Settings
 import androidx.annotation.NonNull
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.io.File
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
 /// Нативная часть канала MethodChannel("vpnonline/native_stats"), который
@@ -64,6 +68,14 @@ class MainActivity : FlutterActivity() {
                     "getPackageName" -> result.success(packageName)
                     "isVpnActive" -> result.success(isVpnActive())
                     "hasVpnPermission" -> result.success(hasVpnPermission())
+                    "updateVpnNotification" -> {
+                        updateVpnNotification(call)
+                        result.success(null)
+                    }
+                    "clearVpnNotification" -> {
+                        clearVpnNotification()
+                        result.success(null)
+                    }
                     "isCoreServiceAlive" -> result.success(isCoreServiceAlive())
                     "restartApp" -> {
                         result.success(null)
@@ -165,6 +177,98 @@ class MainActivity : FlutterActivity() {
         }
     } catch (e: Exception) {
         null
+    }
+
+    // ── Уведомление VPN ──────────────────────────────────────────────────
+
+    /// Уведомление работающего VPN рисует модуль ядра, и выглядит оно бедно:
+    /// цветная иконка приложения вместо значка (Android превращает её в пятно
+    /// в кружке) и одна строка «VPN подключён». Поменять это в самом модуле
+    /// значит трогать его ветку, поэтому приложение обновляет то же
+    /// уведомление само: тот же канал и тот же номер, что у модуля, — Android
+    /// подменяет содержимое, а уведомление остаётся привязанным к сервису.
+    private val vpnNotificationId = 1001
+    private val vpnNotificationChannel = "singbox_service"
+    private val brandColor = 0xFF8B5CF6.toInt()
+
+    /// Работает ли сервис ядра. Без него уведомление не публикуем: иначе
+    /// после отключения в шторке остался бы «VPN подключён» без VPN.
+    private fun coreServiceRunning(): Boolean =
+        dev.amirzr.singbox.service.SingboxVPNService.instance != null ||
+            dev.amirzr.singbox.service.SingboxProxyService.instance != null
+
+    private fun updateVpnNotification(call: MethodCall) {
+        if (!coreServiceRunning()) return
+        try {
+            val title = call.argument<String>("title") ?: "VPN подключён"
+            val text = call.argument<String>("text")
+            val details = call.argument<String>("details")
+            val since = call.argument<Number>("since")?.toLong() ?: 0L
+            val stopLabel = call.argument<String>("stopLabel") ?: "Отключить"
+
+            val openApp = packageManager.getLaunchIntentForPackage(packageName)?.let {
+                it.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                PendingIntent.getActivity(
+                    this, 0, it,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+            }
+            // Та же кнопка «Отключить», что ставит модуль: его приёмник
+            // останавливает сервис ядра.
+            val stop = PendingIntent.getBroadcast(
+                this, 1,
+                Intent().setClassName(
+                    packageName,
+                    "dev.amirzr.singbox.receivers.NotificationStopReceiver",
+                ).setAction("dev.amirzr.singbox.STOP"),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            // На экране блокировки — без сервера и ключа.
+            val lockScreen = NotificationCompat.Builder(this, vpnNotificationChannel)
+                .setSmallIcon(R.drawable.ic_stat_vpn)
+                .setColor(brandColor)
+                .setContentTitle("VPN подключён")
+                .build()
+
+            val builder = NotificationCompat.Builder(this, vpnNotificationChannel)
+                .setSmallIcon(R.drawable.ic_stat_vpn)
+                .setColor(brandColor)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(details ?: text))
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setPublicVersion(lockScreen)
+                .setForegroundServiceBehavior(
+                    NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE,
+                )
+                .addAction(R.drawable.ic_stat_power, stopLabel, stop)
+            if (openApp != null) builder.setContentIntent(openApp)
+            // Время сессии считает сама система — без обновлений
+            // уведомления каждую секунду.
+            if (since > 0) {
+                builder.setWhen(since).setShowWhen(true).setUsesChronometer(true)
+            }
+            getSystemService(NotificationManager::class.java)
+                .notify(vpnNotificationId, builder.build())
+        } catch (e: Exception) {
+            // Нет разрешения на уведомления или система отказала — VPN от
+            // этого не зависит, остаётся уведомление модуля.
+        }
+    }
+
+    /// Убирает уведомление, оставшееся без сервиса. Пока сервис работает
+    /// (например, проверка серверов), не трогаем: это его уведомление.
+    private fun clearVpnNotification() {
+        if (coreServiceRunning()) return
+        try {
+            getSystemService(NotificationManager::class.java).cancel(vpnNotificationId)
+        } catch (_: Exception) {
+        }
     }
 
     /// Перезапуск процесса приложения — см. RestartActivity.

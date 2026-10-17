@@ -10,6 +10,7 @@ import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
 import '../services/update_installer.dart';
 import '../services/update_service.dart';
+import '../services/vpn_notification_service.dart';
 import '../services/locale_service.dart';
 import '../state/selected_server.dart';
 import 'plans_screen.dart';
@@ -174,6 +175,14 @@ class _ConnectScreenState extends State<ConnectScreen>
     // туннеля. Подписка на жизненный цикл перечитывает состояние при каждом
     // возврате в приложение.
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  /// Срок ключа — в уведомление VPN («ключ ещё 23 дня»). У ручного ключа
+  /// срока нет.
+  void _publishKeyExpiry() {
+    final raw = _hasManualKey ? null : _activeKey?['expiry_date'] as String?;
+    VpnNotificationService.instance.keyExpiry =
+        raw == null ? null : DateTime.tryParse(raw)?.toLocal();
   }
 
   @override
@@ -787,6 +796,10 @@ class _ConnectScreenState extends State<ConnectScreen>
 
   @override
   Widget build(BuildContext context) {
+    // Ключ мог смениться при любой перерисовке (загрузка, перепроверка,
+    // ручной ключ) — сообщаем в уведомление; повтор того же срока ничего не
+    // делает.
+    _publishKeyExpiry();
     final hasKey = _activeKey != null || _hasManualKey;
     final connected = _tunnel.isConnected;
     final s = _tunnel.status.value;

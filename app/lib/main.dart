@@ -17,6 +17,7 @@ import 'services/app_log_service.dart';
 import 'services/tunnel_service.dart';
 import 'services/locale_service.dart';
 import 'services/tray_service.dart';
+import 'services/vpn_notification_service.dart';
 
 Future<void> main() async {
   // main() асинхронный: LocaleService.ensureLoaded() ниже ждётся до
@@ -60,6 +61,8 @@ Future<void> main() async {
   // На Android/iOS/web сервис выключает сам себя, так что вызывать
   // безусловно безопасно.
   await TrayService.instance.init();
+  // Содержимое уведомления VPN в шторке Android (сервер, пинг, ключ).
+  VpnNotificationService.instance.start();
   runApp(const VpnOnlineApp());
 }
 

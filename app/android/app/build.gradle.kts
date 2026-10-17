@@ -68,3 +68,10 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // NotificationCompat для уведомления VPN (MainActivity.updateVpnNotification):
+    // setSilent и FOREGROUND_SERVICE_IMMEDIATE есть с 1.6. Явно — чтобы не
+    // зависеть от того, какую версию протащат транзитивно другие библиотеки.
+    implementation("androidx.core:core-ktx:1.13.1")
+}
