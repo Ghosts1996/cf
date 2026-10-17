@@ -263,10 +263,11 @@ class MainActivity : FlutterActivity() {
     private val vpnNotificationChannel = "singbox_service"
     private val brandColor = 0xFF8B5CF6.toInt()
 
-    /// Серебро кольца логотипа — цвет кружка вокруг него в шапке
-    /// уведомления: кружок продолжает кольцо, и логотип занимает его целиком.
-    /// Цвет уже достаточно светлый для тёмной шторки, система его не меняет.
-    private val logoColor = 0xFF9A96AC.toInt()
+    /// Серебро металлического обода значка (drawable-*/ic_stat_logo.png) —
+    /// цвет кружка вокруг него в шапке уведомления: кружок продолжает обод.
+    /// Ровно на границе контраста с тёмной шторкой, чтобы система его не
+    /// осветляла.
+    private val logoColor = 0xFF958F9F.toInt()
 
     /// Прошивки с отдельной шторкой уведомлений (Xiaomi, OPPO, OnePlus,
     /// realme, vivo, Honor, Tecno, Infinix и другие) рисуют цветной значок
