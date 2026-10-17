@@ -37,18 +37,31 @@ void main() {
       uploadBps: 87040, // 85 KB/s
     );
     expect(p['title'], 'VPN подключён · 🇬🇧 Великобритания · Лондон');
-    expect(p['text'], '⚡ 68 мс   ·   ↓ 370.8 MB  ↑ 37.5 MB');
+    expect(p['text'], '⚡ 68 мс  ·  ↓ 370.8 MB  ·  ↑ 37.5 MB');
     expect(p['subText'], '🔑 ещё 22 дня');
     expect(
         p['details'],
-        '🌍 Сервер: 🇬🇧 Великобритания · Лондон\n'
         '⚡ Пинг: 68 мс — отлично\n'
-        '📥 Приём: 370.8 MB   📤 Отдача: 37.5 MB\n'
-        '🚀 Скорость: ↓ 1.2 MB/s  ↑ 85 KB/s\n'
-        '🔑 Ключ: ещё 22 дня (до 09.11.2026)\n'
-        '🛡 Реклама и трекеры блокируются');
+        '🔑 Ключ действует до 09.11.2026\n'
+        '🛡 Реклама и трекеры блокируются\n'
+        '📶 Трафик: ↓ 370.8 MB  ·  ↑ 37.5 MB\n'
+        '🚀 Скорость: ↓ 1.2 MB/s  ·  ↑ 85 KB/s',
+        reason: 'сервер — в заголовке, трафик и скорость — внизу');
     expect(p['since'], DateTime(2026, 10, 17, 14, 52).millisecondsSinceEpoch);
     expect(p['stopLabel'], 'Отключить');
+  });
+
+  test('истёкший ключ — так и пишем', () {
+    final p = VpnNotificationService.buildPayload(
+      server: 'Швеция',
+      pingMs: null,
+      keyExpiry: DateTime(2026, 10, 1),
+      now: now,
+      since: null,
+      adBlock: false,
+    );
+    expect((p['details'] as String).split('\n').first, '🔑 Ключ истёк');
+    expect(p['subText'], '🔑 истёк');
   });
 
   test('пинга ещё нет и ключ без срока — без пустых строк', () {
@@ -61,9 +74,9 @@ void main() {
       adBlock: false,
     );
     expect(p['title'], 'VPN подключён');
-    expect(p['text'], '↓ 0 MB  ↑ 0 MB');
+    expect(p['text'], '↓ 0 MB  ·  ↑ 0 MB');
     expect(p['subText'], isNull);
-    expect(p['details'], '📥 Приём: 0 MB   📤 Отдача: 0 MB',
+    expect(p['details'], '📶 Трафик: ↓ 0 MB  ·  ↑ 0 MB',
         reason: 'без трафика — без строки скорости');
     expect(p['since'], 0);
   });
@@ -87,9 +100,9 @@ void main() {
       english: true,
     );
     expect(p['title'], 'VPN connected · Sweden');
-    expect(p['text'], '⚡ 350 ms   ·   ↓ 0 MB  ↑ 0 MB');
+    expect(p['text'], '⚡ 350 ms  ·  ↓ 0 MB  ·  ↑ 0 MB');
     expect(p['subText'], '🔑 2 days left');
-    expect((p['details'] as String).split('\n')[1], '⚡ Ping: 350 ms — slow');
+    expect((p['details'] as String).split('\n').first, '⚡ Ping: 350 ms — slow');
     expect(p['stopLabel'], 'Disconnect');
   });
 }

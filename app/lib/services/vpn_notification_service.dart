@@ -194,33 +194,34 @@ class VpnNotificationService {
 
     final keyShort =
         keyExpiry == null ? null : keyLeftText(keyExpiry, now, english: english);
+    final msUnit = english ? 'ms' : 'мс';
     final traffic =
-        '↓ ${formatBytes(downloadBytes)}  ↑ ${formatBytes(uploadBytes)}';
+        '↓ ${formatBytes(downloadBytes)}  ·  ↑ ${formatBytes(uploadBytes)}';
     // Скорость показываем, только пока что-то идёт: «↓ 0 B/s» — шум.
     final moving = downloadBps >= 1024 || uploadBps >= 1024;
-    final short = <String>[
-      if (ping != null) '⚡ $ping ${english ? 'ms' : 'мс'}',
-      traffic,
-    ];
-    final text = short.join('   ·   ');
 
+    // Свёрнутое: пинг и трафик одной строкой.
+    final text = ping == null ? traffic : '⚡ $ping $msUnit  ·  $traffic';
+
+    // Развёрнутое: сервер уже в заголовке, срок ключа — в шапке; здесь по
+    // строке на пункт, трафик и скорость — внизу.
     final details = <String>[
-      if (serverName != null) '🌍 ${english ? 'Server' : 'Сервер'}: $serverName',
       if (ping != null)
-        '⚡ ${english ? 'Ping' : 'Пинг'}: $ping ${english ? 'ms' : 'мс'} — '
+        '⚡ ${english ? 'Ping' : 'Пинг'}: $ping $msUnit — '
             '${pingQuality(ping, english: english)}',
-      '📥 ${english ? 'Received' : 'Приём'}: ${formatBytes(downloadBytes)}   '
-          '📤 ${english ? 'Sent' : 'Отдача'}: ${formatBytes(uploadBytes)}',
-      if (moving)
-        '🚀 ${english ? 'Speed' : 'Скорость'}: ↓ ${formatSpeed(downloadBps)}  '
-            '↑ ${formatSpeed(uploadBps)}',
       if (keyExpiry != null)
-        '🔑 ${english ? 'Key' : 'Ключ'}: $keyShort'
-            '${keyExpiry.isAfter(now) ? ' (${english ? 'until' : 'до'} ${_date(keyExpiry)})' : ''}',
+        keyExpiry.isAfter(now)
+            ? '🔑 ${english ? 'Key valid until' : 'Ключ действует до'} '
+                '${_date(keyExpiry)}'
+            : (english ? '🔑 Key expired' : '🔑 Ключ истёк'),
       if (adBlock)
         english
             ? '🛡 Ads and trackers are blocked'
             : '🛡 Реклама и трекеры блокируются',
+      '📶 ${english ? 'Traffic' : 'Трафик'}: $traffic',
+      if (moving)
+        '🚀 ${english ? 'Speed' : 'Скорость'}: ↓ ${formatSpeed(downloadBps)}'
+            '  ·  ↑ ${formatSpeed(uploadBps)}',
     ];
 
     return {
