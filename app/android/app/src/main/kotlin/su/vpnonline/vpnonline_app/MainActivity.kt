@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
+import android.widget.RemoteViews
 import androidx.annotation.NonNull
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
@@ -285,12 +286,26 @@ class MainActivity : FlutterActivity() {
                 .setContentTitle("VPN подключён")
                 .build()
 
+            // Своё оформление: цветной логотип по кругу слева. В маленький
+            // значок шапки цветную картинку не поставить — Android рисует его
+            // одним цветом, — поэтому логотип живёт в самом уведомлении.
+            val collapsed = RemoteViews(packageName, R.layout.notification_vpn_small).apply {
+                setTextViewText(R.id.title, title)
+                setTextViewText(R.id.text, text ?: "")
+            }
+            val expanded = RemoteViews(packageName, R.layout.notification_vpn_big).apply {
+                setTextViewText(R.id.title, title)
+                setTextViewText(R.id.details, details ?: text ?: "")
+            }
+
             val builder = NotificationCompat.Builder(this, vpnNotificationChannel)
                 .setSmallIcon(R.drawable.ic_stat_vpn)
                 .setColor(brandColor)
                 .setContentTitle(title)
                 .setContentText(text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(details ?: text))
+                .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+                .setCustomContentView(collapsed)
+                .setCustomBigContentView(expanded)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setSilent(true)
