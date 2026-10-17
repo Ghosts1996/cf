@@ -1600,8 +1600,14 @@ class _ServersScreenState extends State<ServersScreen> {
                   // писать нельзя, экран выглядит зависшим.
                   pingLabel = tr('нет в подписке');
                   pingColor = AppColors.offline;
-                } else if (_tunnel.isConnected) {
+                } else if (_tunnel.isConnected && _tunnel.isInSession(id)) {
                   pingLabel = tr('измеряю...');
+                  pingColor = AppColors.textDim;
+                } else if (_tunnel.isConnected) {
+                  // Ядро меряет только локации своей сессии (до двенадцати).
+                  // Раньше остальные висели с «измеряю…» без конца, и это
+                  // читалось как «не поддерживается».
+                  pingLabel = tr('проверка — при выключенном VPN');
                   pingColor = AppColors.textDim;
                 } else if (ping == null) {
                   pingLabel = tr('измеряю...');

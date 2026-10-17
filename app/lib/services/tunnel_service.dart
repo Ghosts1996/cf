@@ -2103,6 +2103,20 @@ class TunnelService {
     return null;
   }
 
+  /// Входит ли локация (host_name с экрана) в поднятую сессию. Пока VPN
+  /// включён, ядро меряет только своих участников — остальные локации
+  /// подписки (в сессию идёт не больше двенадцати) проверяются при
+  /// выключенном VPN.
+  bool isInSession(String? hostName) {
+    if (hostName == null || hostName.isEmpty || !isConnected) return false;
+    final remarks = _sessionOutboundRemarks;
+    if (remarks.isEmpty) {
+      final connected = connectedServerName.value;
+      return connected != null && _matchRemark([connected], hostName) != null;
+    }
+    return _matchRemark(remarks, hostName) != null;
+  }
+
   /// Замер задержки при поднятом туннеле — самый верный из трёх способов,
   /// что есть в приложении.
   ///

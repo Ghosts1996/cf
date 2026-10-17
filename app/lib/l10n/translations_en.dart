@@ -370,6 +370,7 @@ const Map<String, String> translationsEn = {
   'мс · через VLESS': 'ms · via VLESS',
   'мс · медленно (через VLESS)': 'ms · slow (via VLESS)',
   'измеряю...': 'measuring...',
+  'проверка — при выключенном VPN': 'checked while VPN is off',
   'нет данных для пинга': 'no ping data',
   'недоступен': 'unreachable',
   'мс · сеть (VLESS не проверен)': 'ms · network only (VLESS unverified)',

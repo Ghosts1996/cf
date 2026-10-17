@@ -90,6 +90,15 @@ void main() {
     await tunnel.disconnect();
   });
 
+  test('локации сессии видны экрану «Серверы», чужие — нет', () async {
+    await tunnel.connect(_subscription);
+    expect(tunnel.isInSession('Германия'), isTrue);
+    expect(tunnel.isInSession('Латвия'), isTrue);
+    expect(tunnel.isInSession('Япония'), isFalse);
+    await tunnel.disconnect();
+    expect(tunnel.isInSession('Германия'), isFalse);
+  });
+
   test('«Отключить» гасит туннель и экран показывает «отключено»', () async {
     await tunnel.connect(_subscription);
     await tunnel.disconnect();
