@@ -130,7 +130,7 @@ class TrayService with TrayListener, WindowListener {
         }
         break;
       case 'exit':
-        unawaited(_quit());
+        unawaited(quit());
         break;
     }
   }
@@ -140,10 +140,14 @@ class TrayService with TrayListener, WindowListener {
     await windowManager.focus();
   }
 
-  Future<void> _quit() async {
-    windowManager.removeListener(this);
-    trayManager.removeListener(this);
-    await trayManager.destroy();
+  /// Закрыть приложение совсем: убрать значок, погасить VPN, закрыть окно.
+  /// Им же пользуется обновление на Windows перед запуском установщика.
+  Future<void> quit() async {
+    try {
+      windowManager.removeListener(this);
+      trayManager.removeListener(this);
+      await trayManager.destroy();
+    } catch (_) {}
     // Выход из трея должен остановить туннель: на Windows это отдельный
     // процесс sing-box.exe, иначе он осиротеет и продолжит держать
     // TUN-адаптер (см. disconnect() в tunnel_service.dart).
@@ -157,14 +161,20 @@ class TrayService with TrayListener, WindowListener {
           .disconnect()
           .timeout(const Duration(seconds: 6));
     } catch (_) {}
-    await windowManager.setPreventClose(false);
-    await windowManager.destroy();
+    try {
+      await windowManager.setPreventClose(false);
+      await windowManager.destroy();
+    } catch (_) {
+      // Окно закрыть не вышло — выходим из процесса напрямую: обновление
+      // ждёт, пока приложение освободит свои файлы.
+      exit(0);
+    }
   }
 
   @override
   void onWindowClose() async {
     // Крестик прячет окно в трей; явный выход — только через пункт "Выход"
-    // (см. _quit() выше).
+    // (см. quit() выше).
     final isPreventClose = await windowManager.isPreventClose();
     if (isPreventClose) {
       await windowManager.hide();

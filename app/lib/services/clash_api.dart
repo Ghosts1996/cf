@@ -53,10 +53,15 @@ class ClashApiClient {
   Future<int?> delay(String tag,
       {required String url,
       Duration timeout = const Duration(seconds: 5)}) async {
+    // sing-box 1.14 молча заменяет адрес http:// на свой (www.gstatic.com) —
+    // защита от запросов куда попало через API. Тот же адрес по https
+    // проходит как есть, и числа остаются сравнимыми между замерами.
+    final testUrl =
+        url.startsWith('http://') ? 'https://${url.substring(7)}' : url;
     try {
       final res = await _http
           .get(_uri('/proxies/${Uri.encodeComponent(tag)}/delay',
-              {'url': url, 'timeout': '${timeout.inMilliseconds}'}))
+              {'url': testUrl, 'timeout': '${timeout.inMilliseconds}'}))
           .timeout(timeout + const Duration(seconds: 2));
       if (res.statusCode != 200) return null;
       final body = jsonDecode(res.body);

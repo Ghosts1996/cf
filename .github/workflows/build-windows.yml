@@ -2,6 +2,15 @@ name: Build Windows EXE
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Опубликовать установщик: установленные приложения на Windows обновятся сами'
+        type: boolean
+        default: false
+      release_notes:
+        description: 'Что нового — текст релиза (необязательно)'
+        type: string
+        required: false
   push:
     branches: [ main, master, fix/secure-configs-and-ci ]
   pull_request:
@@ -13,6 +22,9 @@ jobs:
     # Сборка под Windows идёт только на windows-раннере: `flutter build windows`
     # использует MSBuild и Visual Studio Build Tools.
     runs-on: windows-latest
+    # Публикация установщика — запись в релиз репозитория.
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: app
@@ -158,7 +170,7 @@ jobs:
         run: |
           flutter clean
           flutter pub get
-          flutter build windows --release -v --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }}
+          flutter build windows --release -v --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }} --dart-define=APP_BUILD=${{ github.run_number }}
 
       # Предупреждение в лог, если windows/sing-box/ пустая: .exe соберётся
       # нормально, но sing-box.exe и wintun.dll клиент тогда скачает сам при
@@ -183,10 +195,45 @@ jobs:
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "windows\installer\installer.iss"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=1.0.${{ github.run_number }}" "windows\installer\installer.iss"
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: vpnonline-windows-installer
           path: installer-output/VPNonLine-Setup.exe
+
+      # Автообновление на Windows. Установщик и номер сборки лежат в
+      # постоянном релизе `windows`: приложение читает windows-build.txt и,
+      # если номер больше своего, качает VPNonLine-Setup.exe (см.
+      # lib/services/update_service.dart). Релиз не становится «последним» —
+      # «последний» остаётся за Android и его APK.
+      #
+      # Сначала установщик, потом номер: иначе приложение увидело бы новый
+      # номер раньше, чем новый файл.
+      - name: Publish Windows update
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ inputs.release_notes }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'windows'
+          $build = '${{ github.run_number }}'
+          $installer = Join-Path $PWD '..\installer-output\VPNonLine-Setup.exe'
+          if (-not (Test-Path $installer)) { throw "Нет установщика: $installer" }
+          Set-Content -Path windows-build.txt -Value $build -NoNewline -Encoding ascii
+          $notes = "Сборка для Windows $build. $env:NOTES"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'VPNonLine для Windows' --notes $notes --latest=false
+            if ($LASTEXITCODE -ne 0) { throw 'Не удалось создать релиз windows' }
+          } else {
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --notes $notes --latest=false
+          }
+          gh release upload $tag $installer --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Не удалось загрузить установщик' }
+          gh release upload $tag windows-build.txt --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Не удалось загрузить номер сборки' }
+          Write-Host "Опубликована сборка для Windows $build"

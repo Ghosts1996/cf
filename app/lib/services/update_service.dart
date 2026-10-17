@@ -18,6 +18,7 @@
 // номер последней сборки, и прямую ссылку на APK; сам файл не скачиваем —
 // читаем только заголовок Location. Пока релизов нет, ответ — 404.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -48,12 +49,20 @@ class AppUpdate {
 typedef ReleaseProbe = Future<({int status, String? location})> Function(
     Uri url);
 
+/// Номер последней сборки для Windows (см. [UpdateService.windowsBuildUrl]).
+/// null — релиза для Windows ещё нет.
+typedef WindowsBuildProbe = Future<int?> Function();
+
 class UpdateService {
   UpdateService({
     ReleaseProbe? probe,
+    WindowsBuildProbe? windowsProbe,
+    bool? windows,
     int? currentBuild,
     DateTime Function()? now,
   })  : _probe = probe ?? probeLatestRelease,
+        _windowsProbe = windowsProbe ?? fetchWindowsBuild,
+        _windows = windows ?? Platform.isWindows,
         _currentBuild = currentBuild ?? kAppBuild,
         _now = now ?? DateTime.now;
 
@@ -76,6 +85,28 @@ class UpdateService {
 
   static const _requestTimeout = Duration(seconds: 8);
 
+  // ── Windows ─────────────────────────────────────────────────────────────
+  //
+  // Установщик для Windows лежит в отдельном постоянном релизе `windows`
+  // (не «последнем» — тот остаётся за Android и его APK). Рядом с
+  // установщиком — текстовый файл с номером сборки: по нему приложение и
+  // узнаёт, что пора обновиться. Оба файла отдаются переадресацией на
+  // хранилище GitHub, без API и его лимита запросов.
+
+  static const windowsTag = 'windows';
+  static const windowsInstallerName = 'VPNonLine-Setup.exe';
+  static const windowsBuildFileName = 'windows-build.txt';
+
+  static Uri get windowsInstallerUrl => Uri.parse(
+      'https://github.com/$_owner/$_repo/releases/download/'
+      '$windowsTag/$windowsInstallerName');
+
+  static Uri get windowsBuildUrl => Uri.parse(
+      'https://github.com/$_owner/$_repo/releases/download/'
+      '$windowsTag/$windowsBuildFileName');
+
+  final WindowsBuildProbe _windowsProbe;
+  final bool _windows;
   final ReleaseProbe _probe;
   final int _currentBuild;
   final DateTime Function() _now;
@@ -132,11 +163,15 @@ class UpdateService {
 
     int? latest;
     try {
-      final response = await _probe(latestApkUrl).timeout(_requestTimeout);
-      // 404 — ни одного релиза ещё нет. Это не ошибка, просто нечего
-      // предлагать.
-      if (response.status >= 300 && response.status < 400) {
-        latest = buildFromLocation(response.location);
+      if (_windows) {
+        latest = await _windowsProbe().timeout(_requestTimeout);
+      } else {
+        final response = await _probe(latestApkUrl).timeout(_requestTimeout);
+        // 404 — ни одного релиза ещё нет. Это не ошибка, просто нечего
+        // предлагать.
+        if (response.status >= 300 && response.status < 400) {
+          latest = buildFromLocation(response.location);
+        }
       }
     } catch (_) {
       // Нет сети, GitHub недоступен — попробуем в следующий раз. Время
@@ -166,10 +201,44 @@ class UpdateService {
     final dismissed =
         await prefs.getInt(PrefKeys.updateDismissedBuild, fallback: 0);
     final AppUpdate? update = (latest > _currentBuild && latest != dismissed)
-        ? AppUpdate(build: latest, downloadUrl: downloadUrlFor(latest))
+        ? AppUpdate(
+            build: latest,
+            downloadUrl: _windows ? windowsInstallerUrl : downloadUrlFor(latest))
         : null;
     available.value = update;
     return update;
+  }
+
+  /// Номер последней Windows-сборки из файла в релизе `windows`.
+  @visibleForTesting
+  static Future<int?> fetchWindowsBuild() async {
+    final client = HttpClient()
+      ..connectionTimeout = _requestTimeout
+      ..userAgent = 'VPNonLine-updater';
+    try {
+      final request = await client.getUrl(windowsBuildUrl);
+      request.followRedirects = true;
+      request.maxRedirects = 5;
+      final response = await request.close();
+      if (response.statusCode != HttpStatus.ok) {
+        await response.drain<void>();
+        return null;
+      }
+      final body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(_requestTimeout);
+      return parseWindowsBuild(body);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Номер сборки из содержимого `windows-build.txt`.
+  @visibleForTesting
+  static int? parseWindowsBuild(String body) {
+    final value = int.tryParse(body.trim());
+    return value != null && value > 0 ? value : null;
   }
 
   /// Настоящий запрос: GET без следования переадресации, тело не читаем.

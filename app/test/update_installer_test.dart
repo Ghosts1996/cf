@@ -153,6 +153,37 @@ void main() {
     expect(dir.listSync(), isEmpty, reason: 'обрывки загрузки не копятся');
   });
 
+  test('Windows: установщик .exe («MZ») загружается и уходит на установку, '
+      'а APK вместо него — нет', () async {
+    final exe = Uint8List(200 * 1024)
+      ..[0] = 0x4D
+      ..[1] = 0x5A;
+    storage = (res) async {
+      res.contentLength = exe.length;
+      res.add(exe);
+      await res.close();
+    };
+    final installer = UpdateInstaller(
+        platform: platform, fileExtension: 'exe', fileMagic: const [0x4D, 0x5A]);
+    await installer.downloadAndInstall(update());
+    expect(installer.state.value.phase, UpdatePhase.ready);
+    expect(platform.installed.single, endsWith('.exe'));
+    expect(File(platform.installed.single).readAsBytesSync(), exe);
+
+    final apk = fakeApk(64 * 1024);
+    storage = (res) async {
+      res.contentLength = apk.length;
+      res.add(apk);
+      await res.close();
+    };
+    final wrong = UpdateInstaller(
+        platform: FakePlatform(dir.path),
+        fileExtension: 'exe',
+        fileMagic: const [0x4D, 0x5A]);
+    await wrong.downloadAndInstall(update());
+    expect(wrong.state.value.phase, UpdatePhase.failed);
+  });
+
   test('вместо APK пришла страница — не ставим', () async {
     storage = (res) async {
       res.headers.contentType = ContentType.html;

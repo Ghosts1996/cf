@@ -2127,14 +2127,18 @@ class TunnelService {
   // ── Сигнал ядра: соединения через активную локацию падают ───────────────
 
   static final _outboundFailure = RegExp(
-      r'open connection to \S+ using outbound/\w+\[out-(\d+)\]');
+      r'open connection to \S+ using outbound/\w+\[(out-(\d+)|proxy)\]');
 
   /// Номер outbound'а сессии, через который не открылось соединение
-  /// приложения (строка журнала ядра), или null.
+  /// приложения (строка журнала ядра), или null. -1 — ядро назвало саму
+  /// группу (`outbound/selector[proxy]`, так пишет штатный sing-box на
+  /// Windows): значит, активную локацию.
   @visibleForTesting
   static int? failedOutboundIndex(String message) {
     final match = _outboundFailure.firstMatch(message);
-    return match == null ? null : int.tryParse(match.group(1)!);
+    if (match == null) return null;
+    final index = match.group(2);
+    return index == null ? -1 : int.tryParse(index);
   }
 
   final List<DateTime> _activeFailures = <DateTime>[];
@@ -2147,7 +2151,7 @@ class TunnelService {
     final index = failedOutboundIndex(message);
     if (index == null || !isConnected) return;
     final active = _activeOutboundIndex();
-    if (active != null && index != active) return;
+    if (index >= 0 && active != null && index != active) return;
     final now = DateTime.now();
     _activeFailures
       ..add(now)

@@ -32,7 +32,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
-    show OutboundGroup, OutboundGroupItem, SessionOptions;
+    show LogEntry, LogLevel, OutboundGroup, OutboundGroupItem, SessionOptions;
 import 'package:http/http.dart' as http;
 
 import 'clash_api.dart';
@@ -51,6 +51,18 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
       StreamController<String>.broadcast();
   final StreamController<dynamic> _groupsCtrl =
       StreamController<dynamic>.broadcast();
+  final StreamController<dynamic> _coreLogCtrl =
+      StreamController<dynamic>.broadcast();
+
+  /// Последние строки вывода sing-box.exe. Раньше вывод выбрасывался, и если
+  /// ядро не поднималось (например, отвергло конфиг), приложение могло
+  /// сказать только «не поднялся за 12 секунд» — без причины.
+  final List<String> _recentCoreLines = <String>[];
+  final List<LogEntry> _pendingCoreLog = <LogEntry>[];
+  Timer? _coreLogFlush;
+  static final _levelWord =
+      RegExp(r'^(?:\x1B\[[0-9;]*m)*\s*(TRACE|DEBUG|INFO|WARN|ERROR|FATAL|PANIC)\b');
+  static final _ansi = RegExp(r'\x1B\[[0-9;]*m');
 
   String _state = 'disconnected';
   int _lastDownload = 0;
@@ -90,11 +102,42 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   @override
   Stream<dynamic> get faultStream => _faultCtrl.stream;
 
-  // На Windows ядро — отдельный процесс sing-box.exe, и его журнал пишется в
-  // файл рядом с бинарником, а не приходит событиями. Отдаём пустой поток,
-  // чтобы подписчик работал одинаково на обеих платформах.
+  // На Windows ядро — отдельный процесс sing-box.exe, его журнал — это вывод
+  // процесса. Строки с уровнем отдаём тем же потоком, что и плагин на
+  // Android: так ошибки ядра попадают в журнал приложения, а сбои соединений
+  // через активную локацию так же быстро запускают проверку связи.
   @override
-  Stream<dynamic> get coreLogStream => const Stream<dynamic>.empty();
+  Stream<dynamic> get coreLogStream => _coreLogCtrl.stream;
+
+  void _onCoreLine(String raw) {
+    final line = raw.trim();
+    if (line.isEmpty) return;
+    _recentCoreLines.add(line.replaceAll(_ansi, ''));
+    if (_recentCoreLines.length > 20) _recentCoreLines.removeAt(0);
+    if (!_levelWord.hasMatch(line)) return;
+    _pendingCoreLog.add(
+        LogEntry(level: LogLevel.info, message: line, time: DateTime.now()));
+    _coreLogFlush ??= Timer(const Duration(milliseconds: 500), () {
+      _coreLogFlush = null;
+      if (_pendingCoreLog.isEmpty) return;
+      final batch = List<LogEntry>.of(_pendingCoreLog);
+      _pendingCoreLog.clear();
+      _coreLogCtrl.add(batch);
+    });
+  }
+
+  /// Чем ядро объяснило свой отказ: последняя строка с ошибкой, иначе
+  /// последняя строка вывода. Пусто — ядро ничего не сказало.
+  String _coreFailureReason() {
+    for (final line in _recentCoreLines.reversed) {
+      if (line.contains('FATAL') ||
+          line.contains('ERROR') ||
+          line.contains('panic')) {
+        return line;
+      }
+    }
+    return _recentCoreLines.isEmpty ? '' : _recentCoreLines.last;
+  }
 
   @override
   Future<dynamic> getServiceState() async => _state;
@@ -499,26 +542,38 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
         ['run', '-c', configPath],
         workingDirectory: _singboxDir,
       );
-      // Логи sing-box сейчас не сохраняем на диск — при желании тут легко
-      // добавить запись в файл (app_log_service.dart уже есть в проекте).
-      _process!.stdout.transform(utf8.decoder).listen((_) {});
-      _process!.stderr.transform(utf8.decoder).listen((_) {});
-      unawaited(_process!.exitCode.then((code) {
-        _process = null;
+      _recentCoreLines.clear();
+      final process = _process!;
+      process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(_onCoreLine, onError: (_) {});
+      process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(_onCoreLine, onError: (_) {});
+      unawaited(process.exitCode.then((code) {
+        if (identical(_process, process)) _process = null;
         if (_state != 'disconnected') {
-          _faultCtrl.add('sing-box неожиданно завершился (код $code)');
+          final reason = _coreFailureReason();
+          _faultCtrl.add('sing-box неожиданно завершился (код $code)'
+              '${reason.isEmpty ? '' : ': $reason'}');
           _setState('disconnected');
         }
       }));
 
       final started = await _waitForClashApi(const Duration(seconds: 12));
       if (!started) {
+        final reason = _coreFailureReason();
         await disconnect();
         throw PlatformException(
           code: 'CONNECT_FAILED',
-          message: 'sing-box не поднялся за 12 секунд. Проверь: запущено ли '
-              'приложение от имени администратора, лежит ли wintun.dll рядом '
-              'с sing-box.exe, не занят ли порт $_clashApiPort другим процессом.',
+          message: reason.isNotEmpty
+              ? 'sing-box не запустился: $reason'
+              : 'sing-box не поднялся за 12 секунд. Проверь: запущено ли '
+                  'приложение от имени администратора, лежит ли wintun.dll '
+                  'рядом с sing-box.exe, не занят ли порт $_clashApiPort '
+                  'другим процессом.',
         );
       }
 

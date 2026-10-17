@@ -113,6 +113,13 @@ void main() {
             'open connection to 54.177.50.65:443 using '
             'outbound/vless[out-11]: context deadline exceeded'),
         11);
+    expect(
+        TunnelService.failedOutboundIndex('ERROR[0011] [1002978009 0ms] '
+            'connection: open connection to 127.0.0.1:18080 using '
+            'outbound/selector[proxy]: dial tcp 127.0.0.1:1: connect: '
+            'connection refused'),
+        -1,
+        reason: 'штатный sing-box на Windows называет группу, а не локацию');
     expect(TunnelService.failedOutboundIndex('WARN dns: exchange failed'),
         isNull);
   });

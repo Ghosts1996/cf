@@ -66,6 +66,49 @@ void main() {
     });
   });
 
+  group('Windows', () {
+    test('номер сборки из файла релиза', () {
+      expect(UpdateService.parseWindowsBuild('57'), 57);
+      expect(UpdateService.parseWindowsBuild(' 57\n'), 57);
+      expect(UpdateService.parseWindowsBuild('<html>Not Found</html>'), isNull);
+      expect(UpdateService.parseWindowsBuild('0'), isNull);
+    });
+
+    test('вышла новая сборка — плашка со ссылкой на установщик', () async {
+      var asked = 0;
+      final service = UpdateService(
+        windows: true,
+        windowsProbe: () async {
+          asked++;
+          return 60;
+        },
+        probe: (_) async => throw StateError('APK на Windows не спрашиваем'),
+        currentBuild: 55,
+        now: now,
+      );
+      final update = await service.check(force: true);
+      expect(asked, 1);
+      expect(update?.build, 60);
+      expect(update!.downloadUrl.toString(),
+          'https://github.com/Ghosts1996/cf/releases/download/windows/VPNonLine-Setup.exe');
+    });
+
+    test('та же сборка или релиза ещё нет — плашки нет', () async {
+      final same = UpdateService(
+          windows: true,
+          windowsProbe: () async => 55,
+          currentBuild: 55,
+          now: now);
+      expect(await same.check(force: true), isNull);
+      final none = UpdateService(
+          windows: true,
+          windowsProbe: () async => null,
+          currentBuild: 55,
+          now: now);
+      expect(await none.check(force: true), isNull);
+    });
+  });
+
   test('вышла новая сборка — плашка появляется со ссылкой на APK', () async {
     final service = UpdateService(
         probe: redirectTo(latestTag), currentBuild: 330, now: now);

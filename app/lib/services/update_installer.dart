@@ -17,6 +17,8 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'tray_service.dart';
+import 'tunnel_service.dart';
 import 'update_service.dart';
 
 enum UpdatePhase {
@@ -99,13 +101,64 @@ class ChannelUpdatePlatform implements UpdatePlatform {
       _channel.invokeMethod<void>('installApk', {'path': path});
 }
 
+/// Windows: установщик (Inno Setup) запускается без окон, приложение
+/// закрывается, установщик ставит новую версию поверх и сам открывает её.
+class WindowsUpdatePlatform implements UpdatePlatform {
+  @override
+  Future<String> updatesDir() async =>
+      '${Directory.systemTemp.path}${Platform.pathSeparator}vpnonline-updates';
+
+  // Разрешения, как на Android, здесь нет: приложение и так запущено с
+  // правами администратора (их требует TUN-адаптер), и установщик
+  // наследует их без окна UAC.
+  @override
+  Future<bool> canInstall() async => true;
+
+  @override
+  Future<void> openInstallSettings() async {}
+
+  @override
+  Future<void> installApk(String path) async {
+    // VPN гасим до установки: установщик заменяет sing-box.exe, а занятый
+    // работающим процессом файл не заменить.
+    try {
+      await TunnelService.instance
+          .disconnect()
+          .timeout(const Duration(seconds: 6));
+    } catch (_) {}
+    await Process.start(
+      path,
+      const ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-'],
+      mode: ProcessStartMode.detached,
+    );
+    // Установщику нужно заменить и сам exe приложения — закрываемся.
+    // Он подождёт и, если надо, доведёт закрытие до конца (installer.iss).
+    await TrayService.instance.quit();
+  }
+}
+
 class UpdateInstaller {
   UpdateInstaller({
     UpdatePlatform? platform,
     this.stallTimeout = const Duration(seconds: 30),
+    this.fileExtension = 'apk',
+    this.fileMagic = const [0x50, 0x4B],
   }) : _platform = platform ?? ChannelUpdatePlatform();
 
-  static final UpdateInstaller instance = UpdateInstaller();
+  static final UpdateInstaller instance = Platform.isWindows
+      ? UpdateInstaller(
+          platform: WindowsUpdatePlatform(),
+          fileExtension: 'exe',
+          // Исполняемый файл Windows начинается с «MZ».
+          fileMagic: const [0x4D, 0x5A],
+        )
+      : UpdateInstaller();
+
+  /// Расширение загружаемого файла: apk на Android, exe на Windows.
+  final String fileExtension;
+
+  /// Первые байты правильного файла: «PK» у APK (zip), «MZ» у exe.
+  final List<int> fileMagic;
 
   final UpdatePlatform _platform;
 
@@ -227,8 +280,9 @@ class UpdateInstaller {
       return null;
     }
 
-    final part = File('${dir.path}/vpnonline-${update.build}.apk.part');
-    final target = File('${dir.path}/vpnonline-${update.build}.apk');
+    final part =
+        File('${dir.path}/vpnonline-${update.build}.$fileExtension.part');
+    final target = File('${dir.path}/vpnonline-${update.build}.$fileExtension');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
       ..userAgent = 'VPNonLine-updater';
@@ -280,10 +334,12 @@ class UpdateInstaller {
         throw HttpException('файл загрузился не полностью '
             '($received из $total байт)');
       }
-      // APK — это zip-архив и начинается с «PK». Если пришло что-то другое —
-      // скорее всего, страница с ошибкой вместо файла.
+      // APK — это zip-архив и начинается с «PK», exe — с «MZ». Если пришло
+      // что-то другое — скорее всего, страница с ошибкой вместо файла.
       final magic = head.takeBytes();
-      if (magic.length < 2 || magic[0] != 0x50 || magic[1] != 0x4B) {
+      if (magic.length < 2 ||
+          magic[0] != fileMagic[0] ||
+          magic[1] != fileMagic[1]) {
         throw const HttpException('вместо файла обновления пришло что-то другое');
       }
 
