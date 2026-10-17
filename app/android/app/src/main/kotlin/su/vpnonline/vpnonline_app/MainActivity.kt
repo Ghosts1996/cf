@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.TrafficStats
@@ -191,6 +193,18 @@ class MainActivity : FlutterActivity() {
     private val vpnNotificationChannel = "singbox_service"
     private val brandColor = 0xFF8B5CF6.toInt()
 
+    /// Цветной логотип, обрезанный по кругу, — крупно справа в уведомлении.
+    /// Маленький значок в шапке Android всегда красит в один цвет, поэтому
+    /// там силуэт логотипа (ic_stat_vpn), а цветной — здесь.
+    private var logoBitmap: Bitmap? = null
+
+    private fun notificationLogo(): Bitmap? = logoBitmap ?: try {
+        BitmapFactory.decodeResource(resources, R.drawable.ic_notification_logo)
+            ?.also { logoBitmap = it }
+    } catch (_: Exception) {
+        null
+    }
+
     /// Работает ли сервис ядра. Без него уведомление не публикуем: иначе
     /// после отключения в шторке остался бы «VPN подключён» без VPN.
     private fun coreServiceRunning(): Boolean =
@@ -205,6 +219,7 @@ class MainActivity : FlutterActivity() {
             val details = call.argument<String>("details")
             val since = call.argument<Number>("since")?.toLong() ?: 0L
             val stopLabel = call.argument<String>("stopLabel") ?: "Отключить"
+            val subText = call.argument<String>("subText")
 
             val openApp = packageManager.getLaunchIntentForPackage(packageName)?.let {
                 it.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -248,6 +263,8 @@ class MainActivity : FlutterActivity() {
                 )
                 .addAction(R.drawable.ic_stat_power, stopLabel, stop)
             if (openApp != null) builder.setContentIntent(openApp)
+            if (!subText.isNullOrEmpty()) builder.setSubText(subText)
+            notificationLogo()?.let { builder.setLargeIcon(it) }
             // Время сессии считает сама система — без обновлений
             // уведомления каждую секунду.
             if (since > 0) {

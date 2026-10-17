@@ -22,7 +22,8 @@ void main() {
     });
   });
 
-  test('полное уведомление: сервер, пинг, ключ, реклама', () {
+  test('полное уведомление: сервер, пинг, трафик, скорость, ключ, реклама',
+      () {
     final p = VpnNotificationService.buildPayload(
       server: '🇬🇧 Великобритания · Лондон',
       pingMs: 68,
@@ -30,13 +31,20 @@ void main() {
       now: now,
       since: DateTime(2026, 10, 17, 14, 52),
       adBlock: true,
+      downloadBytes: 388811571, // 370.8 MB
+      uploadBytes: 39321600, // 37.5 MB
+      downloadBps: 1258291, // 1.2 MB/s
+      uploadBps: 87040, // 85 KB/s
     );
     expect(p['title'], 'VPN подключён · 🇬🇧 Великобритания · Лондон');
-    expect(p['text'], '⚡ 68 мс   ·   🔑 ещё 22 дня');
+    expect(p['text'], '⚡ 68 мс   ·   ↓ 370.8 MB  ↑ 37.5 MB');
+    expect(p['subText'], '🔑 ещё 22 дня');
     expect(
         p['details'],
         '🌍 Сервер: 🇬🇧 Великобритания · Лондон\n'
         '⚡ Пинг: 68 мс — отлично\n'
+        '📥 Приём: 370.8 MB   📤 Отдача: 37.5 MB\n'
+        '🚀 Скорость: ↓ 1.2 MB/s  ↑ 85 KB/s\n'
         '🔑 Ключ: ещё 22 дня (до 09.11.2026)\n'
         '🛡 Реклама и трекеры блокируются');
     expect(p['since'], DateTime(2026, 10, 17, 14, 52).millisecondsSinceEpoch);
@@ -53,9 +61,19 @@ void main() {
       adBlock: false,
     );
     expect(p['title'], 'VPN подключён');
-    expect(p['text'], 'Трафик защищён');
-    expect(p['details'], '');
+    expect(p['text'], '↓ 0 MB  ↑ 0 MB');
+    expect(p['subText'], isNull);
+    expect(p['details'], '📥 Приём: 0 MB   📤 Отдача: 0 MB',
+        reason: 'без трафика — без строки скорости');
     expect(p['since'], 0);
+  });
+
+  test('объём и скорость — как на главном экране', () {
+    expect(VpnNotificationService.formatBytes(0), '0 MB');
+    expect(VpnNotificationService.formatBytes(2 * 1024 * 1024 * 1024),
+        '2.00 GB');
+    expect(VpnNotificationService.formatSpeed(500), '500 B/s');
+    expect(VpnNotificationService.formatSpeed(87040), '85 KB/s');
   });
 
   test('английский интерфейс', () {
@@ -69,7 +87,8 @@ void main() {
       english: true,
     );
     expect(p['title'], 'VPN connected · Sweden');
-    expect(p['text'], '⚡ 350 ms   ·   🔑 2 days left');
+    expect(p['text'], '⚡ 350 ms   ·   ↓ 0 MB  ↑ 0 MB');
+    expect(p['subText'], '🔑 2 days left');
     expect((p['details'] as String).split('\n')[1], '⚡ Ping: 350 ms — slow');
     expect(p['stopLabel'], 'Disconnect');
   });

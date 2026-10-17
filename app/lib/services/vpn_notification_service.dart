@@ -33,6 +33,12 @@ class VpnNotificationService {
   Timer? _debounce;
   Timer? _hourly;
   TunnelConnState? _lastState;
+  DateTime? _lastPostAt;
+
+  /// Не чаще раза в столько уведомление обновляется ради трафика. Скорость
+  /// и объём меняются каждую секунду, но перерисовывать шторку так часто —
+  /// это батарея; раз в 10 секунд числа остаются живыми.
+  static const trafficRefresh = Duration(seconds: 10);
 
   /// Подключить к событиям туннеля. Только Android: на Windows шторки нет.
   void start() {
@@ -56,9 +62,12 @@ class VpnNotificationService {
 
   void _onStatus() {
     final state = TunnelService.instance.status.value?.state;
-    // Статус меняется каждую секунду (счётчики) — нам нужны только смены
-    // состояния.
-    if (state == _lastState) return;
+    // Статус меняется каждую секунду (счётчики трафика): тогда обновляем не
+    // чаще [trafficRefresh], а повтор тех же чисел отсеет сравнение текста.
+    if (state == _lastState) {
+      if (state == TunnelConnState.connected) _scheduleTraffic();
+      return;
+    }
     _lastState = state;
     if (state == TunnelConnState.connected) {
       _schedule();
@@ -79,12 +88,24 @@ class VpnNotificationService {
     });
   }
 
+  void _scheduleTraffic() {
+    if (_debounce?.isActive ?? false) return; // обновление и так в пути
+    final last = _lastPostAt;
+    final wait = last == null
+        ? Duration.zero
+        : trafficRefresh - DateTime.now().difference(last);
+    _debounce = Timer(wait.isNegative ? Duration.zero : wait, () {
+      unawaited(_post());
+    });
+  }
+
   Future<void> _post() async {
     final tunnel = TunnelService.instance;
     if (!tunnel.isConnected) return;
     final server = tunnel.connectedServerName.value;
     final blockAds =
         await LocalPrefs.instance.getBool(PrefKeys.blockAds, fallback: true);
+    final status = tunnel.status.value;
     final payload = buildPayload(
       server: server,
       pingMs: tunnel.latencyForHostName(server),
@@ -92,11 +113,16 @@ class VpnNotificationService {
       now: DateTime.now(),
       since: tunnel.connectedSince,
       adBlock: blockAds,
+      downloadBytes: status?.downloadTotalBytes ?? 0,
+      uploadBytes: status?.uploadTotalBytes ?? 0,
+      downloadBps: (status?.download ?? 0).toInt(),
+      uploadBps: (status?.upload ?? 0).toInt(),
       english: LocaleService.instance.language == AppLanguage.en,
     );
     final fingerprint = jsonEncode(payload);
     if (fingerprint == _lastPosted) return;
     _lastPosted = fingerprint;
+    _lastPostAt = DateTime.now();
     await _invoke('updateVpnNotification', payload);
   }
 
@@ -127,6 +153,10 @@ class VpnNotificationService {
     required DateTime now,
     required DateTime? since,
     required bool adBlock,
+    int downloadBytes = 0,
+    int uploadBytes = 0,
+    int downloadBps = 0,
+    int uploadBps = 0,
     bool english = false,
   }) {
     final serverName = (server == null || server.trim().isEmpty)
@@ -139,19 +169,26 @@ class VpnNotificationService {
 
     final keyShort =
         keyExpiry == null ? null : keyLeftText(keyExpiry, now, english: english);
+    final traffic =
+        '↓ ${formatBytes(downloadBytes)}  ↑ ${formatBytes(uploadBytes)}';
+    // Скорость показываем, только пока что-то идёт: «↓ 0 B/s» — шум.
+    final moving = downloadBps >= 1024 || uploadBps >= 1024;
     final short = <String>[
       if (ping != null) '⚡ $ping ${english ? 'ms' : 'мс'}',
-      if (keyShort != null) '🔑 $keyShort',
+      traffic,
     ];
-    final text = short.isNotEmpty
-        ? short.join('   ·   ')
-        : (english ? 'Traffic is protected' : 'Трафик защищён');
+    final text = short.join('   ·   ');
 
     final details = <String>[
       if (serverName != null) '🌍 ${english ? 'Server' : 'Сервер'}: $serverName',
       if (ping != null)
         '⚡ ${english ? 'Ping' : 'Пинг'}: $ping ${english ? 'ms' : 'мс'} — '
             '${pingQuality(ping, english: english)}',
+      '📥 ${english ? 'Received' : 'Приём'}: ${formatBytes(downloadBytes)}   '
+          '📤 ${english ? 'Sent' : 'Отдача'}: ${formatBytes(uploadBytes)}',
+      if (moving)
+        '🚀 ${english ? 'Speed' : 'Скорость'}: ↓ ${formatSpeed(downloadBps)}  '
+            '↑ ${formatSpeed(uploadBps)}',
       if (keyExpiry != null)
         '🔑 ${english ? 'Key' : 'Ключ'}: $keyShort'
             '${keyExpiry.isAfter(now) ? ' (${english ? 'until' : 'до'} ${_date(keyExpiry)})' : ''}',
@@ -164,6 +201,8 @@ class VpnNotificationService {
     return {
       'title': title,
       'text': text,
+      // В шапке уведомления, рядом с названием приложения и таймером.
+      'subText': keyShort == null ? null : '🔑 $keyShort',
       'details': details.join('\n'),
       'since': since?.millisecondsSinceEpoch ?? 0,
       'stopLabel': english ? 'Disconnect' : 'Отключить',
@@ -189,6 +228,24 @@ class VpnNotificationService {
     if (mod10 == 1) return 'день';
     if (mod10 >= 2 && mod10 <= 4) return 'дня';
     return 'дней';
+  }
+
+  /// Объём — так же, как на главном экране: «370.8 MB», «1.25 GB».
+  @visibleForTesting
+  static String formatBytes(int bytes) {
+    if (bytes <= 0) return '0 MB';
+    final mb = bytes / (1024 * 1024);
+    if (mb < 1024) return '${mb.toStringAsFixed(1)} MB';
+    return '${(mb / 1024).toStringAsFixed(2)} GB';
+  }
+
+  /// Скорость в байтах в секунду: «85 KB/s», «1.2 MB/s».
+  @visibleForTesting
+  static String formatSpeed(int bytesPerSecond) {
+    if (bytesPerSecond < 1024) return '$bytesPerSecond B/s';
+    final kb = bytesPerSecond / 1024;
+    if (kb < 1024) return '${kb.toStringAsFixed(0)} KB/s';
+    return '${(kb / 1024).toStringAsFixed(1)} MB/s';
   }
 
   @visibleForTesting
