@@ -92,7 +92,7 @@ class _ReferralScreenState extends State<ReferralScreen> {
                             if (link == null) return;
                             Clipboard.setData(ClipboardData(text: link));
                             ScaffoldMessenger.of(context)
-                                .showSnackBar(SnackBar(content: Text(tr('Ссылка скопирована'))));
+                                .showSnackBar(appSnack(tr('Ссылка скопирована')));
                           },
                           icon: const Icon(Icons.copy_rounded, size: 16),
                           label: Text(tr('Скопировать')),

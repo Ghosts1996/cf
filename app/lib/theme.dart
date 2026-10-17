@@ -80,6 +80,25 @@ ThemeData buildAppTheme() {
       ),
     ),
     dividerTheme: const DividerThemeData(color: Color(0xFF1A1230), thickness: 1),
+    // Всплывающие сообщения — карточкой над нижним краем, а не сплошной
+    // полосой во всю ширину (см. appSnack в widgets/neon.dart).
+    snackBarTheme: SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: const Color(0xFF150E28),
+      elevation: 8,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: AppColors.violet2.withOpacity(0.55), width: 1),
+      ),
+      insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+      contentTextStyle: GoogleFonts.inter(
+        color: AppColors.text,
+        fontSize: 13.5,
+        fontWeight: FontWeight.w500,
+        height: 1.35,
+      ),
+      actionTextColor: AppColors.violetGlow,
+    ),
     elevatedButtonTheme: ElevatedButtonThemeData(
       style: ElevatedButton.styleFrom(
         backgroundColor: AppColors.violet2,

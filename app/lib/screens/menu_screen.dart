@@ -94,14 +94,14 @@ class _MenuScreenState extends State<MenuScreen> {
                 await _api.claimTrial();
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(tr('Триал активирован — смотри «Мои ключи»'))),
+                    appSnack(tr('Триал активирован — смотри «Мои ключи»')),
                   );
                   _go(const KeysScreen());
                 }
               } on ApiException catch (e) {
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(e.message), backgroundColor: AppColors.danger),
+                    appSnack(e.message, error: true),
                   );
                 }
               }

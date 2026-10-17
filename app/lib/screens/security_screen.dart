@@ -131,7 +131,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
     await AppLogService.instance.clearAll();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Логи удалены'))),
+        appSnack(tr('Логи удалены')),
       );
     }
   }
@@ -160,7 +160,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
       ]);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(tr('Kill Switch включён автоматически — строгий режим работает поверх него'))),
+          appSnack(tr('Kill Switch включён автоматически — строгий режим работает поверх него')),
         );
       }
       return;
@@ -197,7 +197,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
   void _notifyReconnectNeeded() {
     if (!mounted || !TunnelService.instance.isConnected) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы включить сейчас'))),
+      appSnack(tr('Применится при следующем подключении — переподключись, чтобы включить сейчас')),
     );
   }
 

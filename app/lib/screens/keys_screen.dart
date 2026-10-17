@@ -58,10 +58,7 @@ class _KeysScreenState extends State<KeysScreen> {
     final text = _manualKeyController.text.trim();
     if (text.isNotEmpty && !text.startsWith('vless://') && !text.startsWith('http://') && !text.startsWith('https://')) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(tr('Похоже на неверную ссылку — жду vless://... или http(s)://ссылку на подписку')),
-          backgroundColor: AppColors.danger,
-        ),
+        appSnack(tr('Похоже на неверную ссылку — жду vless://... или http(s)://ссылку на подписку'), error: true),
       );
       return;
     }
@@ -70,7 +67,7 @@ class _KeysScreenState extends State<KeysScreen> {
     if (mounted) {
       setState(() => _manualKeySaving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(text.isEmpty ? tr('Ручной ключ удалён') : tr('Ключ сохранён — теперь подключение пойдёт по нему'))),
+        appSnack(text.isEmpty ? tr('Ручной ключ удалён') : tr('Ключ сохранён — теперь подключение пойдёт по нему')),
       );
     }
   }
@@ -83,7 +80,7 @@ class _KeysScreenState extends State<KeysScreen> {
     final text = _manualKeyController.text.trim();
     if (text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Сначала вставь vless://-ссылку или ссылку на подписку'))),
+        appSnack(tr('Сначала вставь vless://-ссылку или ссылку на подписку')),
       );
       return;
     }
@@ -143,7 +140,7 @@ class _KeysScreenState extends State<KeysScreen> {
       );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(result.error ?? tr('Ключ не распознан')), backgroundColor: AppColors.danger),
+        appSnack(result.error ?? tr('Ключ не распознан'), error: true),
       );
     }
   }
@@ -153,7 +150,7 @@ class _KeysScreenState extends State<KeysScreen> {
     await ManualKeyStore.instance.clear();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Ручной ключ удалён — снова используются ключи из личного кабинета'))),
+        appSnack(tr('Ручной ключ удалён — снова используются ключи из личного кабинета')),
       );
     }
   }
@@ -201,14 +198,14 @@ class _KeysScreenState extends State<KeysScreen> {
       final newLimit = await _api.upgradeKeyDevices((key['key_id'] as num).toInt());
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${tr('Лимит устройств увеличен до')} $newLimit')),
+          appSnack('${tr('Лимит устройств увеличен до')} $newLimit'),
         );
         _load();
       }
     } on ApiException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: AppColors.danger),
+          appSnack(e.message, error: true),
         );
       }
     }
@@ -217,7 +214,7 @@ class _KeysScreenState extends State<KeysScreen> {
   void _copyLink(String link) {
     Clipboard.setData(ClipboardData(text: link));
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(tr('Ссылка скопирована'))),
+      appSnack(tr('Ссылка скопирована')),
     );
   }
 

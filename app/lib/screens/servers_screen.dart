@@ -834,9 +834,8 @@ class _ServersScreenState extends State<ServersScreen> {
 
     if (_tunnel.isBusy) {
       if (mounted && !silent) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(tr('Дождитесь окончания подключения — ядро сейчас занято.')),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(appSnack(
+            tr('Дождитесь окончания подключения — ядро сейчас занято.')));
       }
       return;
     }
@@ -844,9 +843,8 @@ class _ServersScreenState extends State<ServersScreen> {
     final connectionString = await _resolveActiveConnectionString();
     if (connectionString == null || connectionString.isEmpty) {
       if (mounted && !silent) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(tr('Нет активного ключа с подпиской — нечего проверять.')),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(appSnack(
+            tr('Нет активного ключа с подпиской — нечего проверять.')));
       }
       return;
     }
@@ -1101,11 +1099,9 @@ class _ServersScreenState extends State<ServersScreen> {
     final unsupportedProtocol = _unsupportedProtocols[id];
     if (unsupportedProtocol != null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              '${tr('Эта локация работает по протоколу')} $unsupportedProtocol'
-              ' — ${tr('приложение его пока не поддерживает. Выбери другую.')}'),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(appSnack(
+            '${tr('Эта локация работает по протоколу')} $unsupportedProtocol'
+            ' — ${tr('приложение его пока не поддерживает. Выбери другую.')}'));
       }
       return;
     }
@@ -1121,10 +1117,8 @@ class _ServersScreenState extends State<ServersScreen> {
         !_realEndpoints.containsKey(id) &&
         !_unsupportedProtocols.containsKey(id)) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(tr(
-              'Этой локации нет в твоей подписке — выбери другую из списка.')),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(appSnack(
+            tr('Этой локации нет в твоей подписке — выбери другую из списка.')));
       }
       return;
     }
@@ -1155,7 +1149,7 @@ class _ServersScreenState extends State<ServersScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${tr('Не удалось переключиться на')} $name: $e')),
+          appSnack('${tr('Не удалось переключиться на')} $name: $e', error: true),
         );
       }
     } finally {

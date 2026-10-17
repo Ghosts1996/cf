@@ -108,7 +108,7 @@ class _PlansScreenState extends State<PlansScreen> {
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_isExtend ? tr('Ключ продлён') : tr('Ключ выдан — смотри вкладку «Ключи»'))),
+          appSnack(_isExtend ? tr('Ключ продлён') : tr('Ключ выдан — смотри вкладку «Ключи»')),
         );
         Navigator.of(context).pop();
       }
@@ -116,9 +116,9 @@ class _PlansScreenState extends State<PlansScreen> {
       if (mounted) {
         final insufficientBalance = e.message.contains('Недостаточ');
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(e.message),
-            backgroundColor: AppColors.danger,
+          appSnack(
+            e.message,
+            error: true,
             action: insufficientBalance
                 ? SnackBarAction(
                     label: tr('Пополнить'),
@@ -133,7 +133,7 @@ class _PlansScreenState extends State<PlansScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${tr('Не удалось оформить:')} $e'), backgroundColor: AppColors.danger),
+          appSnack('${tr('Не удалось оформить:')} $e', error: true),
         );
       }
     } finally {

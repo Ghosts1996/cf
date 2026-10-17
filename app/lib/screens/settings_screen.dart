@@ -116,7 +116,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.fastPing, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Изменение применится при следующем подключении — переподключись, чтобы включить сейчас'))),
+        appSnack(tr('Изменение применится при следующем подключении — переподключись, чтобы включить сейчас')),
       );
     }
   }
@@ -129,7 +129,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.dpiBypass, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Изменение применится при следующем подключении — переподключись, чтобы включить сейчас'))),
+        appSnack(tr('Изменение применится при следующем подключении — переподключись, чтобы включить сейчас')),
       );
     }
   }
@@ -152,7 +152,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.proxyOnlyMode, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы сменить режим сейчас'))),
+        appSnack(tr('Применится при следующем подключении — переподключись, чтобы сменить режим сейчас')),
       );
     }
   }
@@ -171,7 +171,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setString(PrefKeys.dnsServerProvider, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас'))),
+        appSnack(tr('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас')),
       );
     }
   }
@@ -183,7 +183,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setString(PrefKeys.customDnsServer, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас'))),
+        appSnack(tr('Применится при следующем подключении — переподключись, чтобы сменить DNS сейчас')),
       );
     }
   }
@@ -194,7 +194,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _prefs.setBool(PrefKeys.ipv6Enabled, v);
     if (mounted && TunnelService.instance.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Применится при следующем подключении — переподключись, чтобы включить сейчас'))),
+        appSnack(tr('Применится при следующем подключении — переподключись, чтобы включить сейчас')),
       );
     }
   }
@@ -237,7 +237,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ]);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Кэш очищен'))),
+        appSnack(tr('Кэш очищен')),
       );
     }
   }

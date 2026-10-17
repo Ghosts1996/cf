@@ -140,6 +140,14 @@ class MainActivity : FlutterActivity() {
                         clearUpdateNotification()
                         result.success(null)
                     }
+                    "getDeviceInfo" -> result.success(
+                        mapOf(
+                            "manufacturer" to Build.MANUFACTURER,
+                            "brand" to Build.BRAND,
+                            "model" to Build.MODEL,
+                            "android" to Build.VERSION.RELEASE,
+                        )
+                    )
                     "isCoreServiceAlive" -> result.success(isCoreServiceAlive())
                     "restartApp" -> {
                         result.success(null)
@@ -255,18 +263,19 @@ class MainActivity : FlutterActivity() {
     private val vpnNotificationChannel = "singbox_service"
     private val brandColor = 0xFF8B5CF6.toInt()
 
-    /// Неоновый фиолетовый логотипа — цвет кружка вокруг него в шапке
-    /// уведомления. Система всё равно осветлит его до контраста с фоном
-    /// шторки, поэтому тёмный здесь не задать.
-    private val logoColor = 0xFFB026FF.toInt()
+    /// Серебро кольца логотипа — цвет кружка вокруг него в шапке
+    /// уведомления: кружок продолжает кольцо, и логотип занимает его целиком.
+    /// Цвет уже достаточно светлый для тёмной шторки, система его не меняет.
+    private val logoColor = 0xFF9A96AC.toInt()
 
-    /// ColorOS и OxygenOS (OPPO, OnePlus, realme) рисуют цветной значок
-    /// уведомления как есть, в кружке, — там значком стоит сам логотип, по
-    /// кругу. Остальные прошивки (Pixel, Samsung и другие) красят значок в
-    /// один цвет, и от логотипа осталось бы пятно: там чёткий глобус.
+    /// Прошивки с отдельной шторкой уведомлений (Xiaomi, OPPO, OnePlus,
+    /// realme, vivo, Honor, Tecno, Infinix и другие) рисуют цветной значок
+    /// уведомления как есть, в кружке, — там значком стоит сам логотип по
+    /// кругу. Только чистый Android на Pixel красит любой значок в один цвет,
+    /// и от логотипа осталось бы пятно: там чёткий глобус.
     private val colorNotificationIcon: Boolean by lazy {
-        listOf(Build.MANUFACTURER, Build.BRAND).any {
-            it.orEmpty().lowercase(Locale.ROOT) in setOf("oneplus", "oppo", "realme")
+        listOf(Build.MANUFACTURER, Build.BRAND).none {
+            it.orEmpty().lowercase(Locale.ROOT) == "google"
         }
     }
 

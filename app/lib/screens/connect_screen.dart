@@ -252,9 +252,9 @@ class _ConnectScreenState extends State<ConnectScreen>
       } catch (_) {}
     }
     if (!opened && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(tr('Не удалось открыть ссылку на обновление.')),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(appSnack(
+          tr('Не удалось открыть ссылку на обновление.'),
+          error: true));
     }
   }
 
@@ -354,7 +354,7 @@ class _ConnectScreenState extends State<ConnectScreen>
     setState(() => _manualKey = ManualKeyStore.instance.value);
     if (_tunnel.isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Ключ обновлён. Переподключись, чтобы применить его.'))),
+        appSnack(tr('Ключ обновлён. Переподключись, чтобы применить его.')),
       );
     }
   }
@@ -596,7 +596,7 @@ class _ConnectScreenState extends State<ConnectScreen>
           _connectedKeyId = (newBest['key_id'] as num?)?.toInt();
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(tr('Срок действия предыдущего ключа истёк — переключились на следующий активный ключ'))),
+              appSnack(tr('Срок действия предыдущего ключа истёк — переключились на следующий активный ключ')),
             );
           }
         } catch (e) {
@@ -617,7 +617,7 @@ class _ConnectScreenState extends State<ConnectScreen>
         _activeKey = null;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(tr('Срок действия ключа истёк, других активных ключей нет — оформи новую подписку'))),
+        appSnack(tr('Срок действия ключа истёк, других активных ключей нет — оформи новую подписку')),
       );
     }
   }
@@ -753,9 +753,9 @@ class _ConnectScreenState extends State<ConnectScreen>
   void _showError(String message, {String? fallbackConnectionString}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: AppColors.danger,
+      appSnack(
+        message,
+        error: true,
         // При ошибке подключения ведём в системные настройки VPN: самый частый
         // сценарий — разрешение на VPN отозвано вручную или его держит другое
         // VPN-приложение, программно это не чинится.
@@ -1056,7 +1056,7 @@ class _ConnectScreenState extends State<ConnectScreen>
             onTap: () {
               if (!connected) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(tr('Тест скорости доступен после подключения к серверу'))),
+                  appSnack(tr('Тест скорости доступен после подключения к серверу')),
                 );
                 return;
               }

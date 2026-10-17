@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -17,6 +18,7 @@ import 'services/app_log_service.dart';
 import 'services/tunnel_service.dart';
 import 'services/locale_service.dart';
 import 'services/tray_service.dart';
+import 'services/update_service.dart';
 import 'services/vpn_notification_service.dart';
 
 Future<void> main() async {
@@ -86,6 +88,28 @@ void _wireAppLogging() {
     if (error == null || error.isEmpty) return;
     AppLogService.instance.log('Ошибка: $error', level: AppLogLevel.error);
   });
+  if (!kIsWeb && Platform.isAndroid) unawaited(_logDevice());
+}
+
+/// Телефон и сборка — строкой журнала при запуске: по присланному журналу
+/// сразу видно, на какой прошивке что случилось (как она рисует
+/// уведомления, как обращается с VPN в фоне).
+Future<void> _logDevice() async {
+  try {
+    final info = await const MethodChannel('vpnonline/native_stats')
+        .invokeMapMethod<String, Object?>('getDeviceInfo');
+    if (info == null) return;
+    final brand = '${info['brand'] ?? ''}';
+    final maker = '${info['manufacturer'] ?? ''}';
+    final name = brand.isEmpty || brand.toLowerCase() == maker.toLowerCase()
+        ? maker
+        : '$maker ($brand)';
+    await AppLogService.instance.log(
+        'Устройство: $name ${info['model'] ?? ''}, Android ${info['android'] ?? '?'}'
+        ' · сборка приложения $kAppBuild');
+  } catch (_) {
+    // Старая нативная часть без метода — без этой строки журнал обойдётся.
+  }
 }
 
 class VpnOnlineApp extends StatelessWidget {

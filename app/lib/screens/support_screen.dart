@@ -30,7 +30,7 @@ class SupportScreen extends StatelessWidget {
     }
     if (!opened && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${tr('Не удалось открыть ссылку:')} $url')),
+        appSnack('${tr('Не удалось открыть ссылку:')} $url', error: true),
       );
     }
   }

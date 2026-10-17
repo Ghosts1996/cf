@@ -62,7 +62,7 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
     if (!mounted) return;
     setState(() => _entries = const []);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(tr('Логи удалены'))),
+      appSnack(tr('Логи удалены')),
     );
   }
 
@@ -77,7 +77,7 @@ class _LogsViewerScreenState extends State<LogsViewerScreen> {
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(tr('Журнал скопирован'))),
+      appSnack(tr('Журнал скопирован')),
     );
   }
 

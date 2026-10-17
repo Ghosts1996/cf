@@ -405,7 +405,7 @@ class _BalanceScreenState extends State<BalanceScreen>
                               onPressed: () {
                                 Clipboard.setData(ClipboardData(text: referralLink));
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text(tr('Ссылка скопирована'))),
+                                  appSnack(tr('Ссылка скопирована')),
                                 );
                               },
                               icon: const Icon(Icons.copy_rounded, size: 15),

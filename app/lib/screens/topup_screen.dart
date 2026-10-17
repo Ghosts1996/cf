@@ -51,13 +51,13 @@ class _TopUpScreenState extends State<TopUpScreen> {
       final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!opened && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${tr('Не удалось открыть ссылку:')} $url')),
+          appSnack('${tr('Не удалось открыть ссылку:')} $url', error: true),
         );
       }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${tr('Не удалось открыть ссылку:')} $url')),
+          appSnack('${tr('Не удалось открыть ссылку:')} $url', error: true),
         );
       }
     }
@@ -79,7 +79,7 @@ class _TopUpScreenState extends State<TopUpScreen> {
       if (await launchUrl(uri, mode: LaunchMode.externalApplication)) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(tr('Открыта страница оплаты — после оплаты баланс обновится автоматически'))),
+            appSnack(tr('Открыта страница оплаты — после оплаты баланс обновится автоматически')),
           );
           Navigator.of(context).pop();
         }
