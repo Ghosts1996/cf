@@ -35,9 +35,9 @@ class AppLogo extends StatelessWidget {
 }
 
 /// Всплывающее сообщение внизу экрана в стиле приложения: тёмная карточка
-/// с неоновой рамкой, слева логотип. [error] — красная рамка и значок «!»
-/// вместо логотипа. Форма и отступы — из темы (snackBarTheme в theme.dart),
-/// так же выглядят и сообщения, собранные без этой функции.
+/// с неоновой рамкой, только текст. [error] — красная рамка и значок «!».
+/// Форма и отступы — из темы (snackBarTheme в theme.dart), так же выглядят
+/// и сообщения, собранные без этой функции.
 SnackBar appSnack(
   String message, {
   bool error = false,
@@ -46,25 +46,24 @@ SnackBar appSnack(
 }) {
   final accent = error ? AppColors.danger : AppColors.violet2;
   return SnackBar(
-    content: Row(
-      children: [
-        if (error)
-          Container(
-            width: 26,
-            height: 26,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: accent.withOpacity(0.14),
-              border: Border.all(color: accent.withOpacity(0.7), width: 1.5),
-            ),
-            child: Icon(Icons.priority_high_rounded, size: 16, color: accent),
+    content: error
+        ? Row(
+            children: [
+              Container(
+                width: 26,
+                height: 26,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: accent.withOpacity(0.14),
+                  border: Border.all(color: accent.withOpacity(0.7), width: 1.5),
+                ),
+                child: Icon(Icons.priority_high_rounded, size: 16, color: accent),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Text(message)),
+            ],
           )
-        else
-          const AppLogo(size: 26, glow: 6),
-        const SizedBox(width: 12),
-        Expanded(child: Text(message)),
-      ],
-    ),
+        : Text(message),
     shape: appSnackShape(accent),
     action: action,
     duration: duration,
