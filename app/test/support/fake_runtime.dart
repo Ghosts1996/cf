@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
-    show OutboundGroup, OutboundGroupItem, SessionOptions;
+    show OutboundGroup, OutboundGroupItem, SessionOptions, TrafficStats;
 import 'package:vpnonline_app/services/singbox_runtime.dart';
 
 /// Управляемая заглушка нативного ядра.
@@ -49,6 +49,10 @@ class FakeRuntime implements SingboxRuntimeClient {
 
   /// Строки журнала ядра — как их присылает плагин.
   void emitCoreLog(List<dynamic> entries) => _coreLog.add(entries);
+
+  /// Статистика ядра — итоги с начала сессии ядра.
+  void emitStats({required int down, required int up}) => _stats.add(
+      TrafficStats(downlinkTotalBytes: down, uplinkTotalBytes: up));
 
   /// Сервис остановлен не приложением: кнопка «Отключить» в уведомлении,
   /// переключатель в настройках Android, другой VPN. Плагин просто

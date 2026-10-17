@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart'
     show MethodChannel, PlatformException, MissingPluginException;
@@ -223,6 +224,25 @@ class TunnelService {
   // Отдаёт ли ядро накопленные итоги (`*TotalBytes`). Часть сборок libbox их
   // не заполняет, и тогда — и только тогда — приложение считает объём само.
   bool _coreReportsTotals = false;
+
+  // ── Застой статистики ядра ──────────────────────────────────────────────
+  //
+  // Модуль ядра иногда перестаёт присылать статистику, хотя туннель работает:
+  // «Приём» и «Отдача» замирали на одном числе, а время сессии шло дальше.
+  // Чинить это в самом модуле — значит трогать его ветку, поэтому приложение
+  // страхуется само: если итоги ядра стоят, а Android видит, что через
+  // приложение (ядро живёт в его процессе) идёт трафик, объём досчитывается
+  // по системным счётчикам. Показанное число никогда не идёт назад.
+  int _lastCoreDownloadTotal = 0;
+  int _lastCoreUploadTotal = 0;
+  int _totalsOffsetDownload = 0;
+  int _totalsOffsetUpload = 0;
+  DateTime? _lastCoreTotalsAdvanceAt;
+  bool _coreStatsStale = false;
+  int _staleAddedDownload = 0;
+  int _staleAddedUpload = 0;
+  final List<(DateTime, int)> _recentUidRx = <(DateTime, int)>[];
+
   DateTime? _lastTrafficAt;
   int? _lastNativeRxBytes;
   int? _lastNativeTxBytes;
@@ -753,6 +773,97 @@ class TunnelService {
     _onStatusChanged(mapped);
   }
 
+  /// Итоги ядра пришли: учитываем перезапуск счёта и конец застоя.
+  void _trackCoreTotals(int down, int up, DateTime now) {
+    // Ядро начало счёт заново — сессию подняли заново при смене сервера или
+    // пересборке. Показанное не откатываем: прежние итоги уходят в поправку.
+    if (down < _lastCoreDownloadTotal || up < _lastCoreUploadTotal) {
+      _totalsOffsetDownload += _lastCoreDownloadTotal;
+      _totalsOffsetUpload += _lastCoreUploadTotal;
+      _lastCoreDownloadTotal = 0;
+      _lastCoreUploadTotal = 0;
+    }
+    final advanced =
+        down > _lastCoreDownloadTotal || up > _lastCoreUploadTotal;
+    if (advanced) {
+      if (_coreStatsStale) {
+        // Ядро снова считает. Что оно насчитало за время застоя, мы уже
+        // досчитали по Android, — дважды не прибавляем.
+        final jumpDown = down - _lastCoreDownloadTotal;
+        final jumpUp = up - _lastCoreUploadTotal;
+        _totalsOffsetDownload -= math.min(_staleAddedDownload, jumpDown);
+        _totalsOffsetUpload -= math.min(_staleAddedUpload, jumpUp);
+        _coreStatsStale = false;
+        _staleAddedDownload = 0;
+        _staleAddedUpload = 0;
+        unawaited(AppLogService.instance
+            .log('Статистика ядра снова приходит — счётчики снова от ядра'));
+      }
+      _lastCoreTotalsAdvanceAt = now;
+      _recentUidRx.clear();
+    }
+    _lastCoreDownloadTotal = down;
+    _lastCoreUploadTotal = up;
+  }
+
+  /// Байты процесса приложения по данным Android за последний опрос.
+  void _noteUidTraffic(int rxDelta, int txDelta, DateTime now) {
+    if (!_coreReportsTotals || !isConnected) return;
+    if (rxDelta < 0 || txDelta < 0) return; // счётчики Android сбросились
+    if (!_coreStatsStale) {
+      _recentUidRx
+        ..add((now, rxDelta))
+        ..removeWhere((e) => now.difference(e.$1) > const Duration(seconds: 10));
+      final since = _lastCoreTotalsAdvanceAt;
+      if (since == null ||
+          now.difference(since) < const Duration(seconds: 10)) {
+        return;
+      }
+      final recentRx = _recentUidRx.fold<int>(0, (sum, e) => sum + e.$2);
+      // Замеры задержки и проверки связи дают десятки килобайт за раз —
+      // застой засчитываем только на заметном трафике.
+      if (recentRx < 256 * 1024) return;
+      _coreStatsStale = true;
+      _recentUidRx.clear();
+      unawaited(AppLogService.instance.log(
+          'Статистика ядра не обновляется ${now.difference(since).inSeconds} с, '
+          'хотя трафик идёт — считаю объём по данным Android и '
+          'переподписываюсь на статистику',
+          level: AppLogLevel.warning));
+      _resubscribeTrafficStats();
+    }
+    _totalsOffsetDownload += rxDelta;
+    _totalsOffsetUpload += txDelta;
+    _staleAddedDownload += rxDelta;
+    _staleAddedUpload += txDelta;
+    _downloadTotalBytes = _lastCoreDownloadTotal + _totalsOffsetDownload;
+    _uploadTotalBytes = _lastCoreUploadTotal + _totalsOffsetUpload;
+    _displayDownloadBytes = _downloadTotalBytes;
+    _displayUploadBytes = _uploadTotalBytes;
+    final current = status.value;
+    if (current == null || current.state != TunnelConnState.connected) return;
+    status.value = TunnelStatus(
+      state: current.state,
+      duration: current.duration,
+      download: current.download,
+      upload: current.upload,
+      downloadTotalBytes: _downloadTotalBytes,
+      uploadTotalBytes: _uploadTotalBytes,
+    );
+  }
+
+  @visibleForTesting
+  void debugNoteUidTraffic(int rxDelta, int txDelta, DateTime at) =>
+      _noteUidTraffic(rxDelta, txDelta, at);
+
+  void _resubscribeTrafficStats() {
+    if (_probeInProgress) return;
+    final old = _statsSub;
+    _statsSub = null;
+    unawaited(old?.cancel());
+    _statsSub = _client.trafficStatsStream.listen(_applyTrafficStats);
+  }
+
   void _applyTrafficStats(dynamic stats) {
     final current = status.value;
     if (current == null) return;
@@ -779,8 +890,14 @@ class TunnelService {
     final int reportedDownload;
     final int reportedUpload;
     if (_coreReportsTotals) {
-      reportedDownload = nextDownloadTotal;
-      reportedUpload = nextUploadTotal;
+      // Только события поднятой сессии: повтор последнего значения после
+      // переподписки (плагин его хранит) или хвост временной сессии проверки
+      // серверов посчитались бы «перезапуском счёта» и добавились бы к итогу.
+      if (current.state == TunnelConnState.connected) {
+        _trackCoreTotals(nextDownloadTotal, nextUploadTotal, now);
+      }
+      reportedDownload = nextDownloadTotal + _totalsOffsetDownload;
+      reportedUpload = nextUploadTotal + _totalsOffsetUpload;
     } else {
       reportedDownload = _displayDownloadBytes +
           ((stats.downlinkBps as num).toDouble().clamp(0, 1e12) *
@@ -797,12 +914,12 @@ class TunnelService {
         ? 0.0
         : now.difference(_lastTrafficAt!).inMilliseconds / 1000.0;
     final derivedDownload = elapsedSeconds > 0
-        ? ((nextDownloadTotal - _downloadTotalBytes) / elapsedSeconds)
+        ? ((reportedDownload - _downloadTotalBytes) / elapsedSeconds)
             .round()
             .clamp(0, 1 << 62)
         : 0;
     final derivedUpload = elapsedSeconds > 0
-        ? ((nextUploadTotal - _uploadTotalBytes) / elapsedSeconds)
+        ? ((reportedUpload - _uploadTotalBytes) / elapsedSeconds)
             .round()
             .clamp(0, 1 << 62)
         : 0;
@@ -1137,6 +1254,11 @@ class TunnelService {
       final elapsedSeconds = _lastNativeStatsAt == null
           ? 0.0
           : now.difference(_lastNativeStatsAt!).inMilliseconds / 1000.0;
+      // Сначала — досчёт объёма при застое статистики ядра (он обновляет
+      // status), потом скорость поверх уже обновлённого.
+      if (_lastNativeRxBytes != null && _lastNativeTxBytes != null) {
+        _noteUidTraffic(rx - _lastNativeRxBytes!, tx - _lastNativeTxBytes!, now);
+      }
       final current = status.value;
       if (current != null &&
           current.state == TunnelConnState.connected &&
@@ -3136,6 +3258,15 @@ class TunnelService {
       _displayDownloadBytes = 0;
       _displayUploadBytes = 0;
       _coreReportsTotals = false;
+      _lastCoreDownloadTotal = 0;
+      _lastCoreUploadTotal = 0;
+      _totalsOffsetDownload = 0;
+      _totalsOffsetUpload = 0;
+      _lastCoreTotalsAdvanceAt = null;
+      _coreStatsStale = false;
+      _staleAddedDownload = 0;
+      _staleAddedUpload = 0;
+      _recentUidRx.clear();
     }
     _lastTrafficAt = null;
     _lastNativeRxBytes = null;
