@@ -371,6 +371,80 @@ void main() {
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 60)));
 
+  test('соединения через активную локацию падают — проверка сразу, даже в '
+      'кармане и без трафика', () async {
+    var server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    tunnel.appInForeground = false;
+    core.selected.clear();
+
+    // Сервер пропал (как «Лондон» в журнале от 17.10): приложения пытаются
+    // соединиться, ядро пишет ошибки, а счётчики трафика стоят — неудачные
+    // соединения байтов не дают.
+    await server.close(force: true);
+    core.groupDelays = {'out-0': 65535, 'out-1': 50, 'out-2': 65535};
+    for (var i = 0; i < 3; i++) {
+      core.emitCoreLog([
+        LogEntry(
+            level: LogLevel.error,
+            message: 'ERROR[0880] [1418298476 5.0s] connection: open connection '
+                'to 57.144.62.3:443 using outbound/vless[out-0]: dial '
+                'rmnet_data2 (17): dial tcp 94.183.195.4:20029: i/o timeout',
+            time: DateTime.now()),
+      ]);
+    }
+    final switched = await waitUntil(() => core.selected.contains('out-1'),
+        timeout: const Duration(seconds: 15));
+    expect(switched, isTrue,
+        reason: 'ошибки ядра — сигнал проверить связь сейчас, а не через минуты');
+    expect(tunnel.connectedServerName.value, 'Нидерланды');
+    server = await startWorkingTunnel();
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('вся сессия молчит, а интернет у телефона есть — сессия '
+      'пересобирается из других локаций, но не чаще раза в 10 минут',
+      () async {
+    final server = await startWorkingTunnel();
+    await tunnel.connect(_subscription);
+    tunnel.directInternetProbe = () async => true;
+    core.groupDelays = {'out-0': 65535, 'out-1': 65535, 'out-2': 65535};
+    await server.close(force: true);
+    final before = core.connectCount;
+    // Заметит либо фоновая проверка после подключения, либо проверка
+    // живости — путь один.
+    await tunnel.debugLiveCheckTick();
+    expect(
+        await waitUntil(() => core.connectCount == before + 1,
+            timeout: const Duration(seconds: 20)),
+        isTrue,
+        reason: 'молчащие локации уходят в конец, сессия собирается заново');
+    expect(await waitUntil(() => tunnel.isConnected), isTrue);
+    // Новая сессия тоже молчит — пересборки подряд не крутятся.
+    await Future<void>.delayed(const Duration(seconds: 6));
+    await tunnel.debugLiveCheckTick();
+    await Future<void>.delayed(const Duration(seconds: 1));
+    expect(core.connectCount, before + 1);
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 90)));
+
+  test('вся сессия молчит и нет сети вовсе — ничего не трогаем', () async {
+    final server = await startWorkingTunnel();
+    await tunnel.connect(_subscription);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    await server.close(force: true);
+    tunnel.directInternetProbe = () async => false;
+    core.groupDelays = {'out-0': 65535, 'out-1': 65535, 'out-2': 65535};
+    final before = core.connectCount;
+    core.selected.clear();
+    await tunnel.debugLiveCheckTick();
+    expect(core.connectCount, before);
+    expect(core.selected, isEmpty);
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
   test('страну не выбирали, текущая медленная — переходим на быструю; '
       'выбрали сами — остаёмся', () async {
     final server = await startWorkingTunnel();

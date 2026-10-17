@@ -98,7 +98,28 @@ class TunnelService {
   /// иначе. Цена обратной ошибки выше — приложение само включало VPN, который
   /// только что выключили руками.
   bool _appInForeground = true;
-  set appInForeground(bool value) => _appInForeground = value;
+  set appInForeground(bool value) {
+    final cameBack = value && !_appInForeground;
+    _appInForeground = value;
+    if (cameBack) _onAppCameToForeground();
+  }
+
+  /// Приложение открыли на живом туннеле. Раньше каждое открытие заново
+  /// запускало разгон замера — два прогона по всей сессии подряд, два
+  /// десятка рукопожатий, — потому что плагин присылает «подключено» при
+  /// каждом возврате. Теперь числа уточняются одним прогоном и только если
+  /// они устарели.
+  void _onAppCameToForeground() {
+    if (!isConnected || _sessionOutboundRemarks.length < 2) return;
+    final last = _lastLatencyProbeAt;
+    if (last != null &&
+        DateTime.now().difference(last) < _latencyProbeInterval) {
+      return;
+    }
+    Timer(const Duration(seconds: 3), () {
+      if (_appInForeground) unawaited(_runLatencyProbe(force: true));
+    });
+  }
 
   /// Поднимать ли туннель обратно после неожиданного отключения.
   ///
@@ -998,6 +1019,7 @@ class TunnelService {
       }
       final severity = coreLogSeverity(pluginLevel, message);
       if (severity == null) continue;
+      _noteOutboundFailure(message);
       if (isCoreLogNoise(message)) continue;
       keep.add((
         message: 'Ядро: ${cleanCoreLogMessage(message)}',
@@ -1617,7 +1639,10 @@ class TunnelService {
     }
   }
 
-  void _restartLatencyProbe(bool shouldRun) {
+  void _restartLatencyProbe(bool shouldRun, {bool newSession = false}) {
+    // Замер уже идёт для этой сессии — повторное «подключено» (возврат в
+    // приложение, переподписка плагина) его не перезапускает.
+    if (shouldRun && !newSession && _latencyProbeTimer != null) return;
     _latencyProbeTimer?.cancel();
     _latencyProbeTimer = null;
     _restartLiveCheck(shouldRun && _sessionOutboundRemarks.length > 1);
@@ -1693,6 +1718,7 @@ class TunnelService {
   // смотрит видео, «следующий раз» не наступает никогда, и число на экране
   // застывает навсегда. После двух пропусков меряем несмотря на нагрузку.
   int _latencyProbeSkips = 0;
+  DateTime? _lastLatencyProbeAt;
 
   @visibleForTesting
   Future<void> debugRunLatencyProbe() => _runLatencyProbe(force: true);
@@ -1713,6 +1739,7 @@ class TunnelService {
     }
     _latencyProbeSkips = 0;
     _latencyProbeRunning = true;
+    _lastLatencyProbeAt = DateTime.now();
     try {
       // Один прогон за цикл. Раньше их было два подряд — ради устойчивости
       // числа на скачущей мобильной сети. С двумя десятками локаций в подписке
@@ -1908,7 +1935,11 @@ class TunnelService {
     }
   }
 
-  Future<void> _liveCheckTick() async {
+  /// [force] — проверка по сигналу ядра (соединения через активную локацию
+  /// падают одно за другим): без оглядки на счётчики трафика. Неудачные
+  /// соединения трафика не дают вовсе, и по счётчикам такой обрыв в кармане
+  /// выглядел как «телефон лежит без дела» — его замечали через минуты.
+  Future<void> _liveCheckTick({bool force = false}) async {
     if (_liveCheckRunning || !isConnected) return;
     if (_connectInProgress || _switchInProgress || _probeInProgress || isBusy) {
       return;
@@ -1918,14 +1949,16 @@ class TunnelService {
     final txDelta = _uploadTotalBytes - _liveCheckTxMark;
     _liveCheckRxMark = _downloadTotalBytes;
     _liveCheckTxMark = _uploadTotalBytes;
-    final lastProbe = _liveCheckLastProbeAt;
-    final action = liveCheckDecision(
-        rxDelta: rxDelta,
-        txDelta: txDelta,
-        foreground: _appInForeground,
-        sinceLastProbe:
-            lastProbe == null ? null : DateTime.now().difference(lastProbe));
-    if (action != LiveCheckAction.probe) return;
+    if (!force) {
+      final lastProbe = _liveCheckLastProbeAt;
+      final action = liveCheckDecision(
+          rxDelta: rxDelta,
+          txDelta: txDelta,
+          foreground: _appInForeground,
+          sinceLastProbe:
+              lastProbe == null ? null : DateTime.now().difference(lastProbe));
+      if (action != LiveCheckAction.probe) return;
+    }
     _liveCheckLastProbeAt = DateTime.now();
 
     final generation = _sessionGeneration;
@@ -1959,9 +1992,162 @@ class TunnelService {
       if (measured.isNotEmpty) {
         latencyByRemark.value = {...latencyByRemark.value, ...measured};
       }
+      if (measured.isEmpty) {
+        await _handleWholeSessionSilent();
+        return;
+      }
       await _recoverIfActiveOutboundIsDead(measured, immediate: true);
     } finally {
       _liveCheckRunning = false;
+    }
+  }
+
+  // ── Сигнал ядра: соединения через активную локацию падают ───────────────
+
+  static final _outboundFailure = RegExp(
+      r'open connection to \S+ using outbound/\w+\[out-(\d+)\]');
+
+  /// Номер outbound'а сессии, через который не открылось соединение
+  /// приложения (строка журнала ядра), или null.
+  @visibleForTesting
+  static int? failedOutboundIndex(String message) {
+    final match = _outboundFailure.firstMatch(message);
+    return match == null ? null : int.tryParse(match.group(1)!);
+  }
+
+  final List<DateTime> _activeFailures = <DateTime>[];
+  DateTime? _lastFailureCheckAt;
+
+  /// Три неудачных соединения через активную локацию за 20 секунд — повод
+  /// проверить связь сейчас, а не на очередном тике. Ничего не стоит, пока
+  /// всё работает: такие строки ядро пишет, только когда соединения падают.
+  void _noteOutboundFailure(String message) {
+    final index = failedOutboundIndex(message);
+    if (index == null || !isConnected) return;
+    final active = _activeOutboundIndex();
+    if (active != null && index != active) return;
+    final now = DateTime.now();
+    _activeFailures
+      ..add(now)
+      ..removeWhere((t) => now.difference(t) > const Duration(seconds: 20));
+    if (_activeFailures.length < 3) return;
+    final last = _lastFailureCheckAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 45)) {
+      return;
+    }
+    _lastFailureCheckAt = now;
+    _activeFailures.clear();
+    unawaited(_liveCheckTick(force: true));
+  }
+
+  int? _activeOutboundIndex() {
+    final name = connectedServerName.value;
+    if (name == null) return null;
+    final remark = _matchRemark(_sessionOutboundRemarks, name);
+    if (remark == null) return null;
+    final index = _sessionOutboundRemarks.indexOf(remark);
+    return index < 0 ? null : index;
+  }
+
+  // ── Вся сессия молчит ───────────────────────────────────────────────────
+
+  /// Идут ли собственные запросы приложения мимо туннеля в этой сессии
+  /// (приложение исключено из VPN или режим «только прокси»). Только тогда
+  /// можно спросить у сети напрямую, есть ли у телефона интернет.
+  bool _sessionAppBypassesTunnel = false;
+
+  /// Есть ли у телефона интернет мимо туннеля. null — спросить не получится.
+  @visibleForTesting
+  late Future<bool?> Function() directInternetProbe = _askDirectInternet;
+
+  Future<bool?> _askDirectInternet() async {
+    if (!_sessionAppBypassesTunnel) return null;
+    // Сайты из «белых списков» мобильных операторов — они открываются и
+    // тогда, когда всё остальное отрезано.
+    const urls = [
+      'http://ya.ru/',
+      'http://www.gosuslugi.ru/',
+      'http://connectivitycheck.gstatic.com/generate_204',
+    ];
+    final completer = Completer<bool>();
+    var pending = urls.length;
+    for (final url in urls) {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 4)
+        ..findProxy = (_) => 'DIRECT';
+      unawaited(client
+          .headUrl(Uri.parse(url))
+          .then((request) => request.close())
+          .timeout(const Duration(seconds: 5))
+          .then((_) {
+            if (!completer.isCompleted) completer.complete(true);
+          })
+          .catchError((_) {})
+          .whenComplete(() {
+            client.close(force: true);
+            pending--;
+            if (pending == 0 && !completer.isCompleted) {
+              completer.complete(false);
+            }
+          }));
+    }
+    return completer.future;
+  }
+
+  DateTime? _lastSessionRotationAt;
+  static const _sessionRotationGap = Duration(minutes: 10);
+
+  /// Ни одна локация сессии не ответила на замер.
+  ///
+  /// Если у телефона нет сети вовсе — ждём её, менять нечего. Но бывает,
+  /// что интернет есть, а все серверы сессии отрезаны: мобильный оператор
+  /// включает «белые списки», и проходят только обходные локации (в
+  /// подписке они идут как «LTE Обход | Глушилки»). В сессию же идут не
+  /// больше двенадцати самых быстрых, и обходных среди них может не быть —
+  /// раньше приложение так и оставалось без связи. Теперь оно пересобирает
+  /// сессию из остальных локаций подписки: молчащие уходят в конец.
+  Future<void> _handleWholeSessionSilent() async {
+    final remarks = _sessionOutboundRemarks;
+    final direct = await directInternetProbe();
+    if (direct != true) {
+      unawaited(AppLogService.instance.log(
+          'Ни одна из ${remarks.length} локаций сессии не ответила'
+          '${direct == false ? ', и напрямую интернет тоже не открывается — '
+              'у телефона нет сети, жду её' : ''}',
+          level: AppLogLevel.warning));
+      return;
+    }
+    final now = DateTime.now();
+    final last = _lastSessionRotationAt;
+    if (last != null && now.difference(last) < _sessionRotationGap) {
+      unawaited(AppLogService.instance.log(
+          'Интернет у телефона есть, а локации сессии молчат; сессию уже '
+          'пересобирал недавно — жду',
+          level: AppLogLevel.warning));
+      return;
+    }
+    final connectionString = _lastConnectionString;
+    if (connectionString == null || !isConnected) return;
+    if (_connectInProgress || _switchInProgress || _probeInProgress) return;
+    _lastSessionRotationAt = now;
+    unawaited(AppLogService.instance.log(
+        'Интернет у телефона есть, а ни одна из ${remarks.length} локаций '
+        'сессии не отвечает — похоже, оператор их режет. Пересобираю сессию '
+        'из других локаций подписки',
+        level: AppLogLevel.warning));
+    await _markLocationsDead(remarks);
+    final preferred = _lastPreferredHostName;
+    _switchInProgress = true;
+    try {
+      await disconnect();
+      await connect(connectionString,
+          preferredHostName: preferred, interactive: _appInForeground);
+    } catch (e) {
+      unawaited(AppLogService.instance.log(
+          'Пересобрать сессию не удалось: $e',
+          level: AppLogLevel.error));
+    } finally {
+      _switchInProgress = false;
     }
   }
 
@@ -3050,6 +3236,7 @@ class TunnelService {
       if (splitTunnelMode != 'include') ...selectedPackages,
       if (selfPackage != null) selfPackage,
     }.toList();
+    _sessionAppBypassesTunnel = proxyOnly || selfPackage != null;
 
     // Время по этапам подготовки — в журнал вместе с итогом. Одно общее
     // число («9796 мс») не говорит, чего ждали: разрешений, снятия
@@ -3815,7 +4002,7 @@ class TunnelService {
         sessionOrder.map((e) => e.remark).toList(growable: false);
     // Порядок outbound'ов известен только здесь: тикер, запущенный событием
     // "connected" чуть раньше, не мог знать, есть ли группа.
-    _restartLatencyProbe(true);
+    _restartLatencyProbe(true, newSession: true);
     _lastConnectionString = connectionString;
     _lastPreferredHostName = preferredHostName;
     _persistSessionRoute();
@@ -3894,10 +4081,7 @@ class TunnelService {
       latencyByRemark.value = {...latencyByRemark.value, ...measured};
     }
     if (measured.isEmpty) {
-      unawaited(AppLogService.instance.log(
-          'Фоновая проверка: не ответила ни одна локация — похоже, нет сети '
-          'у самого телефона; остаёмся на выбранной',
-          level: AppLogLevel.warning));
+      await _handleWholeSessionSilent();
       return;
     }
     await _recoverIfActiveOutboundIsDead(measured, immediate: true);

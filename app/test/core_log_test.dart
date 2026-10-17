@@ -102,6 +102,21 @@ void main() {
     });
   });
 
+  test('неудачное соединение через outbound сессии распознаётся', () {
+    expect(
+        TunnelService.failedOutboundIndex('ERROR[0880] [1 5.0s] connection: '
+            'open connection to 57.144.62.3:443 using outbound/vless[out-0]: '
+            'dial tcp 94.183.195.4:20029: i/o timeout'),
+        0);
+    expect(
+        TunnelService.failedOutboundIndex('ERROR[3237] [4 15.1s] connection: '
+            'open connection to 54.177.50.65:443 using '
+            'outbound/vless[out-11]: context deadline exceeded'),
+        11);
+    expect(TunnelService.failedOutboundIndex('WARN dns: exchange failed'),
+        isNull);
+  });
+
   group('шум ядра в журнал не идёт', () {
     test('мониторинг форка и закрытые нами соединения — шум', () {
       for (final m in [
