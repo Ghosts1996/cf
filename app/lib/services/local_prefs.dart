@@ -185,11 +185,13 @@ class PrefKeys {
   static const connectAfterRestartAt = 'core.connect_after_restart_at';
 
   /// Проверка обновлений приложения (UpdateService): когда спрашивали
-  /// последний раз, какая сборка оказалась последней и какую пользователь
-  /// скрыл кнопкой «×» — для неё плашка больше не показывается.
+  /// последний раз, какая сборка оказалась последней, какую пользователь
+  /// скрыл кнопкой «×» — для неё плашка больше не показывается, — и о какой
+  /// уже сообщили плашкой или уведомлением.
   static const updateLastCheckMs = 'update.last_check_ms';
   static const updateLatestBuild = 'update.latest_build';
   static const updateDismissedBuild = 'update.dismissed_build';
+  static const updateAnnouncedBuild = 'update.announced_build';
   static const splitTunnelBypass = 'split_tunnel.bypassed_packages';
   // 'exclude' — выбранные приложения идут в обход VPN, остальные через
   // туннель; 'include' — через VPN идут только выбранные. Читается в

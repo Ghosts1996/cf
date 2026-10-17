@@ -60,6 +60,8 @@ class _ConnectScreenState extends State<ConnectScreen>
   // туннеля".
   int? _connectedKeyId;
   Timer? _keyWatchTimer;
+  // Проверка новой версии, пока приложение запущено (см. initState).
+  Timer? _updateTimer;
   // Ключ, вставленный вручную на экране "Мои ключи" (ManualKeyStore). Если
   // задан, используется вместо ключа из личного кабинета — см.
   // _effectiveConnectionString.
@@ -119,6 +121,15 @@ class _ConnectScreenState extends State<ConnectScreen>
       if (!mounted) return;
       unawaited(UpdateInstaller.instance.cleanup());
       unawaited(UpdateService.instance.check(force: true));
+    });
+    // Пока экран открыт — раз в пять минут: плашка появляется почти сразу
+    // после выхода релиза. Свёрнутое приложение спрашивает раз в час и о
+    // найденной версии сообщает системным уведомлением (_announceUpdate).
+    _updateTimer = Timer.periodic(UpdateService.checkInterval, (_) {
+      final updates = UpdateService.instance;
+      unawaited(_appVisible
+          ? updates.check(force: true)
+          : updates.check(maxAge: UpdateService.backgroundCheckInterval));
     });
     SelectedServer.hostName.addListener(_onTunnelStatus);
     SelectedServer.displayName.addListener(_onTunnelStatus);
@@ -199,6 +210,8 @@ class _ConnectScreenState extends State<ConnectScreen>
     // меняется под контролем _toggleConnection() — лезть туда с
     // параллельной синхронизацией незачем.
     unawaited(UpdateService.instance.check());
+    // Уведомление о новой версии больше не нужно: на экране о ней плашка.
+    VpnNotificationService.instance.clearUpdateNotice();
     // Вернулись из настроек, где разрешали установку обновлений, — продолжаем
     // установку сами.
     unawaited(UpdateInstaller.instance.continueIfPermitted());
@@ -208,6 +221,18 @@ class _ConnectScreenState extends State<ConnectScreen>
 
   void _onUpdateAvailable() {
     if (mounted) setState(() {});
+    unawaited(_announceUpdate());
+  }
+
+  /// О каждой новой версии сообщаем один раз: на экране это плашка, а если
+  /// приложение свёрнуто — системное уведомление, нажатие на которое откроет
+  /// приложение с той же плашкой.
+  Future<void> _announceUpdate() async {
+    final update = UpdateService.instance.available.value;
+    if (update == null) return;
+    if (!await UpdateService.instance.claimAnnouncement(update)) return;
+    if (_appVisible) return;
+    VpnNotificationService.instance.showUpdateNotice();
   }
 
   /// Запасной путь: открыть файл обновления в браузере. Нужен, только если
@@ -305,6 +330,7 @@ class _ConnectScreenState extends State<ConnectScreen>
     ManualKeyStore.instance.notifier.removeListener(_onManualKeyChanged);
     _keyWatchTimer?.cancel();
     _latencyTimer?.cancel();
+    _updateTimer?.cancel();
     _connectivitySub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();

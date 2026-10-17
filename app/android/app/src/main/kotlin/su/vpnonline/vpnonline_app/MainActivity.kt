@@ -2,6 +2,7 @@ package su.vpnonline.vpnonline_app
 
 import android.Manifest
 import android.app.ActivityManager
+import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -18,13 +19,13 @@ import android.os.Build
 import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
-import android.widget.RemoteViews
 import androidx.annotation.NonNull
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.io.File
+import java.util.Locale
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -129,6 +130,14 @@ class MainActivity : FlutterActivity() {
                     }
                     "clearVpnNotification" -> {
                         clearVpnNotification()
+                        result.success(null)
+                    }
+                    "showUpdateNotification" -> {
+                        showUpdateNotification(call)
+                        result.success(null)
+                    }
+                    "clearUpdateNotification" -> {
+                        clearUpdateNotification()
                         result.success(null)
                     }
                     "isCoreServiceAlive" -> result.success(isCoreServiceAlive())
@@ -237,14 +246,35 @@ class MainActivity : FlutterActivity() {
     // ── Уведомление VPN ──────────────────────────────────────────────────
 
     /// Уведомление работающего VPN рисует модуль ядра, и выглядит оно бедно:
-    /// цветная иконка приложения вместо значка (Android превращает её в пятно
-    /// в кружке) и одна строка «VPN подключён». Поменять это в самом модуле
-    /// значит трогать его ветку, поэтому приложение обновляет то же
-    /// уведомление само: тот же канал и тот же номер, что у модуля, — Android
-    /// подменяет содержимое, а уведомление остаётся привязанным к сервису.
+    /// квадратная иконка приложения в кружке и одна строка «VPN подключён».
+    /// Поменять это в самом модуле значит трогать его ветку, поэтому
+    /// приложение обновляет то же уведомление само: тот же канал и тот же
+    /// номер, что у модуля, — Android подменяет содержимое, а уведомление
+    /// остаётся привязанным к сервису.
     private val vpnNotificationId = 1001
     private val vpnNotificationChannel = "singbox_service"
     private val brandColor = 0xFF8B5CF6.toInt()
+
+    /// Неоновый фиолетовый логотипа — цвет кружка вокруг него в шапке
+    /// уведомления. Система всё равно осветлит его до контраста с фоном
+    /// шторки, поэтому тёмный здесь не задать.
+    private val logoColor = 0xFFB026FF.toInt()
+
+    /// ColorOS и OxygenOS (OPPO, OnePlus, realme) рисуют цветной значок
+    /// уведомления как есть, в кружке, — там значком стоит сам логотип, по
+    /// кругу. Остальные прошивки (Pixel, Samsung и другие) красят значок в
+    /// один цвет, и от логотипа осталось бы пятно: там чёткий глобус.
+    private val colorNotificationIcon: Boolean by lazy {
+        listOf(Build.MANUFACTURER, Build.BRAND).any {
+            it.orEmpty().lowercase(Locale.ROOT) in setOf("oneplus", "oppo", "realme")
+        }
+    }
+
+    private val notificationIcon: Int
+        get() = if (colorNotificationIcon) R.drawable.ic_stat_logo else R.drawable.ic_stat_vpn
+
+    private val notificationColor: Int
+        get() = if (colorNotificationIcon) logoColor else brandColor
 
     /// Работает ли сервис ядра. Без него уведомление не публикуем: иначе
     /// после отключения в шторке остался бы «VPN подключён» без VPN.
@@ -262,13 +292,7 @@ class MainActivity : FlutterActivity() {
             val stopLabel = call.argument<String>("stopLabel") ?: "Отключить"
             val subText = call.argument<String>("subText")
 
-            val openApp = packageManager.getLaunchIntentForPackage(packageName)?.let {
-                it.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                PendingIntent.getActivity(
-                    this, 0, it,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                )
-            }
+            val openApp = openAppIntent()
             // Та же кнопка «Отключить», что ставит модуль: его приёмник
             // останавливает сервис ядра.
             val stop = PendingIntent.getBroadcast(
@@ -281,31 +305,19 @@ class MainActivity : FlutterActivity() {
             )
             // На экране блокировки — без сервера и ключа.
             val lockScreen = NotificationCompat.Builder(this, vpnNotificationChannel)
-                .setSmallIcon(R.drawable.ic_stat_vpn)
-                .setColor(brandColor)
+                .setSmallIcon(notificationIcon)
+                .setColor(notificationColor)
                 .setContentTitle("VPN подключён")
                 .build()
 
-            // Своё оформление: цветной логотип по кругу слева. В маленький
-            // значок шапки цветную картинку не поставить — Android рисует его
-            // одним цветом, — поэтому логотип живёт в самом уведомлении.
-            val collapsed = RemoteViews(packageName, R.layout.notification_vpn_small).apply {
-                setTextViewText(R.id.title, title)
-                setTextViewText(R.id.text, text ?: "")
-            }
-            val expanded = RemoteViews(packageName, R.layout.notification_vpn_big).apply {
-                setTextViewText(R.id.title, title)
-                setTextViewText(R.id.details, details ?: text ?: "")
-            }
-
+            // Одна картинка — значок в шапке (см. colorNotificationIcon), а
+            // ниже только текст в системной раскладке.
             val builder = NotificationCompat.Builder(this, vpnNotificationChannel)
-                .setSmallIcon(R.drawable.ic_stat_vpn)
-                .setColor(brandColor)
+                .setSmallIcon(notificationIcon)
+                .setColor(notificationColor)
                 .setContentTitle(title)
                 .setContentText(text)
-                .setStyle(NotificationCompat.DecoratedCustomViewStyle())
-                .setCustomContentView(collapsed)
-                .setCustomBigContentView(expanded)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(details ?: text))
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setSilent(true)
@@ -332,12 +344,69 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /// Нажатие на уведомление открывает приложение.
+    private fun openAppIntent(): PendingIntent? =
+        packageManager.getLaunchIntentForPackage(packageName)?.let {
+            it.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            PendingIntent.getActivity(
+                this, 0, it,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        }
+
     /// Убирает уведомление, оставшееся без сервиса. Пока сервис работает
     /// (например, проверка серверов), не трогаем: это его уведомление.
     private fun clearVpnNotification() {
         if (coreServiceRunning()) return
         try {
             getSystemService(NotificationManager::class.java).cancel(vpnNotificationId)
+        } catch (_: Exception) {
+        }
+    }
+
+    // ── Уведомление о новой версии ───────────────────────────────────────
+
+    /// Свёрнутое приложение само узнаёт о новой версии
+    /// (services/update_service.dart) и сообщает о ней здесь — один раз на
+    /// сборку. Нажатие открывает приложение, где уже ждёт кнопка «Обновить».
+    private val updateNotificationId = 1002
+    private val updateNotificationChannel = "vpnonline_updates"
+
+    private fun showUpdateNotification(call: MethodCall) {
+        try {
+            val title = call.argument<String>("title") ?: return
+            val text = call.argument<String>("text")
+            val channelName = call.argument<String>("channelName") ?: "Обновления"
+            val manager = getSystemService(NotificationManager::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.createNotificationChannel(
+                    NotificationChannel(
+                        updateNotificationChannel,
+                        channelName,
+                        NotificationManager.IMPORTANCE_DEFAULT,
+                    )
+                )
+            }
+            val builder = NotificationCompat.Builder(this, updateNotificationChannel)
+                .setSmallIcon(notificationIcon)
+                .setColor(notificationColor)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            openAppIntent()?.let { builder.setContentIntent(it) }
+            manager.notify(updateNotificationId, builder.build())
+        } catch (_: Exception) {
+            // Нет разрешения на уведомления — о версии скажет плашка в
+            // приложении.
+        }
+    }
+
+    private fun clearUpdateNotification() {
+        try {
+            getSystemService(NotificationManager::class.java).cancel(updateNotificationId)
         } catch (_: Exception) {
         }
     }

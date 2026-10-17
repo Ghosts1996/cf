@@ -1,20 +1,21 @@
 // Содержимое уведомления работающего VPN в шторке Android.
 //
-// Само уведомление создаёт модуль ядра — с цветной иконкой приложения
-// (Android делает из неё пятно в кружке) и единственной строкой «VPN
-// подключён». Приложение обновляет то же уведомление своим содержимым (см.
-// MainActivity.updateVpnNotification): аккуратный значок-щит, сервер, пинг,
-// сколько дней осталось ключу, время сессии и кнопка «Отключить».
+// Само уведомление создаёт модуль ядра — с квадратной иконкой приложения в
+// кружке и единственной строкой «VPN подключён». Приложение обновляет то же
+// уведомление своим содержимым (см. MainActivity.updateVpnNotification):
+// логотип значком, сервер, пинг, сколько дней осталось ключу, трафик, время
+// сессии и кнопка «Отключить».
 //
-// Обновляется только когда меняется показанное: сервер, пинг, ключ. Время
-// сессии система считает сама, без обновлений каждую секунду — шторка не
-// перерисовывается впустую и батарея не тратится.
+// Обновляется только когда меняется показанное, а трафик — раз в
+// [VpnNotificationService.trafficRefresh] и только когда шторку можно увидеть:
+// экран включён, а приложение не на экране. Время сессии система считает
+// сама — шторка не перерисовывается впустую и батарея не тратится.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 
 import '../l10n/app_language.dart';
 import 'locale_service.dart';
@@ -36,6 +37,7 @@ class VpnNotificationService {
   bool _screenOn = true;
 
   bool _started = false;
+  AppLifecycleListener? _lifecycle;
   DateTime? _keyExpiry;
   String? _lastPosted;
   Timer? _debounce;
@@ -58,6 +60,11 @@ class VpnNotificationService {
       if (_screenOn) _schedule();
     });
     unawaited(_readScreen());
+    // Ушли из приложения или опустили шторку поверх него (inactive) — сразу
+    // свежие числа: пока приложение было на экране, трафик в шторку не шёл.
+    _lifecycle = AppLifecycleListener(onStateChange: (state) {
+      if (state != AppLifecycleState.resumed) _scheduleTraffic();
+    });
     final tunnel = TunnelService.instance;
     tunnel.status.addListener(_onStatus);
     tunnel.connectedServerName.addListener(_schedule);
@@ -110,8 +117,12 @@ class VpnNotificationService {
     }
   }
 
+  /// Приложение открыто и шторка поднята — уведомления не видно.
+  static bool get _appOnScreen =>
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+
   void _scheduleTraffic() {
-    if (!_screenOn) return;
+    if (!_screenOn || _appOnScreen) return;
     if (_debounce?.isActive ?? false) return; // обновление и так в пути
     final last = _lastPostAt;
     final wait = last == null
@@ -151,6 +162,31 @@ class VpnNotificationService {
     await _invoke('updateVpnNotification', payload);
   }
 
+  // ── Новая версия ────────────────────────────────────────────────────────
+
+  /// Системное уведомление о новой версии — когда она нашлась, пока
+  /// приложение свёрнуто (см. ConnectScreen._announceUpdate).
+  void showUpdateNotice() {
+    if (!Platform.isAndroid) return;
+    final english = LocaleService.instance.language == AppLanguage.en;
+    unawaited(_invoke('showUpdateNotification', {
+      'title': english
+          ? 'VPNonLine update available'
+          : 'Вышла новая версия VPNonLine',
+      'text': english
+          ? 'Tap to open the app and update.'
+          : 'Нажмите, чтобы открыть приложение и обновиться.',
+      'channelName': english ? 'Updates' : 'Обновления',
+    }));
+  }
+
+  /// Убрать уведомление о новой версии: приложение открыто, о ней говорит
+  /// плашка.
+  void clearUpdateNotice() {
+    if (!Platform.isAndroid) return;
+    unawaited(_invoke('clearUpdateNotification'));
+  }
+
   Future<void> _invoke(String method, [Object? args]) async {
     try {
       await _channel.invokeMethod<void>(method, args);
@@ -162,6 +198,7 @@ class VpnNotificationService {
 
   @visibleForTesting
   void debugStop() {
+    _lifecycle?.dispose();
     _hourly?.cancel();
     _debounce?.cancel();
   }

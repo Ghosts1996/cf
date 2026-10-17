@@ -131,15 +131,7 @@ class _AuthScreenState extends State<AuthScreen> {
               Center(
                 child: Column(
                   children: [
-                    Container(
-                      width: 56,
-                      height: 56,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: AppColors.violet2, width: 2),
-                        boxShadow: AppColors.glow(AppColors.violet2, blur: 16, alpha: 0.6),
-                      ),
-                    ),
+                    const AppLogo(size: 88, glow: 18),
                     const SizedBox(height: 12),
                     RichText(
                       text: TextSpan(

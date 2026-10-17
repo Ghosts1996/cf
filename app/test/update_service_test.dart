@@ -28,6 +28,7 @@ void main() {
       PrefKeys.updateLastCheckMs,
       PrefKeys.updateLatestBuild,
       PrefKeys.updateDismissedBuild,
+      PrefKeys.updateAnnouncedBuild,
     ]) {
       await LocalPrefs.instance.setInt(key, 0);
     }
@@ -187,18 +188,47 @@ void main() {
     expect(update?.build, 340);
   });
 
-  test('чаще раза в час не спрашивает, но плашку помнит', () async {
+  test('чаще раза в пять минут не спрашивает, но плашку помнит', () async {
+    final calls = <Uri>[];
+    final service = UpdateService(
+        probe: redirectTo(latestTag, calls: calls), currentBuild: 330, now: now);
+    await service.check();
+    clock = clock.add(const Duration(minutes: 3));
+    final again = await service.check();
+    expect(calls.length, 1, reason: 'повторный запрос раньше срока');
+    expect(again?.build, 340, reason: 'найденное обновление не должно теряться');
+    clock = clock.add(const Duration(minutes: 3));
+    await service.check();
+    expect(calls.length, 2);
+  });
+
+  test('свёрнутое приложение спрашивает раз в час', () async {
     final calls = <Uri>[];
     final service = UpdateService(
         probe: redirectTo(latestTag, calls: calls), currentBuild: 330, now: now);
     await service.check();
     clock = clock.add(const Duration(minutes: 40));
-    final again = await service.check();
-    expect(calls.length, 1, reason: 'повторный запрос раньше срока');
-    expect(again?.build, 340, reason: 'найденное обновление не должно теряться');
+    await service.check(maxAge: UpdateService.backgroundCheckInterval);
+    expect(calls.length, 1);
     clock = clock.add(const Duration(minutes: 30));
-    await service.check();
+    await service.check(maxAge: UpdateService.backgroundCheckInterval);
     expect(calls.length, 2);
+  });
+
+  test('о каждой версии сообщает один раз', () async {
+    var tag = latestTag;
+    final service = UpdateService(
+        probe: (_) async => (status: 302, location: tag),
+        currentBuild: 330,
+        now: now);
+    final first = await service.check();
+    expect(await service.claimAnnouncement(first!), isTrue);
+    final again = await service.check(force: true);
+    expect(await service.claimAnnouncement(again!), isFalse,
+        reason: 'та же сборка — второго уведомления нет');
+    tag = 'https://github.com/Ghosts1996/cf/releases/download/build-355/app-release.apk';
+    final next = await service.check(force: true);
+    expect(await service.claimAnnouncement(next!), isTrue);
   });
 
   test('при запуске спрашивает всегда: релиз, вышедший после прошлой '
@@ -209,9 +239,9 @@ void main() {
         currentBuild: 342,
         now: now);
     expect(await service.check(), isNull);
-    // Через десять минут выходит сборка 343, приложение перезапускают.
+    // Через две минуты выходит сборка 343, приложение перезапускают.
     tag = 'https://github.com/Ghosts1996/cf/releases/download/build-343/app-release.apk';
-    clock = clock.add(const Duration(minutes: 10));
+    clock = clock.add(const Duration(minutes: 2));
     expect(await service.check(), isNull,
         reason: 'без force — ещё пауза между проверками');
     final update = await service.check(force: true);

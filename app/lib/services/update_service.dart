@@ -2,9 +2,9 @@
 //
 // Приложение ставится не из магазина, а файлом APK, и само о новой версии
 // узнать не могло: пользователь сидел на старой сборке, пока ему не напишут в
-// боте. Теперь раз в несколько часов приложение спрашивает у GitHub, какой
-// релиз последний, и если он новее установленного — показывает плашку с
-// кнопкой «Обновить».
+// боте. Теперь приложение само спрашивает у GitHub, какой релиз последний, и
+// если он новее установленного — показывает плашку с кнопкой «Обновить», а
+// свёрнутое — системное уведомление.
 //
 // Почему не API GitHub, а переадресация. У API лимит — 60 запросов в час на
 // один IP без авторизации. Все клиенты, подключённые к одному серверу VPN,
@@ -77,11 +77,17 @@ class UpdateService {
   /// Тег релиза: `build-<номер сборки>`.
   static const tagPrefix = 'build-';
 
-  /// Как часто спрашивать при возврате в приложение. При запуске приложение
-  /// спрашивает всегда (см. connect_screen.dart). Час — чтобы свёрнутое на
-  /// весь день приложение увидело релиз в тот же день, но не дёргало сеть на
-  /// каждое переключение между приложениями.
-  static const checkInterval = Duration(hours: 1);
+  /// Как часто спрашивать, пока приложение на экране, и при возврате в него.
+  /// При запуске приложение спрашивает всегда (см. connect_screen.dart).
+  /// Запрос лёгкий — один заголовок переадресации, — так что пять минут ничего
+  /// не стоят, а вышедший релиз виден почти сразу. С часовой паузой плашка
+  /// появлялась через час после выхода, если приложение недавно открывали.
+  static const checkInterval = Duration(minutes: 5);
+
+  /// Как часто спрашивать из свёрнутого приложения (пока работает VPN,
+  /// процесс жив). Нашлась новая версия — системное уведомление, см.
+  /// [claimAnnouncement].
+  static const backgroundCheckInterval = Duration(hours: 1);
 
   static const _requestTimeout = Duration(seconds: 8);
 
@@ -145,9 +151,13 @@ class UpdateService {
 
   /// Проверяет, не вышла ли новая версия, и публикует её в [available].
   ///
-  /// [force] — не смотреть на паузу между проверками. Ошибки сети наружу не
-  /// выходят: проверка обновлений не должна мешать ничему остальному.
-  Future<AppUpdate?> check({bool force = false}) async {
+  /// [force] — не смотреть на паузу между проверками; [maxAge] — сколько
+  /// ждать после прошлой проверки. Ошибки сети наружу не выходят: проверка
+  /// обновлений не должна мешать ничему остальному.
+  Future<AppUpdate?> check({
+    bool force = false,
+    Duration maxAge = checkInterval,
+  }) async {
     // Сборка без номера сравнивать себя ни с чем не может.
     if (_currentBuild <= 0) return null;
 
@@ -155,7 +165,7 @@ class UpdateService {
     if (!force) {
       final lastMs = await prefs.getInt(PrefKeys.updateLastCheckMs, fallback: 0);
       final last = DateTime.fromMillisecondsSinceEpoch(lastMs);
-      if (_now().difference(last) < checkInterval) {
+      if (_now().difference(last) < maxAge) {
         // Проверяли недавно — показываем то, что нашли тогда.
         return _publishRemembered();
       }
@@ -184,6 +194,18 @@ class UpdateService {
         PrefKeys.updateLastCheckMs, _now().millisecondsSinceEpoch);
     await prefs.setInt(PrefKeys.updateLatestBuild, latest ?? 0);
     return _publishRemembered();
+  }
+
+  /// Сообщали ли уже о сборке [update] — плашкой на экране или системным
+  /// уведомлением. Первый вызов для сборки отвечает true и запоминает её:
+  /// о каждой версии уведомление приходит один раз.
+  Future<bool> claimAnnouncement(AppUpdate update) async {
+    final prefs = LocalPrefs.instance;
+    final announced =
+        await prefs.getInt(PrefKeys.updateAnnouncedBuild, fallback: 0);
+    if (announced >= update.build) return false;
+    await prefs.setInt(PrefKeys.updateAnnouncedBuild, update.build);
+    return true;
   }
 
   /// Скрыть плашку для этой версии. Следующая версия покажется снова.

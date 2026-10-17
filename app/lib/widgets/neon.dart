@@ -7,7 +7,34 @@ import '../theme.dart';
 /// переключатели, кнопки-пилюли, строка сервера. Один источник правды
 /// для стиля — экраны просто собирают их.
 
-/// Шапка экрана: кольцо-лого + "VPN"+"onLine" + кнопка справа (меню/назад).
+/// Логотип приложения по кругу (assets/icon/logo_round.png — вырезан из
+/// иконки приложения по внешнему кольцу) с мягким неоновым свечением.
+class AppLogo extends StatelessWidget {
+  const AppLogo({super.key, this.size = 32, this.glow = 10});
+
+  final double size;
+  final double glow;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        boxShadow: AppColors.glow(AppColors.violet2, blur: glow, alpha: 0.55),
+      ),
+      child: Image.asset(
+        'assets/icon/logo_round.png',
+        width: size,
+        height: size,
+        filterQuality: FilterQuality.medium,
+      ),
+    );
+  }
+}
+
+/// Шапка экрана: логотип + "VPN"+"onLine" + кнопка справа (меню/назад).
 class AppHeader extends StatelessWidget {
   const AppHeader({
     super.key,
@@ -56,16 +83,8 @@ class AppHeader extends StatelessWidget {
                             size: 16, color: AppColors.textDim),
                       ),
                     ),
-                  Container(
-                    width: 26,
-                    height: 26,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: AppColors.violet2, width: 2),
-                      boxShadow: AppColors.glow(AppColors.violet2, blur: 10, alpha: 0.7),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
+                  const AppLogo(size: 32),
+                  const SizedBox(width: 9),
                   RichText(
                     text: TextSpan(
                       style: orbitron(fontSize: 15, fontWeight: FontWeight.w700),
