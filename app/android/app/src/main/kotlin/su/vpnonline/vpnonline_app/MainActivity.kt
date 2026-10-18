@@ -10,7 +10,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.content.res.Configuration
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.TrafficStats
@@ -285,17 +284,12 @@ class MainActivity : FlutterActivity() {
     private val brandColor = 0xFF8B5CF6.toInt()
 
     /// Цвет кружка, который шторка рисует вокруг значка-логотипа. Закрыть
-    /// этот кружок картинкой нельзя: шторка обрезает значок по квадрату
-    /// внутри него. Поэтому кружок — цвета самой карточки уведомления
-    /// (тёмной или светлой темы), и вокруг логотипа не видно бортика. Если
-    /// прошивка осветлит его ради контраста, бортик останется
-    /// нейтрально-серым, как было.
-    private val logoColor: Int
-        get() {
-            val night = (resources.configuration.uiMode and
-                Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
-            return if (night) 0xFF2A2A2A.toInt() else 0xFFFFFFFF.toInt()
-        }
+    /// кружок картинкой нельзя: значок рисуется только в квадрате 16 dp
+    /// внутри кружка 24 dp, всё больше обрезается. Тёмным кружок тоже не
+    /// сделать: тёмный цвет шторка сама осветляет до серого ради контраста
+    /// с фоном. Поэтому — фиолетовый в цвет неонового кольца логотипа, ровно
+    /// той яркости, которую шторка оставляет как есть.
+    private val logoColor = 0xFFB473FA.toInt()
 
     /// Прошивки с отдельной шторкой уведомлений (Xiaomi, OPPO, OnePlus,
     /// realme, vivo, Honor, Tecno, Infinix и другие) рисуют цветной значок
