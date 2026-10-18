@@ -223,6 +223,11 @@ const Map<String, String> translationsEn = {
   'Протокол': 'Protocol',
   'Политика логов': 'Log policy',
   'No-logs': 'No-logs',
+  'Проверить обновления': 'Check for updates',
+  'Проверяю обновления…': 'Checking for updates…',
+  'У вас последняя версия': 'You have the latest version',
+  'Не удалось проверить обновления — проверьте интернет и попробуйте ещё раз.':
+      'Could not check for updates — check your internet connection and try again.',
 
   // ── topup_screen.dart ───────────────────────────────────────────────────
   'Введи сумму от 10 ₽': 'Enter an amount of at least 10 ₽',

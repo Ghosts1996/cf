@@ -1,8 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../theme.dart';
 import '../widgets/neon.dart';
+import '../widgets/update_banner.dart';
 import '../services/locale_service.dart';
+import '../services/update_installer.dart';
+import '../services/update_service.dart';
 
 /// Реальные контакты бренда VPNonLine.
 const websiteUrl = 'https://vpnonline.su';
@@ -88,7 +93,7 @@ class SupportScreen extends StatelessWidget {
               NeonCard(
                 child: Column(
                   children: [
-                    _InfoRow(k: tr('Версия'), v: '1.0.0'),
+                    _InfoRow(k: tr('Версия'), v: appVersionLabel),
                     const SizedBox(height: 8),
                     _InfoRow(k: tr('Протокол'), v: 'VLESS / Reality'),
                     const SizedBox(height: 8),
@@ -96,6 +101,8 @@ class SupportScreen extends StatelessWidget {
                   ],
                 ),
               ),
+              const SizedBox(height: 12),
+              const _UpdateSection(),
             ],
           ),
         ),
@@ -151,6 +158,102 @@ class _ContactCard extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Проверка обновлений по кнопке. Нашлась новая версия — здесь же та же
+/// плашка, что на главном экране: загрузка со шкалой и установка.
+class _UpdateSection extends StatefulWidget {
+  const _UpdateSection();
+
+  @override
+  State<_UpdateSection> createState() => _UpdateSectionState();
+}
+
+class _UpdateSectionState extends State<_UpdateSection> {
+  bool _checking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    UpdateService.instance.available.addListener(_changed);
+    UpdateInstaller.instance.state.addListener(_changed);
+  }
+
+  @override
+  void dispose() {
+    UpdateService.instance.available.removeListener(_changed);
+    UpdateInstaller.instance.state.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _check() async {
+    if (_checking) return;
+    setState(() => _checking = true);
+    final update = await UpdateService.instance.checkNow();
+    if (!mounted) return;
+    setState(() => _checking = false);
+    // Нашлась — на экране уже плашка с кнопкой «Обновить».
+    if (update != null) return;
+    final failed = UpdateService.instance.lastCheckFailed;
+    ScaffoldMessenger.of(context).showSnackBar(appSnack(
+      failed
+          ? tr('Не удалось проверить обновления — проверьте интернет и '
+              'попробуйте ещё раз.')
+          : '${tr('У вас последняя версия')} — $appVersionLabel',
+      error: failed,
+    ));
+  }
+
+  /// Запасной путь, если загрузка внутри приложения не удалась.
+  Future<void> _openInBrowser(AppUpdate update) async {
+    var opened = false;
+    for (final url in [update.downloadUrl, UpdateService.latestReleasePage]) {
+      try {
+        opened = await launchUrl(url, mode: LaunchMode.externalApplication);
+      } catch (_) {}
+      if (opened) return;
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          appSnack(tr('Не удалось открыть ссылку на обновление.'), error: true));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final update = UpdateService.instance.available.value;
+    if (update != null) {
+      return UpdateBanner(
+        progress: UpdateInstaller.instance.state.value,
+        onUpdate: () =>
+            unawaited(UpdateInstaller.instance.downloadAndInstall(update)),
+        onInstall: () => unawaited(UpdateInstaller.instance.install()),
+        onCancel: UpdateInstaller.instance.cancel,
+        onOpenInBrowser: () => _openInBrowser(update),
+        onDismiss: () => unawaited(UpdateService.instance.dismiss()),
+      );
+    }
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        onPressed: _checking ? null : _check,
+        icon: _checking
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.system_update_rounded,
+                size: 18, color: AppColors.violetGlow),
+        label: Text(
+            _checking ? tr('Проверяю обновления…') : tr('Проверить обновления')),
       ),
     );
   }

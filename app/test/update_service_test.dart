@@ -248,6 +248,49 @@ void main() {
     expect(update?.build, 343);
   });
 
+  test('версия для «О приложении» — с номером сборки', () {
+    expect(appVersionLabelFor(366), '1.0.366');
+    expect(appVersionLabelFor(0), '1.0.0');
+  });
+
+  test('кнопка «Проверить обновления» показывает и скрытую «×» версию',
+      () async {
+    final calls = <Uri>[];
+    final service = UpdateService(
+        probe: redirectTo(latestTag, calls: calls), currentBuild: 330, now: now);
+    await service.check();
+    await service.dismiss();
+    expect(service.available.value, isNull);
+    final update = await service.checkNow();
+    expect(update?.build, 340);
+    expect(calls.length, 2, reason: 'по кнопке — всегда в сеть');
+  });
+
+  test('нет сети или GitHub отвечает 5xx — «не удалось проверить», а '
+      'найденная раньше версия не теряется', () async {
+    var status = 302;
+    var fail = false;
+    final service = UpdateService(
+        probe: (_) async {
+          if (fail) throw Exception('нет сети');
+          return (status: status, location: latestTag);
+        },
+        currentBuild: 330,
+        now: now);
+    expect((await service.checkNow())?.build, 340);
+    expect(service.lastCheckFailed, isFalse);
+    status = 503;
+    expect((await service.checkNow())?.build, 340);
+    expect(service.lastCheckFailed, isTrue);
+    fail = true;
+    await service.checkNow();
+    expect(service.lastCheckFailed, isTrue);
+    fail = false;
+    status = 302;
+    await service.checkNow();
+    expect(service.lastCheckFailed, isFalse);
+  });
+
   test('«×» скрывает эту версию, а следующая показывается снова', () async {
     var tag = latestTag;
     final service = UpdateService(

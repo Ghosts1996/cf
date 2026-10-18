@@ -31,6 +31,14 @@ import 'local_prefs.dart';
 /// ей не с чем.
 const int kAppBuild = int.fromEnvironment('APP_BUILD', defaultValue: 0);
 
+/// Версия для показа в «О приложении»: «1.0.<номер сборки>». Номер сборки
+/// растёт с каждым выпуском, по нему видно, какая версия стоит. Без номера
+/// (локальная сборка) — просто «1.0.0».
+String get appVersionLabel => appVersionLabelFor(kAppBuild);
+
+@visibleForTesting
+String appVersionLabelFor(int build) => build > 0 ? '1.0.$build' : '1.0.0';
+
 /// Найденное обновление.
 @immutable
 class AppUpdate {
@@ -123,6 +131,12 @@ class UpdateService {
 
   int get currentBuild => _currentBuild;
 
+  /// Не удалось ли спросить GitHub в последней проверке (нет сети, GitHub
+  /// недоступен). Нужно кнопке «Проверить обновления»: отличить «новой
+  /// версии нет» от «не получилось узнать».
+  bool get lastCheckFailed => _lastCheckFailed;
+  bool _lastCheckFailed = false;
+
   static Uri get latestReleasePage =>
       Uri.parse('https://github.com/$_owner/$_repo/releases/latest');
 
@@ -172,21 +186,26 @@ class UpdateService {
     }
 
     int? latest;
+    _lastCheckFailed = false;
     try {
       if (_windows) {
         latest = await _windowsProbe().timeout(_requestTimeout);
       } else {
         final response = await _probe(latestApkUrl).timeout(_requestTimeout);
         // 404 — ни одного релиза ещё нет. Это не ошибка, просто нечего
-        // предлагать.
+        // предлагать. А вот 5xx — GitHub сейчас не отвечает: это сбой,
+        // и прошлый ответ («новая версия есть») затирать им нельзя.
+        if (response.status >= 500) {
+          throw HttpException('GitHub ответил ${response.status}');
+        }
         if (response.status >= 300 && response.status < 400) {
           latest = buildFromLocation(response.location);
         }
       }
     } catch (_) {
       // Нет сети, GitHub недоступен — попробуем в следующий раз. Время
-      // проверки не записываем, чтобы не ждать час после
-      // случайного сбоя.
+      // проверки не записываем, чтобы не ждать паузу после случайного сбоя.
+      _lastCheckFailed = true;
       return _publishRemembered();
     }
 
@@ -194,6 +213,14 @@ class UpdateService {
         PrefKeys.updateLastCheckMs, _now().millisecondsSinceEpoch);
     await prefs.setInt(PrefKeys.updateLatestBuild, latest ?? 0);
     return _publishRemembered();
+  }
+
+  /// Проверка по кнопке «Проверить обновления»: всегда спрашивает GitHub и
+  /// показывает в том числе версию, которую раньше скрыли «×», — раз
+  /// человек спросил сам, значит, хочет её видеть.
+  Future<AppUpdate?> checkNow() async {
+    await LocalPrefs.instance.setInt(PrefKeys.updateDismissedBuild, 0);
+    return check(force: true);
   }
 
   /// Сообщали ли уже о сборке [update] — плашкой на экране или системным
