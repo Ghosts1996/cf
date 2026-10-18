@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- С Android 12 шторка ставит значок в кружок 24 dp с отступом 4 dp внутри
-     (notification_icon_circle_size / notification_icon_circle_padding), и
-     вокруг логотипа оставалась плоская рамка цвета уведомления. Отрицательный
-     отступ растягивает логотип на весь кружок: рамку закрывает сам логотип,
-     и краем круга становится его металлическое кольцо. -->
-<inset xmlns:android="http://schemas.android.com/apk/res/android"
-    android:drawable="@drawable/ic_stat_logo_img"
-    android:inset="-4dp" />
