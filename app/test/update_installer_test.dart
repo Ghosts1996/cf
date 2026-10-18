@@ -143,14 +143,86 @@ void main() {
       socket.destroy();
     });
     final installer = UpdateInstaller(
-        platform: platform, stallTimeout: const Duration(seconds: 5));
+        platform: platform,
+        stallTimeout: const Duration(seconds: 5),
+        maxAttempts: 3,
+        retryDelay: Duration.zero);
     await installer.downloadAndInstall(AppUpdate(
         build: 341,
         downloadUrl: Uri.parse('http://127.0.0.1:${raw.port}/app.apk')));
     await raw.close();
     expect(installer.state.value.phase, UpdatePhase.failed);
     expect(platform.installed, isEmpty);
-    expect(dir.listSync(), isEmpty, reason: 'обрывки загрузки не копятся');
+    expect(
+        dir.listSync().map((e) => e.uri.pathSegments.last),
+        everyElement(endsWith('.part')),
+        reason: 'целого файла нет — только обрывок этой версии для докачки');
+    // Вместо технической ошибки со ссылкой на хранилище — понятный текст.
+    expect(installer.state.value.error, contains('Повторить'));
+    expect(installer.state.value.error, isNot(contains('http')));
+  });
+
+  test('связь оборвалась посреди файла — загрузка сама продолжается с места '
+      'обрыва и доходит до установки', () async {
+    final apk = fakeApk(600 * 1024);
+    final ranges = <String?>[];
+    var requests = 0;
+    final raw = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    raw.listen((socket) {
+      final buf = <int>[];
+      late StreamSubscription<List<int>> sub;
+      sub = socket.listen((data) async {
+        buf.addAll(data);
+        final head = String.fromCharCodes(buf);
+        if (!head.contains('\r\n\r\n')) return;
+        await sub.cancel();
+        requests++;
+        final range = RegExp(r'[Rr]ange: bytes=(\d+)-').firstMatch(head);
+        ranges.add(range?.group(1));
+        if (range == null) {
+          // Первая попытка: заявляем весь файл, отдаём треть и рвём связь.
+          socket.add('HTTP/1.1 200 OK\r\n'
+                  'Content-Length: ${apk.length}\r\n\r\n'
+              .codeUnits);
+          socket.add(apk.sublist(0, apk.length ~/ 3));
+          await socket.flush();
+          socket.destroy();
+          return;
+        }
+        final from = int.parse(range.group(1)!);
+        socket.add('HTTP/1.1 206 Partial Content\r\n'
+                'Content-Range: bytes $from-${apk.length - 1}/${apk.length}\r\n'
+                'Content-Length: ${apk.length - from}\r\n\r\n'
+            .codeUnits);
+        socket.add(apk.sublist(from));
+        await socket.flush();
+        await socket.close();
+      });
+    });
+    addTearDown(raw.close);
+    final installer = UpdateInstaller(
+        platform: platform,
+        stallTimeout: const Duration(seconds: 5),
+        retryDelay: Duration.zero);
+    await installer.downloadAndInstall(AppUpdate(
+        build: 341,
+        downloadUrl: Uri.parse('http://127.0.0.1:${raw.port}/app.apk')));
+    expect(installer.state.value.phase, UpdatePhase.ready,
+        reason: '${installer.state.value.error}');
+    expect(requests, 2);
+    expect(ranges.first, isNull);
+    expect(int.parse(ranges.last!), greaterThan(0),
+        reason: 'вторая попытка просит только недостающее');
+    expect(File(platform.installed.single).readAsBytesSync(), apk);
+  });
+
+  test('Content-Range разбирается', () {
+    expect(UpdateInstaller.parseContentRange('bytes 100-199/1000'),
+        (start: 100, total: 1000));
+    expect(UpdateInstaller.parseContentRange('bytes 5-9/*'),
+        (start: 5, total: null));
+    expect(UpdateInstaller.parseContentRange('items 1-2/3'), isNull);
+    expect(UpdateInstaller.parseContentRange(null), isNull);
   });
 
   test('Windows: установщик .exe («MZ») загружается и уходит на установку, '
@@ -219,7 +291,10 @@ void main() {
       await hang.future; // дальше ни байта
     };
     final installer = UpdateInstaller(
-        platform: platform, stallTimeout: const Duration(seconds: 1));
+        platform: platform,
+        stallTimeout: const Duration(seconds: 1),
+        maxAttempts: 2,
+        retryDelay: Duration.zero);
     await installer.downloadAndInstall(update());
     hang.complete();
     expect(installer.state.value.phase, UpdatePhase.failed);

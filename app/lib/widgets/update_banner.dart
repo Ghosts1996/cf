@@ -136,6 +136,10 @@ class UpdateBanner extends StatelessWidget {
         Expanded(
           child: Text(
             text,
+            // Сюда не должен попасть длинный технический текст, но если
+            // попадёт — плашка не растянется на весь экран.
+            maxLines: 4,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(
                 fontSize: 12.5,
                 color: AppColors.text,

@@ -12,11 +12,11 @@
 // открываем нужный экран настроек и ждём возврата.
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'app_log_service.dart';
 import 'tray_service.dart';
 import 'tunnel_service.dart';
 import 'update_service.dart';
@@ -141,6 +141,8 @@ class UpdateInstaller {
   UpdateInstaller({
     UpdatePlatform? platform,
     this.stallTimeout = const Duration(seconds: 30),
+    this.maxAttempts = 6,
+    this.retryDelay = const Duration(seconds: 2),
     this.fileExtension = 'apk',
     this.fileMagic = const [0x50, 0x4B],
   }) : _platform = platform ?? ChannelUpdatePlatform();
@@ -173,6 +175,22 @@ class UpdateInstaller {
   /// зависшей. Не на весь файл целиком — медленная, но живая сеть должна
   /// докачать сколько угодно долго.
   final Duration stallTimeout;
+
+  /// Сколько раз подряд пробовать, если связь рвётся посреди файла. Каждая
+  /// следующая попытка докачивает с места обрыва, а не начинает сначала:
+  /// на мобильной сети соединение с хранилищем GitHub рвётся посреди
+  /// стомегабайтного файла, и раньше загрузка на этом сразу заканчивалась
+  /// ошибкой.
+  final int maxAttempts;
+
+  /// Пауза перед повторной попыткой; растёт с номером попытки.
+  final Duration retryDelay;
+
+  static const _networkError =
+      'Связь прервалась при загрузке обновления. Нажмите «Повторить» — '
+      'загрузка продолжится с того же места.';
+  static const _stalledError =
+      'Загрузка остановилась — проверьте интернет и нажмите «Повторить».';
 
   /// Загружает обновление и сразу передаёт его на установку.
   Future<void> downloadAndInstall(AppUpdate update) async {
@@ -210,9 +228,11 @@ class UpdateInstaller {
       // по-прежнему предлагать «Установить», а не молча исчезнуть.
       state.value = const UpdateProgress(phase: UpdatePhase.ready);
     } catch (e) {
-      state.value = UpdateProgress(
+      _log('не удалось запустить установку: $e');
+      state.value = const UpdateProgress(
           phase: UpdatePhase.failed,
-          error: 'Не удалось запустить установку: $e');
+          error: 'Не удалось открыть установку обновления. Попробуйте ещё раз '
+              'или скачайте обновление через браузер.');
     }
   }
 
@@ -263,26 +283,145 @@ class UpdateInstaller {
     final Directory dir;
     try {
       dir = Directory(await _platform.updatesDir());
-      // Старые файлы — от прошлых обновлений или оборванной загрузки —
-      // убираем: APK весит под сотню мегабайт, копить их незачем.
-      if (dir.existsSync()) {
-        for (final f in dir.listSync()) {
-          try {
-            f.deleteSync(recursive: true);
-          } catch (_) {}
-        }
-      } else {
-        dir.createSync(recursive: true);
-      }
+      if (!dir.existsSync()) dir.createSync(recursive: true);
     } catch (e) {
-      state.value = UpdateProgress(
-          phase: UpdatePhase.failed, error: 'Нет места для загрузки: $e');
+      _log('нет места для загрузки: $e');
+      state.value = const UpdateProgress(
+          phase: UpdatePhase.failed,
+          error: 'Не хватает места для загрузки обновления.');
       return null;
     }
-
     final part =
         File('${dir.path}/vpnonline-${update.build}.$fileExtension.part');
     final target = File('${dir.path}/vpnonline-${update.build}.$fileExtension');
+    // Старые файлы — от прошлых обновлений — убираем: APK весит под сотню
+    // мегабайт, копить их незачем. Недокачанный файл этой же версии
+    // оставляем: загрузка продолжится с места обрыва.
+    try {
+      for (final f in dir.listSync()) {
+        if (f.path == part.path) continue;
+        try {
+          f.deleteSync(recursive: true);
+        } catch (_) {}
+      }
+    } catch (_) {}
+
+    var received = part.existsSync() ? part.lengthSync() : 0;
+    var total = 0;
+    void dropPart() {
+      try {
+        if (part.existsSync()) part.deleteSync();
+      } catch (_) {}
+      received = 0;
+    }
+
+    for (var attempt = 1;; attempt++) {
+      String? failure;
+      try {
+        final result = await _fetch(update.downloadUrl, part, received,
+            knownTotal: total);
+        received = result.received;
+        if (result.total > 0) total = result.total;
+        if (_cancelled) throw const _Cancelled();
+        if (total > 0 && received > total) {
+          // Кусок лёг не туда — такой файл не собрать, начинаем заново.
+          dropPart();
+          throw const _Restart();
+        }
+        if (total > 0 && received < total) {
+          throw HttpException('связь оборвалась на $received из $total байт');
+        }
+        break;
+      } on _Cancelled {
+        dropPart();
+        state.value = const UpdateProgress(phase: UpdatePhase.idle);
+        return null;
+      } on _BadStatus catch (e) {
+        _log('сервер ответил ${e.code}');
+        // 404 и прочие «нет такого файла» повтором не лечатся.
+        if (e.code < 500 || attempt >= maxAttempts) {
+          dropPart();
+          state.value = UpdateProgress(
+              phase: UpdatePhase.failed,
+              error: 'Сервер обновлений ответил ошибкой ${e.code}. '
+                  'Попробуйте позже или скачайте через браузер.');
+          return null;
+        }
+        failure = _networkError;
+      } on _Restart {
+        dropPart();
+        failure = _networkError;
+      } on TimeoutException {
+        failure = _stalledError;
+      } catch (e) {
+        if (_cancelled) {
+          dropPart();
+          state.value = const UpdateProgress(phase: UpdatePhase.idle);
+          return null;
+        }
+        _log('попытка $attempt: ${_describe(e)}');
+        failure = _networkError;
+      }
+      // Что успело лечь на диск, то и докачиваем.
+      received = part.existsSync() ? part.lengthSync() : 0;
+      if (attempt >= maxAttempts) {
+        state.value = UpdateProgress(
+            phase: UpdatePhase.failed,
+            receivedBytes: received,
+            totalBytes: total,
+            error: failure);
+        return null;
+      }
+      state.value = UpdateProgress(
+          phase: UpdatePhase.downloading,
+          receivedBytes: received,
+          totalBytes: total);
+      await Future<void>.delayed(retryDelay * attempt);
+      if (_cancelled) {
+        dropPart();
+        state.value = const UpdateProgress(phase: UpdatePhase.idle);
+        return null;
+      }
+    }
+
+    // APK — это zip-архив и начинается с «PK», exe — с «MZ». Если пришло
+    // что-то другое — скорее всего, страница с ошибкой вместо файла.
+    var magic = const <int>[];
+    try {
+      final raf = part.openSync();
+      magic = raf.readSync(2);
+      raf.closeSync();
+    } catch (_) {}
+    if (magic.length < 2 || magic[0] != fileMagic[0] || magic[1] != fileMagic[1]) {
+      dropPart();
+      state.value = const UpdateProgress(
+          phase: UpdatePhase.failed,
+          error: 'Вместо файла обновления пришло что-то другое. '
+              'Попробуйте позже или скачайте через браузер.');
+      return null;
+    }
+    try {
+      if (target.existsSync()) target.deleteSync();
+      part.renameSync(target.path);
+    } catch (e) {
+      _log('не удалось сохранить файл: $e');
+      dropPart();
+      state.value = const UpdateProgress(
+          phase: UpdatePhase.failed,
+          error: 'Не хватает места для загрузки обновления.');
+      return null;
+    }
+    _apkPath = target.path;
+    state.value = UpdateProgress(
+        phase: UpdatePhase.ready, receivedBytes: received, totalBytes: total);
+    return target.path;
+  }
+
+  /// Одна попытка: дописывает файл в [part], начиная с байта [from]
+  /// (докачка через Range). Возвращает, сколько байт теперь на диске и
+  /// полный размер файла (0 — неизвестен).
+  Future<({int received, int total})> _fetch(Uri url, File part, int from,
+      {required int knownTotal}) async {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15)
       ..userAgent = 'VPNonLine-updater';
@@ -290,25 +429,49 @@ class UpdateInstaller {
     IOSink? sink;
     try {
       // Переадресации — это нормально: GitHub отдаёт файл релиза со своего
-      // хранилища, и ссылка переадресует туда.
-      final request = await client.getUrl(update.downloadUrl);
+      // хранилища, и ссылка переадресует туда. Заголовок Range Dart
+      // переносит в запрос по новому адресу.
+      final request = await client.getUrl(url);
       request.followRedirects = true;
       request.maxRedirects = 5;
-      final response = await request.close();
-      if (response.statusCode != HttpStatus.ok) {
-        throw HttpException('сервер ответил ${response.statusCode}');
+      if (from > 0) {
+        request.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-');
       }
-      final total = response.contentLength > 0 ? response.contentLength : 0;
-      sink = part.openWrite();
-      var received = 0;
+      final response = await request.close().timeout(stallTimeout);
+      var received = from;
+      var total = knownTotal;
+      switch (response.statusCode) {
+        case HttpStatus.partialContent when from > 0:
+          final range = parseContentRange(
+              response.headers.value(HttpHeaders.contentRangeHeader));
+          if (range == null || range.start != from) {
+            await _drain(response);
+            throw const _Restart();
+          }
+          if (range.total != null) total = range.total!;
+        case HttpStatus.ok:
+          // Докачку сервер не поддержал — файл целиком, с начала.
+          received = 0;
+          total = response.contentLength > 0 ? response.contentLength : 0;
+        case HttpStatus.requestedRangeNotSatisfiable when from > 0:
+          await _drain(response);
+          throw const _Restart();
+        default:
+          await _drain(response);
+          throw _BadStatus(response.statusCode);
+      }
+      sink = part.openWrite(
+          mode: received > 0 ? FileMode.writeOnlyAppend : FileMode.writeOnly);
       var lastPercent = -1;
       var lastTick = DateTime.now();
-      final head = BytesBuilder(copy: false);
+      state.value = UpdateProgress(
+          phase: UpdatePhase.downloading,
+          receivedBytes: received,
+          totalBytes: total);
       await for (final chunk in response.timeout(stallTimeout)) {
         if (_cancelled) throw const _Cancelled();
         sink.add(chunk);
         received += chunk.length;
-        if (head.length < 2) head.add(chunk.take(2 - head.length).toList());
         // Экран перерисовываем по процентам, а не на каждую порцию данных:
         // порций тысячи, и каждая перерисовка — работа для телефона.
         final percent = total > 0 ? (received * 100 ~/ total) : -1;
@@ -326,55 +489,57 @@ class UpdateInstaller {
       await sink.flush();
       await sink.close();
       sink = null;
-      if (_cancelled) throw const _Cancelled();
-
-      // Недокачанный файл Android отвергнет с невнятной ошибкой «ошибка
-      // разбора пакета». Лучше поймать это здесь и сказать как есть.
-      if (total > 0 && received != total) {
-        throw HttpException('файл загрузился не полностью '
-            '($received из $total байт)');
-      }
-      // APK — это zip-архив и начинается с «PK», exe — с «MZ». Если пришло
-      // что-то другое — скорее всего, страница с ошибкой вместо файла.
-      final magic = head.takeBytes();
-      if (magic.length < 2 ||
-          magic[0] != fileMagic[0] ||
-          magic[1] != fileMagic[1]) {
-        throw const HttpException('вместо файла обновления пришло что-то другое');
-      }
-
-      if (target.existsSync()) target.deleteSync();
-      part.renameSync(target.path);
-      _apkPath = target.path;
-      state.value = UpdateProgress(
-          phase: UpdatePhase.ready, receivedBytes: received, totalBytes: total);
-      return target.path;
-    } on _Cancelled {
-      state.value = const UpdateProgress(phase: UpdatePhase.idle);
-      return null;
-    } on TimeoutException {
-      state.value = const UpdateProgress(
-          phase: UpdatePhase.failed,
-          error: 'Загрузка остановилась — проверьте интернет и повторите.');
-      return null;
-    } catch (e) {
-      state.value = UpdateProgress(
-          phase: _cancelled ? UpdatePhase.idle : UpdatePhase.failed,
-          error: _cancelled ? null : 'Не удалось загрузить обновление: $e');
-      return null;
+      return (received: received, total: total);
     } finally {
+      // Всё, что успело прийти, остаётся на диске — следующая попытка
+      // продолжит с этого места.
       try {
         await sink?.close();
       } catch (_) {}
-      if (_apkPath == null) {
-        try {
-          if (part.existsSync()) part.deleteSync();
-        } catch (_) {}
-      }
       client.close(force: true);
       if (identical(_client, client)) _client = null;
     }
   }
+
+  static Future<void> _drain(HttpClientResponse response) async {
+    try {
+      await response.drain<void>();
+    } catch (_) {}
+  }
+
+  /// Начало и полный размер из заголовка `Content-Range: bytes 100-199/1000`.
+  /// Полный размер null, если сервер написал «*».
+  @visibleForTesting
+  static ({int start, int? total})? parseContentRange(String? value) {
+    if (value == null) return null;
+    final m = RegExp(r'^\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$').firstMatch(value);
+    if (m == null) return null;
+    return (start: int.parse(m.group(1)!), total: int.tryParse(m.group(3)!));
+  }
+
+  /// Ошибка сети в журнал — коротко и без длинной подписанной ссылки на
+  /// хранилище, которую HttpException пишет в свой текст.
+  static String _describe(Object e) => switch (e) {
+        HttpException(:final message) => message,
+        SocketException(:final message, :final osError) =>
+          osError == null ? message : '$message (${osError.message})',
+        TlsException(:final message) => 'TLS: $message',
+        _ => e.runtimeType.toString(),
+      };
+
+  static void _log(String message) {
+    unawaited(AppLogService.instance
+        .log('Обновление: $message', level: AppLogLevel.warning));
+  }
+}
+
+class _Restart implements Exception {
+  const _Restart();
+}
+
+class _BadStatus implements Exception {
+  const _BadStatus(this.code);
+  final int code;
 }
 
 class _Cancelled implements Exception {

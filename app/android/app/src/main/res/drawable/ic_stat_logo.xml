@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Значок уведомления VPN на прошивках, которые рисуют цветной значок как
+     есть: логотип по кругу (drawable-*/ic_stat_logo_img.png). До Android 12
+     значок стоит в шапке без кружка — логотип как есть. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_stat_logo_img"
+    android:inset="0dp" />

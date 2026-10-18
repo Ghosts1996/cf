@@ -149,6 +149,7 @@ class MainActivity : FlutterActivity() {
                         )
                     )
                     "isCoreServiceAlive" -> result.success(isCoreServiceAlive())
+                    "coreServiceKind" -> result.success(coreServiceKind())
                     "restartApp" -> {
                         result.success(null)
                         restartApp()
@@ -251,6 +252,25 @@ class MainActivity : FlutterActivity() {
         null
     }
 
+    /// Какой сервис ядра сейчас жив: "vpn", "proxy" или "none". null —
+    /// спросить не удалось. Нужен, когда плагин говорит «подключено»: в
+    /// процессе может остаться ядро прошлой сессии без своего сервиса, и
+    /// плагин, подключившись к нему, честно сообщает «работает», хотя VPN в
+    /// системе нет.
+    @Suppress("DEPRECATION")
+    private fun coreServiceKind(): String? = try {
+        val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        val mine = am.getRunningServices(Int.MAX_VALUE)
+            .filter { it.service.packageName == packageName }
+        when {
+            mine.any { it.service.className.endsWith("SingboxVPNService") } -> "vpn"
+            mine.any { it.service.className.endsWith("SingboxProxyService") } -> "proxy"
+            else -> "none"
+        }
+    } catch (e: Exception) {
+        null
+    }
+
     // ── Уведомление VPN ──────────────────────────────────────────────────
 
     /// Уведомление работающего VPN рисует модуль ядра, и выглядит оно бедно:
@@ -288,9 +308,21 @@ class MainActivity : FlutterActivity() {
 
     /// Работает ли сервис ядра. Без него уведомление не публикуем: иначе
     /// после отключения в шторке остался бы «VPN подключён» без VPN.
-    private fun coreServiceRunning(): Boolean =
-        dev.amirzr.singbox.service.SingboxVPNService.instance != null ||
+    ///
+    /// Сервис, который уже останавливается, не считается: его instance живёт
+    /// до onDestroy, а уведомление он снимает в самом начале остановки. Новое
+    /// «VPN подключён» поверх этого осталось бы висеть в шторке без VPN.
+    private fun coreServiceRunning(): Boolean {
+        val alive = dev.amirzr.singbox.service.SingboxVPNService.instance != null ||
             dev.amirzr.singbox.service.SingboxProxyService.instance != null
+        if (!alive) return false
+        return try {
+            dev.amirzr.singbox.engine.SingboxManager.getInstance(this).serviceState.value ==
+                dev.amirzr.singbox.SingboxConstants.STATE_STARTED
+        } catch (e: Exception) {
+            true
+        }
+    }
 
     private fun updateVpnNotification(call: MethodCall) {
         if (!coreServiceRunning()) return

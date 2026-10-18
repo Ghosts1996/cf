@@ -41,6 +41,7 @@ void main() {
     await LocalPrefs.instance.setString(PrefKeys.deadLocationsJson, '');
     await LocalPrefs.instance.setString(PrefKeys.cachedLatencyJson, '');
     await LocalPrefs.instance.setBool(PrefKeys.serverChosenManually, false);
+    await LocalPrefs.instance.setBool(PrefKeys.vpnInterfaceVisible, false);
     core = FakeRuntime();
     tunnel = TunnelService.withRuntime(core);
   });
@@ -149,6 +150,65 @@ void main() {
       expect(tunnel.isConnected, isFalse);
       expect(core.disconnectCount, greaterThan(before),
           reason: 'остатки сессии в плагине гасятся');
+    });
+
+    test('отключили из шторки, открыли приложение — плагин говорит '
+        '«работает», а сервиса ядра нет: экран «отключено», а не '
+        '«Подключено» с новым таймером', () async {
+      core.leftoverSession = true; // плагин подключился к осиротевшему ядру
+      tunnel.coreServiceKindProbe = () async => 'none';
+      tunnel.vpnInterfaceProbe = () async => false;
+      await tunnel.syncRuntimeState();
+      expect(tunnel.isConnected, isFalse);
+      expect(core.disconnectCount, greaterThan(0),
+          reason: 'остатки сессии в плагине гасятся');
+      expect(core.connectCount, 0, reason: 'выключенный VPN сам не включаем');
+    });
+
+    test('при открытии приложения живой туннель остаётся «Подключено»',
+        () async {
+      core.leftoverSession = true;
+      tunnel.coreServiceKindProbe = () async => 'vpn';
+      tunnel.vpnInterfaceProbe = () async => true;
+      await tunnel.syncRuntimeState();
+      expect(tunnel.isConnected, isTrue);
+      expect(core.disconnectCount, 0);
+    });
+
+    test('сервис ядра пропал посреди сессии — сторож показывает '
+        '«отключено» со второго раза', () async {
+      final server = await _workingTunnel();
+      addTearDown(() => server.close(force: true));
+      await tunnel.connect('$_de\n$_nl');
+      var kind = 'vpn';
+      tunnel.coreServiceKindProbe = () async => kind;
+      tunnel.vpnInterfaceProbe = () async => null;
+      await tunnel.debugCheckRealState();
+      expect(tunnel.isConnected, isTrue);
+      kind = 'none';
+      await tunnel.debugCheckRealState();
+      expect(tunnel.isConnected, isTrue, reason: 'одному ответу не верим');
+      await tunnel.debugCheckRealState();
+      expect(tunnel.isConnected, isFalse);
+    });
+
+    test('телефон свой VPN показывает: VPN-сервис есть, а интерфейса нет '
+        'с самого открытия — «отключено»', () async {
+      await LocalPrefs.instance.setBool(PrefKeys.vpnInterfaceVisible, true);
+      core.leftoverSession = true;
+      tunnel.coreServiceKindProbe = () async => 'vpn';
+      tunnel.vpnInterfaceProbe = () async => false;
+      await tunnel.syncRuntimeState();
+      expect(tunnel.isConnected, isFalse);
+    });
+
+    test('режим прокси: VPN-интерфейса нет, и это нормально', () async {
+      await LocalPrefs.instance.setBool(PrefKeys.vpnInterfaceVisible, true);
+      core.leftoverSession = true;
+      tunnel.coreServiceKindProbe = () async => 'proxy';
+      tunnel.vpnInterfaceProbe = () async => false;
+      await tunnel.syncRuntimeState();
+      expect(tunnel.isConnected, isTrue);
     });
 
     test('прошивка не показывает приложению VPN вовсе — живую сессию не '

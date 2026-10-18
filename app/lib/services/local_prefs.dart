@@ -192,6 +192,10 @@ class PrefKeys {
   static const updateLatestBuild = 'update.latest_build';
   static const updateDismissedBuild = 'update.dismissed_build';
   static const updateAnnouncedBuild = 'update.announced_build';
+
+  /// Показывает ли телефон приложению его собственный VPN-интерфейс (видели
+  /// хоть раз). См. TunnelService._vpnInterfaceTrusted.
+  static const vpnInterfaceVisible = 'vpn.interface_visible';
   static const splitTunnelBypass = 'split_tunnel.bypassed_packages';
   // 'exclude' — выбранные приложения идут в обход VPN, остальные через
   // туннель; 'include' — через VPN идут только выбранные. Читается в

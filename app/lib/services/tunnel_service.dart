@@ -983,9 +983,31 @@ class TunnelService {
     var synced = false;
     try {
       await _ensureInitialized();
-      final actualState = await _getServiceStateNative();
-      final actuallyConnected =
+      var actualState = await _getServiceStateNative();
+      var actuallyConnected =
           _mapServiceState(actualState) == TunnelConnState.connected;
+      // «Подключено» от плагина ещё не значит, что VPN есть: после
+      // отключения из шторки в процессе может остаться ядро без своего
+      // сервиса, и плагин, подключившись к нему при открытии приложения,
+      // сообщает «работает». Экран показывал «Подключено» со свежим
+      // таймером, а VPN в системе не было.
+      if (actuallyConnected &&
+          await _pluginConnectedButNothingThere() == true) {
+        // Только что поднятый сервис может ещё не попасть в список —
+        // переспрашиваем, прежде чем объявлять сессию мёртвой.
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+        if (await _pluginConnectedButNothingThere() == true) {
+          unawaited(AppLogService.instance.log(
+              'Плагин считает VPN включённым, но в Android VPN нет — '
+              'показываю «отключено» и гашу остатки сессии',
+              level: AppLogLevel.warning));
+          try {
+            await _disconnectNative();
+          } catch (_) {}
+          actualState = 'ServiceState.stopped';
+          actuallyConnected = false;
+        }
+      }
       // Сначала восстанавливаем момент подключения и лишь затем публикуем
       // состояние: иначе экран при возврате в приложение кратко покажет
       // 00:00:00 на давно поднятом туннеле.
@@ -1361,15 +1383,63 @@ class TunnelService {
   /// же VPN, сторож иначе объявлял бы мёртвой каждую живую сессию.
   bool _vpnInterfaceSeen = false;
 
-  Future<bool> _vpnInterfaceVanished() async {
-    // В proxy-режиме VPN-интерфейса нет по определению.
-    if (localProxyAddress.value != null) return false;
-    final up = await vpnInterfaceProbe();
-    if (up == true) {
-      _vpnInterfaceSeen = true;
-      return false;
+  /// Какой сервис ядра жив в Android: 'vpn', 'proxy' или 'none'. null —
+  /// спросить не удалось (не Android, старая нативная часть).
+  @visibleForTesting
+  Future<String?> Function() coreServiceKindProbe = _askCoreServiceKind;
+
+  static Future<String?> _askCoreServiceKind() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      return await _nativeStatsChannel
+          .invokeMethod<String>('coreServiceKind')
+          .timeout(const Duration(seconds: 2));
+    } catch (_) {
+      return null;
     }
-    return up == false && _vpnInterfaceSeen;
+  }
+
+  /// Показывает ли этот телефон приложению его собственный VPN-интерфейс.
+  /// Запоминается насовсем, как только интерфейс увидели хоть раз: только
+  /// тогда его отсутствию можно верить и в сессии, где его ещё не видели, —
+  /// например, сразу после открытия приложения.
+  bool? _deviceShowsVpn;
+
+  void _noteVpnInterfaceUp() {
+    _vpnInterfaceSeen = true;
+    if (_deviceShowsVpn == true) return;
+    _deviceShowsVpn = true;
+    unawaited(LocalPrefs.instance.setBool(PrefKeys.vpnInterfaceVisible, true));
+  }
+
+  Future<bool> _vpnInterfaceTrusted() async =>
+      _deviceShowsVpn ??= await LocalPrefs.instance
+          .getBool(PrefKeys.vpnInterfaceVisible, fallback: false);
+
+  /// Плагин говорит «подключено», а в Android этого нет: сервиса ядра нет
+  /// вовсе, или VPN-интерфейс пропал. true — точно нет, false — есть или
+  /// не понять, null — не спросить.
+  Future<bool?> _pluginConnectedButNothingThere() async {
+    final proxySession = localProxyAddress.value != null;
+    bool? up;
+    if (!proxySession) {
+      up = await vpnInterfaceProbe();
+      if (up == true) {
+        _noteVpnInterfaceUp();
+        return false;
+      }
+    }
+    final kind = await coreServiceKindProbe();
+    if (kind == 'none') return true;
+    // В режиме прокси VPN-интерфейса нет по определению.
+    if (kind == 'proxy' || proxySession) return false;
+    if (up != false) return kind == null && up == null ? null : false;
+    if (_vpnInterfaceSeen) return true;
+    // В этой сессии интерфейс не видели. Верим его отсутствию, только если
+    // сервис точно VPN и телефон свой VPN приложению вообще показывает —
+    // иначе на прошивке, которая его прячет, сторож объявлял бы мёртвой
+    // каждую живую сессию.
+    return kind == 'vpn' && await _vpnInterfaceTrusted();
   }
 
   @visibleForTesting
@@ -1398,22 +1468,25 @@ class TunnelService {
       // Плагин считает сессию живой, пока к нему подключён клиент команд
       // ядра. Ядро, осиротевшее после неудачной гонки старта и остановки,
       // этому клиенту отвечает исправно — а VPN-интерфейса у него уже нет:
-      // на экране «Подключено», в шторке пусто, интернета нет. Поэтому в
-      // VPN-режиме сверяемся ещё и с самим Android.
-      if (await _vpnInterfaceVanished()) {
+      // на экране «Подключено», в шторке пусто, интернета нет. Поэтому
+      // сверяемся ещё и с самим Android.
+      if (await _pluginConnectedButNothingThere() == true) {
         _watchdogNegativeReads++;
         if (_watchdogNegativeReads < 2) return;
         _watchdogNegativeReads = 0;
+        // Сессия, которую мы видели живой, сломалась у нас — её можно
+        // поднимать. А «работает» без всякого VPN с самого открытия
+        // приложения — это остатки выключенной сессии: включать обратно
+        // нельзя, её выключили.
+        final brokeWhileWatched = _vpnInterfaceSeen;
         unawaited(AppLogService.instance.log(
-            'Плагин считает VPN включённым, но VPN-интерфейса в системе нет — '
+            'Плагин считает VPN включённым, но в Android VPN нет — '
             'гашу остатки сессии и показываю «отключено»',
             level: AppLogLevel.warning));
         try {
           await _disconnectNative();
         } catch (_) {}
-        // Это не выключение человеком: плагин VPN считает включённым, а
-        // интерфейса нет — сессия сломалась у нас, и её можно поднимать.
-        _lastCoreCrashAt = DateTime.now();
+        if (brokeWhileWatched) _lastCoreCrashAt = DateTime.now();
         _applyServiceState('ServiceState.stopped');
         return;
       }
