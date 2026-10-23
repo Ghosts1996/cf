@@ -37,6 +37,21 @@ void main() {
     expect(notInSubscription.group, lessThan(unsupported.group));
   });
 
+  test('помеченный «не отвечает» уходит вниз, даже если от прошлой проверки '
+      'осталось быстрое число', () {
+    // Скриншот 23.10: наверху списка стояли «⚡ Швеция», «⚡ Германия»… с
+    // подписью «не отвечает» — по их числам многочасовой давности.
+    final markedDead = serverSortRank(
+        unsupportedProtocol: false,
+        inSubscription: true,
+        subscriptionKnown: true,
+        dead: true,
+        corePing: 41);
+    expect(markedDead.group, dead.group);
+    expect(alive(900).group, lessThan(markedDead.group));
+    expect(measuring.group, lessThan(markedDead.group));
+  });
+
   test('весь список выстраивается как ожидается', () {
     final rows = <String, ({int group, int ms})>{
       'Япония 330': alive(330),

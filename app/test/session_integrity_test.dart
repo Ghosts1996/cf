@@ -180,6 +180,22 @@ void main() {
     expect(tunnel.isLocationDead('🇸🇪 Швеция'), isFalse);
   });
 
+  test('подпись «не отвечает» — только по свежей отметке; для порядка '
+      'подключения отметка помнится дольше', () async {
+    // Скриншот 23.10: весь список «не отвечает» — отметки многочасовой
+    // давности, без единой новой проверки.
+    final old = DateTime.now()
+        .subtract(const Duration(hours: 2))
+        .millisecondsSinceEpoch;
+    await LocalPrefs.instance.setString(
+        PrefKeys.deadLocationsJson, jsonEncode({'🇸🇪 Швеция': old}));
+    await tunnel.debugMarkLocationDead('🇳🇱 Нидерланды');
+    const hour = Duration(hours: 1);
+    expect(tunnel.isLocationDead('🇸🇪 Швеция'), isTrue);
+    expect(tunnel.isLocationDead('🇸🇪 Швеция', within: hour), isFalse);
+    expect(tunnel.isLocationDead('🇳🇱 Нидерланды', within: hour), isTrue);
+  });
+
   group('сторож: «Подключено» без VPN в системе', () {
     test('VPN-интерфейс был и пропал — показываем «отключено»', () async {
       final server = await _workingTunnel();

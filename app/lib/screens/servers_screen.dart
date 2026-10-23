@@ -92,17 +92,46 @@ class _ServersScreenState extends State<ServersScreen> {
     final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
     if (id.isEmpty) return serverSortRank();
     final realCheck = _realCheckResults[id];
-    final livePing = _tunnel.isConnected ? _tunnel.latencyForHostName(id) : null;
+    final ping = _pingSourcesFor(id);
     return serverSortRank(
       unsupportedProtocol: _unsupportedProtocols.containsKey(id),
-      corePing: livePing ??
-          ((realCheck != null && realCheck.ok) ? realCheck.latencyMs : null),
+      dead: ping.deadNow,
+      corePing: ping.live ?? ping.saved,
       checkFailed: realCheck != null && !realCheck.ok,
       inSubscription: _realEndpoints[id] != null,
       subscriptionKnown:
           _realEndpoints.isNotEmpty || _unsupportedProtocols.isNotEmpty,
-      tcpPing: _livePing[id],
+      // При включённом VPN карточка TCP-число не показывает (сокеты ушли бы
+      // в туннель), значит, и место в списке по нему не считаем.
+      tcpPing: _tunnel.isConnected ? null : _livePing[id],
     );
+  }
+
+  /// Откуда берётся число на карточке локации. Одно место и для подписи, и
+  /// для места в списке: раньше сортировка брала результат проверки любой
+  /// давности, а подпись — только свежий, и наверху списка оказывались
+  /// серверы с надписью «не отвечает» — по их числам многочасовой давности.
+  ({int? live, int? saved, bool deadNow}) _pingSourcesFor(String id) {
+    // Живое число от ядра есть только при поднятом туннеле и только после
+    // первого прогона замерщика.
+    final live = _tunnel.isConnected ? _tunnel.latencyForHostName(id) : null;
+    // Сохранённое число прошлой проверки. Оно живёт между запусками
+    // приложения и показывается сразу при открытии экрана — до того, как
+    // отработает свежий замер. Только свежее: на видео у замолчавшей Швеции
+    // стояли зелёные «41 мс» из проверки шестнадцатичасовой давности, и её
+    // выбирали как самую быструю.
+    final realCheck = _realCheckResults[id];
+    final saved = (realCheck != null && realCheck.ok && _isRealCheckFresh)
+        ? realCheck.latencyMs
+        : null;
+    // Локация недавно замолчала (ядро не достучалось до неё на замере или с
+    // неё пришлось уводить сессию) и с тех пор не ответила. Отметку снимает
+    // первый же замер или проверка, где она ответит. Подписываем так только
+    // свежую отметку: спустя час без новой проверки это уже не «не
+    // отвечает», а «неизвестно».
+    final deadNow = live == null &&
+        _tunnel.isLocationDead(id, within: _realCheckMaxAge);
+    return (live: live, saved: saved, deadNow: deadNow);
   }
   String? _error;
   bool _loading = true;
@@ -187,6 +216,11 @@ class _ServersScreenState extends State<ServersScreen> {
   // между автоматическими прогонами: каждая локация это запуск и остановка
   // сессии sing-box, секунды работы и расход батареи.
   DateTime? _lastRealCheckAt;
+  // Когда получены сами числа в `_realCheckResults`. Не то же, что
+  // `_lastRealCheckAt`: «Проверить» при включённом VPN меряет только
+  // локации сессии, и раньше после неё многочасовые числа всех остальных
+  // снова считались свежими.
+  DateTime? _realCheckResultsAt;
   // Пятнадцать минут, а не десять. Числа теперь переживают перезапуск и
   // показываются сразу при открытии экрана, так что гонять полную проверку
   // часто незачем: она поднимает временную сессию ядра и стоит батареи. Реже
@@ -875,6 +909,7 @@ class _ServersScreenState extends State<ServersScreen> {
         _realCheckResults
           ..clear()
           ..addAll(_mapRealCheckToHosts(byRemark));
+        _realCheckResultsAt = DateTime.now();
       });
       _saveRealCheckResults();
     } finally {
@@ -977,7 +1012,7 @@ class _ServersScreenState extends State<ServersScreen> {
   /// того, как проверка признала его рабочим. Переключать по ним живой
   /// туннель имеет смысл, только пока они свежие.
   bool get _isRealCheckFresh {
-    final last = _lastRealCheckAt;
+    final last = _realCheckResultsAt;
     if (last == null) return false;
     return DateTime.now().difference(last) < _realCheckMaxAge;
   }
@@ -1224,6 +1259,7 @@ class _ServersScreenState extends State<ServersScreen> {
         _realCheckResults.addAll(restored);
         if (at > 0) {
           _lastRealCheckAt = DateTime.fromMillisecondsSinceEpoch(at);
+          _realCheckResultsAt = _lastRealCheckAt;
         }
       });
     } catch (_) {
@@ -1535,27 +1571,14 @@ class _ServersScreenState extends State<ServersScreen> {
                 // Оба числа считаются одинаково, поэтому и сравнивать их между
                 // собой можно.
                 final realCheck = _realCheckResults[id];
-                // Сохранённое число прошлой проверки. Оно живёт между
-                // запусками приложения, и именно оно показывается сразу при
-                // открытии экрана — до того, как отработает свежий замер.
-                // Только свежее: на видео у замолчавшей Швеции стояли зелёные
-                // «41 мс» из проверки шестнадцатичасовой давности, и её
-                // выбирали как самую быструю.
-                final savedPing =
-                    (realCheck != null && realCheck.ok && _isRealCheckFresh)
-                        ? realCheck.latencyMs
-                        : null;
-                // Живое число от ядра есть только при поднятом туннеле и
-                // только после первого прогона замерщика.
-                final livePing =
-                    _tunnel.isConnected ? _tunnel.latencyForHostName(id) : null;
+                final sources = _pingSourcesFor(id);
                 // Живое, если оно уже есть, иначе сохранённое. Раньше при
                 // поднятом туннеле сохранённое не смотрели вовсе: открываешь
                 // экран на живом VPN — и все карточки в «измеряю через
                 // VLESS…», хотя числа по ним давно посчитаны и лежат рядом.
                 // Число теперь появляется мгновенно и молча уточняется, когда
                 // придёт свежий замер.
-                final corePing = livePing ?? savedPing;
+                final corePing = sources.live ?? sources.saved;
 
                 // Локация есть в подписке, но написана на протоколе, который
                 // приложение в конфиг не собирает. Показываем её — в других
@@ -1563,10 +1586,7 @@ class _ServersScreenState extends State<ServersScreen> {
                 // говорим, почему подключиться нельзя.
                 final unsupportedProtocol = _unsupportedProtocols[id];
 
-                // Локация недавно замолчала (ядро не достучалось до неё на
-                // замере или с неё пришлось уводить сессию) и с тех пор не
-                // ответила. Отметку снимает первый же замер, где она ответит.
-                final deadNow = livePing == null && _tunnel.isLocationDead(id);
+                final deadNow = sources.deadNow;
 
                 String pingLabel;
                 Color pingColor;
@@ -1784,6 +1804,7 @@ class _ServersScreenState extends State<ServersScreen> {
 @visibleForTesting
 ({int group, int ms}) serverSortRank({
   bool unsupportedProtocol = true,
+  bool dead = false,
   int? corePing,
   bool checkFailed = false,
   bool inSubscription = false,
@@ -1791,6 +1812,9 @@ class _ServersScreenState extends State<ServersScreen> {
   int? tcpPing,
 }) {
   if (unsupportedProtocol) return (group: 4, ms: 0);
+  // Карточка подписана «не отвечает» — и в списке ей место среди не
+  // ответивших, какое бы число ни осталось от прошлой проверки.
+  if (dead) return (group: 2, ms: 0);
   if (corePing != null && corePing > 0) return (group: 0, ms: corePing);
   if (!inSubscription && subscriptionKnown) return (group: 3, ms: 0);
   if (checkFailed) return (group: 2, ms: 0);

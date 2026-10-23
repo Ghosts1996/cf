@@ -424,6 +424,17 @@ void main() {
             OutboundGroupItem(tag: 'out-0', type: 'vless', urlTestTime: old),
             started),
         isTrue);
+    // Ядро только поднялось и само проверяет группу: наш запрос замера оно
+    // пропускает, а результаты этой проверки приходят чуть раньше нашего
+    // начала. Отбросить их — объявить молчащей всю живую сессию.
+    final ownStartupCheck = started.subtract(const Duration(seconds: 7));
+    expect(TunnelService.isStaleGroupResult(
+            OutboundGroupItem(
+                tag: 'out-0',
+                type: 'vless',
+                urlTestTime: asPlugin(ownStartupCheck)),
+            started),
+        isFalse);
     expect(TunnelService.isStaleGroupResult(
             const OutboundGroupItem(tag: 'out-0', type: 'vless'), started),
         isFalse, reason: 'время не сообщено (Windows) — число свежее');

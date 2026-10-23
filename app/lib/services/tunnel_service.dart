@@ -383,18 +383,40 @@ class TunnelService {
   /// Помечена ли локация с этим именем как не отвечающая. Имена сравниваются
   /// целиком (без учёта регистра и лишних пробелов), а не по вхождению:
   /// иначе мёртвая «Швеция» пометила бы и живую «Швеция · Стокгольм».
-  bool isLocationDead(String hostName) {
+  ///
+  /// [within] — только если отметка свежее этого: для подписи на экране.
+  /// Помнится отметка 12 часов (чтобы не ставить молчавшую локацию первой при
+  /// подключении), но называть сервер «не отвечает» спустя столько часов без
+  /// новой проверки — неправда: список заливало красным целиком.
+  bool isLocationDead(String hostName, {Duration? within}) {
     final needle = _normalizedName(hostName);
     if (needle.isEmpty) return false;
-    return deadLocations.value.any((r) => _normalizedName(r) == needle);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final remark in deadLocations.value) {
+      if (_normalizedName(remark) != needle) continue;
+      if (within == null) return true;
+      final at = _deadMarkTimes[remark];
+      return at == null || now - at < within.inMilliseconds;
+    }
+    return false;
   }
+
+  /// Когда поставлена каждая отметка из [deadLocations], мс от эпохи.
+  Map<String, int> _deadMarkTimes = const <String, int>{};
 
   static String _normalizedName(String name) =>
       name.replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
 
   Future<void> _publishDeadLocations() async {
     try {
-      deadLocations.value = await _loadDeadLocations();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final marks = await _readDeadLocations();
+      final live = <String, int>{
+        for (final e in marks.entries)
+          if (now - e.value < _deadLocationTtl.inMilliseconds) e.key: e.value,
+      };
+      _deadMarkTimes = live;
+      deadLocations.value = live.keys.toSet();
     } catch (_) {}
   }
 
@@ -2781,13 +2803,22 @@ class TunnelService {
   }
 
   /// Результат остался от прошлого замера, а не получен в том, что начат в
-  /// [startedAt]. Запас в две секунды — на секундную точность libbox.
+  /// [startedAt].
+  ///
+  /// Запас — 15 секунд, а не точное «после начала». Сразу после подъёма ядро
+  /// само проверяет всю группу, и пока эта проверка идёт (мёртвый участник
+  /// держит её до 15 секунд), наш запрос замера ядро пропускает: результаты
+  /// приходят от неё, и часть — чуть раньше нашего начала. Отбросить их
+  /// значило бы объявить молчащей всю живую сессию. Старые числа, из-за
+  /// которых упавшая локация считалась живой, — это минуты, а не секунды.
   @visibleForTesting
   static bool isStaleGroupResult(dynamic item, DateTime startedAt) {
     final time = groupResultTime(item);
     if (time == null) return false;
-    return time.isBefore(startedAt.subtract(const Duration(seconds: 2)));
+    return time.isBefore(startedAt.subtract(_groupResultTolerance));
   }
+
+  static const _groupResultTolerance = Duration(seconds: 15);
 
   /// 'out-3' -> 3. Когда локация в подписке одна, группы-селектора нет и
   /// единственный outbound называется 'proxy' — это нулевой участник.
@@ -4670,7 +4701,15 @@ class TunnelService {
     _nativeOwner = 'probe';
     _probeCancelRequested = false;
     try {
-      return await _realCheckAllProfilesOwned(connectionString);
+      final results = await _realCheckAllProfilesOwned(connectionString);
+      // Ответившие на проверку живы — снимаем с них отметку «не отвечает».
+      // Раньше её снимал только замер внутри сессии, и локация, которую
+      // проверка только что подтвердила, так и висела в списке красной.
+      unawaited(_clearDeadMarks([
+        for (final e in results.entries)
+          if (e.value.ok) e.key,
+      ]));
+      return results;
     } finally {
       if (_nativeOwner == 'probe') _nativeOwner = null;
       _probeCancelRequested = false;
