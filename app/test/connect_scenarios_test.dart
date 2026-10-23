@@ -499,6 +499,31 @@ void main() {
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 90)));
 
+  test('все молчали, пока на секунды пропадала сеть — сессию не рвём и '
+      'дюжину локаций «не отвечает» не помечаем', () async {
+    final server = await startWorkingTunnel();
+    await tunnel.connect(_subscription);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    tunnel.appInForeground = true;
+    await server.close(force: true);
+    core.groupDelays = {'out-0': 65535, 'out-1': 65535, 'out-2': 65535};
+    // К прямой проверке интернета сеть уже вернулась, и соседи отвечают.
+    tunnel.directInternetProbe = () async {
+      core.groupDelays = {'out-0': 65535, 'out-1': 50, 'out-2': 65535};
+      return true;
+    };
+    final before = core.connectCount;
+    core.selected.clear();
+    await tunnel.debugLiveCheckTick();
+    expect(core.connectCount, before, reason: 'туннель не переподключался');
+    expect(core.selected, contains('out-1'));
+    expect(tunnel.connectedServerName.value, 'Нидерланды');
+    expect(tunnel.isLocationDead('Нидерланды'), isFalse);
+    expect(tunnel.isLocationDead('Латвия'), isFalse,
+        reason: 'не ответившие на первый замер не помечаются скопом');
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
   test('вся сессия молчит и нет сети вовсе — ничего не трогаем', () async {
     final server = await startWorkingTunnel();
     await tunnel.connect(_subscription);

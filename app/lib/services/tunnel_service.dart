@@ -391,17 +391,16 @@ class TunnelService {
   bool isLocationDead(String hostName, {Duration? within}) {
     final needle = _normalizedName(hostName);
     if (needle.isEmpty) return false;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    for (final remark in deadLocations.value) {
-      if (_normalizedName(remark) != needle) continue;
-      if (within == null) return true;
-      final at = _deadMarkTimes[remark];
-      return at == null || now - at < within.inMilliseconds;
-    }
-    return false;
+    final at = _deadMarkTimes[needle];
+    if (at == null) return false;
+    if (within == null) return true;
+    return DateTime.now().millisecondsSinceEpoch - at < within.inMilliseconds;
   }
 
-  /// Когда поставлена каждая отметка из [deadLocations], мс от эпохи.
+  /// Отметки из [deadLocations] по нормализованному имени: когда поставлена
+  /// каждая, мс от эпохи. Экран «Серверы» спрашивает про каждую локацию на
+  /// каждой перерисовке и при сортировке, поэтому поиск — по готовому
+  /// ключу, а не перебором с регуляркой.
   Map<String, int> _deadMarkTimes = const <String, int>{};
 
   static String _normalizedName(String name) =>
@@ -415,7 +414,9 @@ class TunnelService {
         for (final e in marks.entries)
           if (now - e.value < _deadLocationTtl.inMilliseconds) e.key: e.value,
       };
-      _deadMarkTimes = live;
+      _deadMarkTimes = {
+        for (final e in live.entries) _normalizedName(e.key): e.value,
+      };
       deadLocations.value = live.keys.toSet();
     } catch (_) {}
   }
@@ -2392,6 +2393,29 @@ class TunnelService {
     final connectionString = _lastConnectionString;
     if (connectionString == null || !isConnected) return;
     if (_connectInProgress || _switchInProgress || _probeInProgress) return;
+    // Перед тем как рвать сессию — ещё один замер. Чаще всего «молчат все»
+    // потому, что на десяток секунд пропадала сама сеть (лифт, смена
+    // вышки, переход с Wi-Fi), а к прямой проверке она уже вернулась.
+    // Раньше в этот момент вся дюжина локаций помечалась «не отвечает»,
+    // туннель переподключался — со стороны это и было «то работает, то нет»,
+    // а список серверов краснел целиком.
+    final generation = _sessionGeneration;
+    if (_latencyProbeRunning) return;
+    _latencyProbeRunning = true;
+    Map<String, int> again;
+    try {
+      again = await measureLatenciesThroughTunnel(
+          timeout: const Duration(seconds: 12));
+    } finally {
+      _latencyProbeRunning = false;
+    }
+    if (_sessionGeneration != generation || !isConnected) return;
+    if (again.isNotEmpty) {
+      latencyByRemark.value = {...latencyByRemark.value, ...again};
+      await _recoverIfActiveOutboundIsDead(again, immediate: true);
+      return;
+    }
+    if (_connectInProgress || _switchInProgress || _probeInProgress) return;
     _lastSessionRotationAt = now;
     unawaited(AppLogService.instance.log(
         'Интернет у телефона есть, а ни одна из ${remarks.length} локаций '
@@ -3220,7 +3244,7 @@ class TunnelService {
   /// поддержки опции — конфиг с неизвестным полем такое ядро отвергает целиком.
   Future<bool> _fastPingEnabled() async {
     final enabled =
-        await LocalPrefs.instance.getBool(PrefKeys.fastPing, fallback: false);
+        await LocalPrefs.instance.getBool(PrefKeys.fastPing, fallback: true);
     if (!enabled) return false;
     return _coreSupportsUnifiedDelay();
   }
@@ -3569,13 +3593,11 @@ class TunnelService {
     // Спрашиваем у ядра один раз за запуск: умеет ли оно рвать собственное
     // рукопожатие. На штатном ядре — нет, и «Обход DPI» остаётся прежним
     // правилом маршрутизации.
-    // «Быстрый пинг» (experimental.unified_delay) — только если пользователь
-    // включил его сам. По умолчанию выключен: на адресе проверки, который
-    // закрывает соединение после первого ответа, второму запросу идти некуда,
-    // и ядро вместо задержки отдаёт код отказа — пинг пропадает совсем.
-    // Подробности и замеры — в PrefKeys.fastPing.
+    // «Быстрый пинг» (experimental.unified_delay) — включён по умолчанию, как
+    // в Hiddify: без него число на экране вдвое больше, чем у Hiddify на тех
+    // же серверах. Подробности — в PrefKeys.fastPing.
     final fastPing =
-        await LocalPrefs.instance.getBool(PrefKeys.fastPing, fallback: false);
+        await LocalPrefs.instance.getBool(PrefKeys.fastPing, fallback: true);
     // Три вопроса к ядру задаём разом, а не по очереди. Ответы независимы, а
     // каждый — это отдельный разбор пробного конфига нативной стороной; в
     // очереди они складывались в заметную паузу перед самым подключением, и

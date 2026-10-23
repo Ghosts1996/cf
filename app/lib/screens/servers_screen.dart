@@ -73,17 +73,19 @@ class _ServersScreenState extends State<ServersScreen> {
     if (hosts == null) return null;
     // Сортировка устойчивая: локации с одинаковым весом сохраняют исходный
     // порядок панели, а не прыгают при каждом замере.
-    final indexed = <MapEntry<int, dynamic>>[
-      for (var i = 0; i < hosts.length; i++) MapEntry(i, hosts[i]),
-    ];
-    indexed.sort((a, b) {
-      final ra = _sortRankFor(a.value);
-      final rb = _sortRankFor(b.value);
+    // Вес считается один раз на локацию, а не в каждом сравнении: на
+    // девяноста локациях сортировка звала его больше тысячи раз на каждой
+    // перерисовке экрана.
+    final ranks = [for (final host in hosts) _sortRankFor(host)];
+    final order = List<int>.generate(hosts.length, (i) => i);
+    order.sort((a, b) {
+      final ra = ranks[a];
+      final rb = ranks[b];
       if (ra.group != rb.group) return ra.group.compareTo(rb.group);
       if (ra.ms != rb.ms) return ra.ms.compareTo(rb.ms);
-      return a.key.compareTo(b.key);
+      return a.compareTo(b);
     });
-    return indexed.map((e) => e.value).toList(growable: false);
+    return [for (final i in order) hosts[i]];
   }
 
   /// Вес локации для сортировки. Считается ровно из того же, что показано на

@@ -40,9 +40,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _killSwitch = false;
   bool _dpiBypass = true;
   bool _proxyOnly = false;
-  // «Быстрый пинг» (experimental.unified_delay). Выключен по умолчанию —
-  // почему именно так, подробно в PrefKeys.fastPing.
-  bool _fastPing = false;
+  // «Быстрый пинг» (experimental.unified_delay). Включён по умолчанию, как в
+  // Hiddify — подробно в PrefKeys.fastPing.
+  bool _fastPing = true;
   // Выбор DNS-over-HTTPS резолвера. Прокидывается в конфиг sing-box через
   // TunnelService.connect()/_buildSingBoxConfig.
   String _dnsProvider = 'cloudflare';
@@ -82,7 +82,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _prefs.getBool(PrefKeys.dpiBypass, fallback: false),
       _prefs.getBool(PrefKeys.proxyOnlyMode, fallback: false),
       _prefs.getBool(PrefKeys.ipv6Enabled, fallback: false),
-      _prefs.getBool(PrefKeys.fastPing, fallback: false),
+      _prefs.getBool(PrefKeys.fastPing, fallback: true),
     ]);
     final savedDnsProvider = await _prefs.getString(PrefKeys.dnsServerProvider);
     final savedCustomDns = await _prefs.getString(PrefKeys.customDnsServer);
@@ -345,9 +345,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 _SettingsRow(
                   label: tr('Быстрый пинг'),
-                  hint: tr('Ядро меряет задержку вторым запросом по уже поднятому '
-                      'соединению — число выходит примерно вдвое меньше. Работает не на '
-                      'всех сетях; если пинг пропадёт, приложение вернёт обычный замер '
+                  hint: tr('Как в Hiddify: ядро меряет задержку вторым запросом по уже '
+                      'поднятому соединению — чистое время до сервера, без рукопожатия. '
+                      'Если на вашей сети пинг пропадёт, приложение вернёт обычный замер '
                       'само. Применится при следующем подключении'),
                   trailing: NeonToggle(value: _fastPing, onChanged: _setFastPing),
                 ),
