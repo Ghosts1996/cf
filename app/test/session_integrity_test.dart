@@ -42,6 +42,7 @@ void main() {
     await LocalPrefs.instance.setString(PrefKeys.cachedLatencyJson, '');
     await LocalPrefs.instance.setBool(PrefKeys.serverChosenManually, false);
     await LocalPrefs.instance.setBool(PrefKeys.vpnInterfaceVisible, false);
+    await LocalPrefs.instance.setString(PrefKeys.deadLocationsJson, '');
     core = FakeRuntime();
     tunnel = TunnelService.withRuntime(core);
   });
@@ -156,6 +157,27 @@ void main() {
         reason: 'переключение внутри ядра, без переподключения');
     expect(tunnel.connectedServerName.value, 'Латвия');
     await tunnel.disconnect();
+  });
+
+  test('ручная смена сервера внутри ядра закрывает старые соединения — '
+      'мессенджеры не висят на замолчавшей локации', () async {
+    final server = await _workingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect('$_de\n$_nl\n$_lv');
+    final before = core.closeAllCount;
+    await tunnel.switchPreferredHost('Латвия');
+    expect(core.selected.last, 'out-2');
+    expect(core.closeAllCount, greaterThan(before));
+    await tunnel.disconnect();
+  });
+
+  test('«не отвечает» — только у той самой локации, без похожих имён',
+      () async {
+    await tunnel.debugMarkLocationDead('🇸🇪 Швеция');
+    expect(tunnel.isLocationDead('🇸🇪  Швеция'), isTrue);
+    expect(tunnel.isLocationDead('🇸🇪 Швеция · Стокгольм'), isFalse);
+    await tunnel.debugClearDeadMarks(['🇸🇪 Швеция']);
+    expect(tunnel.isLocationDead('🇸🇪 Швеция'), isFalse);
   });
 
   group('сторож: «Подключено» без VPN в системе', () {

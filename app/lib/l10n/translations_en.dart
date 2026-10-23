@@ -224,6 +224,10 @@ const Map<String, String> translationsEn = {
   'Политика логов': 'Log policy',
   'No-logs': 'No-logs',
   'Проверить обновления': 'Check for updates',
+  'не отвечает': 'not responding',
+  'сейчас не отвечает — подключил': 'is not responding right now — connected to',
+  'Как только она заработает, переключу обратно.':
+      "I'll switch back as soon as it works again.",
   'Проверяю обновления…': 'Checking for updates…',
   'У вас последняя версия': 'You have the latest version',
   'Не удалось проверить обновления — проверьте интернет и попробуйте ещё раз.':

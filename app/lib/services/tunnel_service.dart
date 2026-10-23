@@ -373,6 +373,31 @@ class TunnelService {
   // прогонами, пропуск цикла при заметном трафике и публикация медианы трёх
   // последних замеров. Экраны только читают `latencyByRemark`.
 
+  /// Локации, которые недавно перестали отвечать (см. _markLocationDead):
+  /// экран «Серверы» показывает их «не отвечает», а не прошлым пингом.
+  /// Раньше там висели зелёные «41 мс» из давней проверки — человек выбирал
+  /// мёртвый сервер и оставался без интернета.
+  final ValueNotifier<Set<String>> deadLocations =
+      ValueNotifier<Set<String>>(const <String>{});
+
+  /// Помечена ли локация с этим именем как не отвечающая. Имена сравниваются
+  /// целиком (без учёта регистра и лишних пробелов), а не по вхождению:
+  /// иначе мёртвая «Швеция» пометила бы и живую «Швеция · Стокгольм».
+  bool isLocationDead(String hostName) {
+    final needle = _normalizedName(hostName);
+    if (needle.isEmpty) return false;
+    return deadLocations.value.any((r) => _normalizedName(r) == needle);
+  }
+
+  static String _normalizedName(String name) =>
+      name.replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
+
+  Future<void> _publishDeadLocations() async {
+    try {
+      deadLocations.value = await _loadDeadLocations();
+    } catch (_) {}
+  }
+
   /// Задержка до каждой локации подписки, ключ — remark из VLESS-ссылки.
   /// Значение уже сглажено (медиана трёх последних измерений). Локации,
   /// до которых ядро не достучалось в последнем прогоне, здесь отсутствуют.
@@ -474,6 +499,7 @@ class TunnelService {
       // иначе он подставит `DateTime.now()` и обнулит счётчик работающей
       // сессии.
       await _loadPersistedSession();
+      unawaited(_publishDeadLocations());
       await _applyCompatDefaults();
       // Таймаут нужен и здесь: `_client.initialize()` — тоже MethodChannel-вызов,
       // и он единственный оставался без ограничения по времени. Если после свайпа
@@ -2729,6 +2755,30 @@ class TunnelService {
     return int.tryParse(tag.substring(4));
   }
 
+  /// После переключения локации внутри работающего ядра по выбору человека.
+  ///
+  /// Уже открытые соединения ядро на новую локацию не переводит
+  /// (`interrupt_exist_connections: false`). Если прежняя локация молчала,
+  /// мессенджеры так и висели на ней с «Соединение…», пока их соединения не
+  /// отвалятся по таймауту, — на видео Telegram не подключался, хотя сервер
+  /// уже сменили. Закрываем их: приложения тут же переоткроют соединения
+  /// уже через выбранную локацию.
+  ///
+  /// Выбранная локация недавно молчала — проверяем связь сразу, не дожидаясь
+  /// очередного тика: если она всё ещё мертва, сессия уйдёт на живую за
+  /// секунды, а не через полминуты.
+  Future<void> _afterManualInstantSwitch(String hostName) async {
+    _closeLiveClient();
+    try {
+      await _client.closeAllConnections().timeout(_nativeCallTimeout);
+    } catch (_) {}
+    if (isLocationDead(hostName)) {
+      Timer(const Duration(seconds: 2), () {
+        if (isConnected) unawaited(_liveCheckTick(force: true));
+      });
+    }
+  }
+
   /// Смена страны у уже поднятого туннеля.
   ///
   /// Если сессия собрана с группой-селектором, переключение идёт внутри
@@ -2765,6 +2815,7 @@ class TunnelService {
           _lastPreferredHostName = hostName;
           connectedServerName.value = hostName;
           _persistSessionRoute();
+          await _afterManualInstantSwitch(hostName);
           return hostName;
         } catch (_) {
           // Ядро не ответило — ниже обычный путь с переподключением.
@@ -2796,6 +2847,7 @@ class TunnelService {
             _lastPreferredHostName = hostName;
             connectedServerName.value = hostName;
             _persistSessionRoute();
+            await _afterManualInstantSwitch(hostName);
             return hostName;
           } catch (e) {
             // Мгновенное переключение не удалось (ядро не ответило, группы в этой
@@ -2814,21 +2866,27 @@ class TunnelService {
       return await connect(connectionString, preferredHostName: hostName);
     } catch (_) {
       // Новая страна не поднялась — возвращаем ту, на которой пользователь
-      // только что сидел, чтобы он не остался в открытой сети.
+      // только что сидел, чтобы он не остался в открытой сети. Сразу после
+      // гашения Android не всегда успевает отпустить VpnService — даём ему
+      // секунду.
+      await Future<void>.delayed(const Duration(seconds: 1));
       try {
         await connect(connectionString, preferredHostName: previousHostName);
       } catch (_) {
-        // Не поднялась и прежняя: сеть могла отвалиться целиком. Сообщаем исходную
-        // ошибку вызывающему, дальше в дело вступает обычное авто-переподключение
-        // (_onStatusChanged), ради которого мы и сохранили _lastConnectionString
-        // выше.
-        //
-        // Чтобы оно сработало, снимаем флаг "пользователь сам отключился": его
-        // выставил наш же disconnect() в начале переключения, а connect() снимает
-        // его только при успехе. Пользователь ничего не отключал — он остался без
-        // VPN из-за неудачной смены сервера, и это ровно тот случай, ради которого
-        // Kill Switch существует.
-        _userInitiatedDisconnect = false;
+        // Не поднялась и прежняя — последняя попытка: любая живая локация
+        // подписки. Раньше здесь рассчитывали на авто-переподключение, но
+        // оно теперь поднимает туннель только после аварии ядра в фоне, и
+        // человек оставался с «ОТКЛЮЧЕНО» после обычной смены сервера.
+        try {
+          await connect(connectionString);
+        } catch (_) {
+          // Не поднялось ничего: сеть могла отвалиться целиком. Сообщаем
+          // исходную ошибку вызывающему. Флаг «пользователь сам отключился»
+          // выставил наш же disconnect() в начале переключения, а connect()
+          // снимает его только при успехе. Пользователь ничего не отключал —
+          // снимаем сами, чтобы Kill Switch видел честную картину.
+          _userInitiatedDisconnect = false;
+        }
       }
       rethrow;
     } finally {
@@ -4033,6 +4091,7 @@ class TunnelService {
       await LocalPrefs.instance
           .setString(PrefKeys.deadLocationsJson, jsonEncode(marks));
     } catch (_) {}
+    await _publishDeadLocations();
   }
 
   /// Пользователь страну не выбирал — держим сессию на самой быстрой живой.
@@ -4090,6 +4149,7 @@ class TunnelService {
       await LocalPrefs.instance
           .setString(PrefKeys.deadLocationsJson, jsonEncode(marks));
     } catch (_) {}
+    await _publishDeadLocations();
   }
 
   /// Локации, которые ответили на замер, — живы: отметку снимаем.
@@ -4105,6 +4165,7 @@ class TunnelService {
       await LocalPrefs.instance
           .setString(PrefKeys.deadLocationsJson, jsonEncode(marks));
     } catch (_) {}
+    await _publishDeadLocations();
   }
 
   @visibleForTesting

@@ -239,6 +239,10 @@ class _ServersScreenState extends State<ServersScreen> {
     if (!_tunnel.isConnected && !_tunnel.isBusy) _maybeAutoRealCheck();
   }
 
+  void _onDeadLocationsChanged() {
+    if (mounted) setState(() {});
+  }
+
   void _onConnectedServerChanged() {
     if (!mounted) return;
     setState(() {}); // обновить, какая карточка сейчас считается "текущей"
@@ -1141,10 +1145,18 @@ class _ServersScreenState extends State<ServersScreen> {
     _switching = true;
     if (mounted) setState(() => _switchingToId = id);
     try {
-      await _tunnel.switchPreferredHost(id);
+      final connected = await _tunnel.switchPreferredHost(id);
       if (mounted) {
         setState(() => _lastSwitchTarget = id);
         _lastSwitchAt = DateTime.now();
+        // Выбранная замолчала, и подключение пошло через живую: говорим об
+        // этом прямо, иначе выглядит так, будто приложение не слушается.
+        final connectedId = _hostIdForConnectedName(connected);
+        if (connectedId != null && connectedId != id) {
+          ScaffoldMessenger.of(context).showSnackBar(appSnack(
+              '«$name» ${tr('сейчас не отвечает — подключил')} '
+              '«$connected». ${tr('Как только она заработает, переключу обратно.')}'));
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1172,6 +1184,7 @@ class _ServersScreenState extends State<ServersScreen> {
     // Новая порция замеров от единого замерщика — перерисовать подписи.
     _tunnel.latencyByRemark.addListener(_onTunnelLatencyChanged);
     _tunnel.connectedServerName.addListener(_onConnectedServerChanged);
+    _tunnel.deadLocations.addListener(_onDeadLocationsChanged);
   }
 
   @override
@@ -1180,6 +1193,7 @@ class _ServersScreenState extends State<ServersScreen> {
     _tunnel.status.removeListener(_onTunnelStatusChangedForPing);
     _tunnel.latencyByRemark.removeListener(_onTunnelLatencyChanged);
     _tunnel.connectedServerName.removeListener(_onConnectedServerChanged);
+    _tunnel.deadLocations.removeListener(_onDeadLocationsChanged);
     _tickerEnabled?.removeListener(_onVisibilityChanged);
     super.dispose();
   }
@@ -1524,8 +1538,13 @@ class _ServersScreenState extends State<ServersScreen> {
                 // Сохранённое число прошлой проверки. Оно живёт между
                 // запусками приложения, и именно оно показывается сразу при
                 // открытии экрана — до того, как отработает свежий замер.
+                // Только свежее: на видео у замолчавшей Швеции стояли зелёные
+                // «41 мс» из проверки шестнадцатичасовой давности, и её
+                // выбирали как самую быструю.
                 final savedPing =
-                    (realCheck != null && realCheck.ok) ? realCheck.latencyMs : null;
+                    (realCheck != null && realCheck.ok && _isRealCheckFresh)
+                        ? realCheck.latencyMs
+                        : null;
                 // Живое число от ядра есть только при поднятом туннеле и
                 // только после первого прогона замерщика.
                 final livePing =
@@ -1544,12 +1563,20 @@ class _ServersScreenState extends State<ServersScreen> {
                 // говорим, почему подключиться нельзя.
                 final unsupportedProtocol = _unsupportedProtocols[id];
 
+                // Локация недавно замолчала (ядро не достучалось до неё на
+                // замере или с неё пришлось уводить сессию) и с тех пор не
+                // ответила. Отметку снимает первый же замер, где она ответит.
+                final deadNow = livePing == null && _tunnel.isLocationDead(id);
+
                 String pingLabel;
                 Color pingColor;
                 if (unsupportedProtocol != null) {
                   pingLabel =
                       '${tr('протокол')} $unsupportedProtocol · ${tr('приложение его пока не поддерживает')}';
                   pingColor = AppColors.textDim;
+                } else if (deadNow) {
+                  pingLabel = tr('не отвечает');
+                  pingColor = AppColors.offline;
                 } else if (corePing != null && corePing > 0) {
                   // Число показываем всегда, когда оно есть, — в том числе
                   // пока идёт свежая проверка. Раньше проверка на время своей
