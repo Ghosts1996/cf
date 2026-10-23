@@ -62,6 +62,11 @@ class FakeRuntime implements SingboxRuntimeClient {
     _emit('ServiceState.stopped');
   }
 
+  /// Плагин подключился к уже работающему сервису (приложение открыли на
+  /// живом туннеле) и присылает «started» потоком, уже после того, как
+  /// getServiceState() ответил «stopped».
+  void simulateAttach() => _emit('ServiceState.started');
+
   /// Ядро упало само: сообщение об аварии, затем «stopped».
   void simulateCrash({String message = 'Core failed: runtime error'}) {
     liveSessions = 0;

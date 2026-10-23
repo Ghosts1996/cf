@@ -17,9 +17,11 @@ import 'services/api_client.dart';
 import 'services/app_log_service.dart';
 import 'services/tunnel_service.dart';
 import 'services/locale_service.dart';
+import 'services/startup_guard.dart';
 import 'services/tray_service.dart';
 import 'services/update_service.dart';
 import 'services/vpn_notification_service.dart';
+import 'widgets/neon.dart';
 
 Future<void> main() async {
   // main() асинхронный: LocaleService.ensureLoaded() ниже ждётся до
@@ -52,20 +54,41 @@ Future<void> main() async {
       systemNavigationBarIconBrightness: Brightness.light,
     ),
   );
+  // До первого чтения настроек: на Windows их файл мог остаться обрезанным
+  // после закрытия посреди записи, и тогда приложение не доходило до первого
+  // кадра — чёрное окно (см. repairCorruptWindowsPrefs).
+  await repairCorruptWindowsPrefs();
   // Пишет события туннеля (подключение, отключение, ошибки) в локальный
   // журнал, слушая публичные ValueNotifier'ы TunnelService снаружи. main()
   // вызывается один раз за жизнь процесса, поэтому отписка здесь не нужна.
   _wireAppLogging();
+  // Всё до runApp() — под защитой: упавший или зависший шаг не должен
+  // оставить окно пустым. Интерфейс запускается в любом случае.
+  final startupProblems = <String>[];
   // Читаем сохранённый язык до первого runApp(), чтобы приложение сразу
   // открылось на нужном, а не мигнуло русским на первом кадре. Дальше
   // VpnOnlineApp слушает LocaleService.instance сам.
-  await LocaleService.instance.ensureLoaded();
+  await guardedStartupStep('язык', LocaleService.instance.ensureLoaded,
+      onProblem: startupProblems.add);
   // На Android/iOS/web сервис выключает сам себя, так что вызывать
   // безусловно безопасно.
-  await TrayService.instance.init();
+  await guardedStartupStep('значок в трее', TrayService.instance.init,
+      onProblem: startupProblems.add);
   // Содержимое уведомления VPN в шторке Android (сервер, пинг, ключ).
   VpnNotificationService.instance.start();
   runApp(const VpnOnlineApp());
+  // Журнал сам хранится в настройках — пишем в него уже после запуска
+  // интерфейса.
+  final backup = repairedPrefsBackupPath;
+  if (backup != null) {
+    AppLogService.instance.log(
+        'Файл настроек был повреждён (приложение закрыли во время записи) — '
+        'начал с чистых настроек, повреждённая копия: $backup',
+        level: AppLogLevel.warning);
+  }
+  for (final problem in startupProblems) {
+    AppLogService.instance.log(problem, level: AppLogLevel.warning);
+  }
 }
 
 void _wireAppLogging() {
@@ -233,7 +256,11 @@ class _AppEntryPointState extends State<AppEntryPoint> {
 
   Future<void> _checkSession() async {
     try {
-      final restored = await ApiClient.instance.restoreSession();
+      // Хранилище входа (Keystore, диспетчер учётных данных Windows) изредка
+      // не отвечает вовсе — без предела экран так и оставался бы пустым.
+      final restored = await ApiClient.instance
+          .restoreSession()
+          .timeout(const Duration(seconds: 8));
       if (mounted) setState(() => _stage = restored ? _Stage.app : _Stage.auth);
     } catch (e) {
       AppLogService.instance.log(
@@ -248,7 +275,26 @@ class _AppEntryPointState extends State<AppEntryPoint> {
   Widget build(BuildContext context) {
     switch (_stage) {
       case _Stage.loading:
-        return const Scaffold(backgroundColor: AppColors.bg, body: SizedBox.shrink());
+        // Логотип и индикатор, а не пустой тёмный экран: если загрузка
+        // задержится, видно, что приложение живо.
+        return const Scaffold(
+          backgroundColor: AppColors.bg,
+          body: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AppLogo(size: 88, glow: 18),
+                SizedBox(height: 24),
+                SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: AppColors.violet2),
+                ),
+              ],
+            ),
+          ),
+        );
       case _Stage.onboarding:
         return OnboardingScreen(onDone: () => _checkSession());
       case _Stage.auth:

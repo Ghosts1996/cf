@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 import 'local_prefs.dart';
 
@@ -110,7 +111,14 @@ class AppLogService {
 
   /// Пауза перед записью в хранилище: строки одного всплеска (подключение,
   /// пачка журнала ядра) уходят на диск одной записью.
-  static const _persistDelay = Duration(milliseconds: 150);
+  ///
+  /// На Windows — реже: там все настройки лежат одним JSON-файлом, который
+  /// переписывается целиком без защиты от обрыва, и приложение, закрытое
+  /// посреди записи (выключение компьютера, установщик обновления), оставляло
+  /// его обрезанным — см. startup_guard.dart.
+  static final _persistDelay = !kIsWeb && Platform.isWindows
+      ? const Duration(seconds: 2)
+      : const Duration(milliseconds: 150);
 
   /// Потолок размера журнала в символах. Хранилище настроек целиком
   /// читается при каждом запуске приложения и целиком переписывается при

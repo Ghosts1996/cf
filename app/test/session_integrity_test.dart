@@ -133,6 +133,31 @@ void main() {
     await tunnel.disconnect();
   });
 
+  test('открыли приложение на живом туннеле, «подключено» пришло потоком '
+      'позже — «Сменить сервер» переключает мгновенно, без «Нет активного '
+      'туннеля»', () async {
+    await LocalPrefs.instance.setString(
+        PrefKeys.tunnelSessionRouteJson,
+        jsonEncode({
+          'connection_string': '$_de\n$_nl\n$_lv',
+          'preferred_host': 'Германия',
+          'server_name': 'Германия',
+          'outbound_remarks': ['Германия', 'Нидерланды', 'Латвия'],
+        }));
+    await tunnel.syncRuntimeState(); // плагин ещё не привязался: «stopped»
+    expect(tunnel.isConnected, isFalse);
+    core.simulateAttach();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(tunnel.isConnected, isTrue);
+    final connectsBefore = core.connectCount;
+    await tunnel.switchPreferredHost('Латвия');
+    expect(core.selected.last, 'out-2');
+    expect(core.connectCount, connectsBefore,
+        reason: 'переключение внутри ядра, без переподключения');
+    expect(tunnel.connectedServerName.value, 'Латвия');
+    await tunnel.disconnect();
+  });
+
   group('сторож: «Подключено» без VPN в системе', () {
     test('VPN-интерфейс был и пропал — показываем «отключено»', () async {
       final server = await _workingTunnel();

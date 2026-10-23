@@ -666,6 +666,21 @@ class TunnelService {
         .setString(PrefKeys.tunnelSessionRouteJson, jsonEncode(payload)));
   }
 
+  /// Туннель поднят, но процесс приложения перезапускался:
+  /// `_lastConnectionString`, `_lastPreferredHostName` и connectedServerName
+  /// живут только в памяти. Возвращаем их из сохранённого состояния
+  /// (_persistSessionRoute), иначе на живом туннеле не работают ни «Сменить
+  /// сервер», ни Kill Switch.
+  void _restoreSessionRouteIfMissing() {
+    if (_lastConnectionString == null && _persistedConnectionString != null) {
+      _lastConnectionString = _persistedConnectionString;
+      _lastPreferredHostName = _persistedPreferredHost;
+    }
+    if (connectedServerName.value == null && _persistedServerName != null) {
+      connectedServerName.value = _persistedServerName;
+    }
+  }
+
   void _clearPersistedSessionRoute() {
     _persistedConnectionString = null;
     _persistedPreferredHost = null;
@@ -729,6 +744,15 @@ class TunnelService {
         // Туннель на месте — если стирание было запланировано мигом ранее,
         // отменяем его (см. _schedulePersistedStartWipe).
         _cancelPersistedStartWipe();
+        // При открытии приложения на живом туннеле плагин часто сначала
+        // говорит «отключено» (syncRuntimeState видит его и ничего не
+        // восстанавливает), а «подключено» присылает потоком мигом позже.
+        // Маршрут сессии нужно вернуть и здесь, иначе «Сменить сервер»
+        // отвечал «Нет активного туннеля, который можно переключить» на
+        // экране с «ПОДКЛЮЧЕНО». Своё подключение запишет маршрут само.
+        if (!_connectInProgress && !_switchInProgress) {
+          _restoreSessionRouteIfMissing();
+        }
       }
       // Во время смены сервера отметку старта не трогаем: для пользователя
       // сессия продолжается, счётчик не должен прыгать на ноль.
@@ -1022,20 +1046,7 @@ class TunnelService {
         // не сможет — отсчёт шёл бы в памяти, но не переживал перезапуск.
         _connectStartedAt = restored ?? DateTime.now();
         if (restored == null) _persistConnectStart(_connectStartedAt);
-        // Туннель поднят, но процесс приложения перезапускался:
-        // `_lastConnectionString`, `_lastPreferredHostName` и connectedServerName
-        // живут только в памяти. Возвращаем их из сохранённого состояния
-        // (_persistSessionRoute), иначе на живом туннеле не работают ни "Сменить
-        // сервер", ни Kill Switch.
-        if (_lastConnectionString == null &&
-            _persistedConnectionString != null) {
-          _lastConnectionString = _persistedConnectionString;
-          _lastPreferredHostName = _persistedPreferredHost;
-        }
-        if (connectedServerName.value == null &&
-            _persistedServerName != null) {
-          connectedServerName.value = _persistedServerName;
-        }
+        _restoreSessionRouteIfMissing();
       } else {
         // Туннель по данным нативной стороны не поднят — сбрасываем отметку
         // времени в памяти.
@@ -2736,6 +2747,32 @@ class TunnelService {
   /// и только потом сообщаем об ошибке: иначе пользователь оставался бы без
   /// VPN — старая сессия погашена, новая не поднялась.
   Future<String> switchPreferredHost(String hostName) async {
+    // Процесс приложения перезапускался на живом туннеле: разобранных
+    // профилей сессии в памяти уже нет, но имена её локаций сохранены
+    // (_persistSessionRoute) — по ним мгновенное переключение тоже работает.
+    if (_sessionOutboundOrder.isEmpty &&
+        _sessionOutboundRemarks.length > 1 &&
+        isConnected) {
+      final remark = _matchRemark(_sessionOutboundRemarks, hostName);
+      final index =
+          remark == null ? -1 : _sessionOutboundRemarks.indexOf(remark);
+      if (index >= 0) {
+        try {
+          await _client
+              .selectOutbound('proxy', 'out-$index')
+              .timeout(_nativeCallTimeout);
+          _restoreSessionRouteIfMissing();
+          _lastPreferredHostName = hostName;
+          connectedServerName.value = hostName;
+          _persistSessionRoute();
+          return hostName;
+        } catch (_) {
+          // Ядро не ответило — ниже обычный путь с переподключением.
+          lastError.value = null;
+        }
+      }
+    }
+    _restoreSessionRouteIfMissing();
     final connectionString = _lastConnectionString;
     if (connectionString == null || connectionString.isEmpty) {
       throw TunnelException(
