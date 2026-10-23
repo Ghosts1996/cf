@@ -8,7 +8,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
-    show LogEntry, LogLevel;
+    show LogEntry, LogLevel, OutboundGroupItem;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vpnonline_app/services/app_log_service.dart';
@@ -370,6 +370,64 @@ void main() {
     server = await startWorkingTunnel();
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('замер не верит прошлым числам: упавшая активная локация со старыми '
+      '86 мс не считается живой', () async {
+    var server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    tunnel.appInForeground = true;
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    core.selected.clear();
+
+    // Журнал от 23.10: «Германия» отвечала 86 мс в 18:22, в 18:24 упала. В
+    // снимке группы её число осталось с прошлого замера, и самовосстановление
+    // считало её живой — переключения не было, пока человек не
+    // переподключился руками.
+    await server.close(force: true);
+    final now = DateTime.now();
+    core.groupDelays = {'out-0': 86, 'out-1': 60, 'out-2': 40};
+    core.groupResultTimes = {
+      'out-0': now.subtract(const Duration(minutes: 2)),
+      'out-1': now.add(const Duration(seconds: 1)),
+      'out-2': now.add(const Duration(seconds: 1)),
+    };
+    await tunnel.debugLiveCheckTick();
+    expect(core.selected, contains('out-2'));
+    expect(tunnel.connectedServerName.value, 'Латвия');
+    expect(tunnel.latencyByRemark.value.containsKey('Германия'), isFalse,
+        reason: 'старое число не выдаётся за свежий замер');
+    server = await startWorkingTunnel();
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('время результата ядра: секунды libbox и миллисекунды', () {
+    final started = DateTime(2026, 10, 23, 18, 24, 25, 500);
+    final fresh = DateTime(2026, 10, 23, 18, 24, 25); // секундная точность
+    final old = DateTime(2026, 10, 23, 18, 22, 21);
+    DateTime asPlugin(DateTime t) =>
+        DateTime.fromMillisecondsSinceEpoch(t.millisecondsSinceEpoch ~/ 1000);
+    expect(TunnelService.groupResultTime(OutboundGroupItem(
+            tag: 'out-0', type: 'vless', urlTestTime: asPlugin(old))),
+        old);
+    expect(TunnelService.isStaleGroupResult(
+            OutboundGroupItem(
+                tag: 'out-0', type: 'vless', urlTestTime: asPlugin(old)),
+            started),
+        isTrue);
+    expect(TunnelService.isStaleGroupResult(
+            OutboundGroupItem(
+                tag: 'out-0', type: 'vless', urlTestTime: asPlugin(fresh)),
+            started),
+        isFalse);
+    expect(TunnelService.isStaleGroupResult(
+            OutboundGroupItem(tag: 'out-0', type: 'vless', urlTestTime: old),
+            started),
+        isTrue);
+    expect(TunnelService.isStaleGroupResult(
+            const OutboundGroupItem(tag: 'out-0', type: 'vless'), started),
+        isFalse, reason: 'время не сообщено (Windows) — число свежее');
+  });
 
   test('соединения через активную локацию падают — проверка сразу, даже в '
       'кармане и без трафика', () async {

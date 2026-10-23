@@ -164,6 +164,11 @@ class FakeRuntime implements SingboxRuntimeClient {
   /// списке — тот не ответил.
   Map<String, int> groupDelays = {};
 
+  /// Когда ядро получило результат участника (`{'out-0': вчера}`). Кого нет
+  /// в списке — у того время не сообщается. Отдаётся так же, как плагин:
+  /// секунды libbox, разобранные как миллисекунды.
+  Map<String, DateTime> groupResultTimes = {};
+
   int closeAllCount = 0;
 
   @override
@@ -180,7 +185,15 @@ class FakeRuntime implements SingboxRuntimeClient {
       _groups.add([
         OutboundGroup(tag: groupTag, type: 'urltest', items: [
           for (final e in groupDelays.entries)
-            OutboundGroupItem(tag: e.key, type: 'vless', urlTestDelayMs: e.value),
+            OutboundGroupItem(
+                tag: e.key,
+                type: 'vless',
+                urlTestDelayMs: e.value,
+                urlTestTime: groupResultTimes[e.key] == null
+                    ? null
+                    : DateTime.fromMillisecondsSinceEpoch(
+                        groupResultTimes[e.key]!.millisecondsSinceEpoch ~/
+                            1000)),
         ]),
       ]);
     });

@@ -2197,12 +2197,17 @@ class TunnelService {
     bool stillOurs() => _sessionGeneration == generation && isConnected;
     _liveCheckRunning = true;
     try {
-      if (await _liveProbe(fresh: false)) return;
+      // По сигналу ядра соединения через локацию уже падают одно за другим:
+      // старое keep-alive соединение не проверяем и паузу не выжидаем —
+      // каждая лишняя секунда здесь человек сидит без интернета.
+      if (await _liveProbe(fresh: force)) return;
       // Старое соединение могло просто истечь — повторяем по свежему.
       if (!stillOurs()) return;
-      if (await _liveProbe(fresh: true)) return;
-      await Future<void>.delayed(const Duration(seconds: 2));
-      if (!stillOurs()) return;
+      if (!force) {
+        if (await _liveProbe(fresh: true)) return;
+        await Future<void>.delayed(const Duration(seconds: 2));
+        if (!stillOurs()) return;
+      }
       if (await _liveProbe(fresh: true)) return;
       if (!stillOurs() || _latencyProbeRunning) return;
 
@@ -2602,6 +2607,7 @@ class TunnelService {
     StreamSubscription<dynamic>? sub;
     Timer? deadline;
     Timer? cancelWatch;
+    final startedAt = DateTime.now();
     final collected = <String, int>{};
     // Кто уже отчитался — включая тех, кто отчитался отказом (0xFFFF). Без
     // них сбор ждал ответа и от мёртвых участников, которые не ответят
@@ -2630,6 +2636,12 @@ class TunnelService {
             // недоступный outbound. Показанное как есть, оно превращалось на
             // экране в "65535 мс · медленно" у полностью мёртвого сервера.
             if (tag == null || delay == null || delay <= 0) continue;
+            // Снимок группы несёт и прошлые результаты: пока новый замер
+            // идёт, у участника стоит число с предыдущего. Упавшая минуту
+            // назад активная локация так и «отвечала» своими старыми 86 мс,
+            // самовосстановление считало её живой и не переключалось —
+            // человек сидел без интернета, пока не переподключался сам.
+            if (isStaleGroupResult(item, startedAt)) continue;
             final index = _indexOfOutboundTag(tag);
             if (index == null || index >= order.length) continue;
             if (delay >= _urlTestFailedDelayMs) {
@@ -2745,6 +2757,36 @@ class TunnelService {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Когда ядро получило результат участника группы. null — не сообщило
+  /// (Windows присылает только свежие числа, время там не нужно).
+  ///
+  /// libbox отдаёт Unix-время в секундах, а плагин разбирает его как
+  /// миллисекунды, и выходит январь 1970-го. Поэтому берём сырое число и
+  /// единицы определяем по величине: секунды до 5000 года меньше 10^11,
+  /// миллисекунды после 1973-го — больше.
+  @visibleForTesting
+  static DateTime? groupResultTime(dynamic item) {
+    try {
+      final time = item.urlTestTime;
+      if (time is! DateTime) return null;
+      final raw = time.millisecondsSinceEpoch;
+      if (raw <= 0) return null;
+      return DateTime.fromMillisecondsSinceEpoch(
+          raw < 100000000000 ? raw * 1000 : raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Результат остался от прошлого замера, а не получен в том, что начат в
+  /// [startedAt]. Запас в две секунды — на секундную точность libbox.
+  @visibleForTesting
+  static bool isStaleGroupResult(dynamic item, DateTime startedAt) {
+    final time = groupResultTime(item);
+    if (time == null) return false;
+    return time.isBefore(startedAt.subtract(const Duration(seconds: 2)));
   }
 
   /// 'out-3' -> 3. Когда локация в подписке одна, группы-селектора нет и
