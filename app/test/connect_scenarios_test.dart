@@ -68,6 +68,7 @@ void main() {
     for (final key in [
       PrefKeys.cachedLatencyJson,
       PrefKeys.cachedLatencyAt,
+      PrefKeys.selectedServerId,
       PrefKeys.deadLocationsJson,
       PrefKeys.subscriptionCacheJson,
     ]) {
@@ -231,6 +232,74 @@ void main() {
     expect(firstAt!.isBefore(doneAt), isTrue);
     expect(results['Германия']?.latencyMs, 90);
     expect(results['Нидерланды']?.ok, isFalse);
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('проверка серверов пишет, почему сервер не ответил', () async {
+    core.groupDelays = {'out-0': 90, 'out-1': 65535, 'out-2': 40};
+    core.groupFailureLogs = {
+      'out-1': 'reality verification failed: x509: certificate is not valid',
+    };
+    final results = await tunnel.realCheckAllProfiles(_subscription);
+    expect(results['Нидерланды']?.ok, isFalse);
+    expect(results['Нидерланды']?.error,
+        'не ответил: reality verification failed: x509: certificate is not '
+        'valid');
+    expect(results['Германия']?.ok, isTrue);
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('второй проход проверки серверов меряет заново, а не повторяет первый',
+      () async {
+    // Журнал 30.10: «второй проход уточнил 0 и оживил 0 из 34» — он сразу
+    // принимал числа первого прохода за свежие и ничего не мерил.
+    core.groupDelays = {'out-0': 300, 'out-1': 65535, 'out-2': 250};
+    final first = DateTime.now();
+    core.groupResultTimes = {'out-0': first, 'out-1': first, 'out-2': first};
+    core.onUrlTest = (run) {
+      if (run != 2) return;
+      // Второй проход: ядро сперва присылает снимок с числами первого…
+      core.emitGroupSnapshot();
+      // …а потом новые, по прогретым соединениям.
+      final later = DateTime.now().add(const Duration(seconds: 2));
+      core.groupDelays = {'out-0': 90, 'out-1': 65535, 'out-2': 60};
+      core.groupResultTimes = {'out-0': later, 'out-1': later, 'out-2': later};
+    };
+    final results = await tunnel.realCheckAllProfiles(_subscription);
+    expect(results['Германия']?.latencyMs, 90);
+    expect(results['Латвия']?.latencyMs, 60);
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('работает замена выбранной: медленная — уходим на быструю, выбранная '
+      'ожила — возвращаемся на неё', () async {
+    // Журнал 30.10: выбранная «Англия» молчала, вместо неё работала
+    // «Франция · Париж» с 5164 мс, и переход был заперт ручным выбором.
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await LocalPrefs.instance.setBool(PrefKeys.serverChosenManually, true);
+    await LocalPrefs.instance.setString(PrefKeys.selectedServerId, 'Германия');
+    await tunnel.debugMarkLocationDead('Германия');
+    await tunnel.connect(_subscription, preferredHostName: 'Германия');
+    tunnel.appInForeground = true;
+    // Сессия: out-0 Нидерланды (замена), out-1 Германия, out-2 Латвия.
+    expect(tunnel.connectedServerName.value, 'Нидерланды');
+
+    core.selected.clear();
+    core.groupDelays = {'out-0': 1460, 'out-1': 65535, 'out-2': 87};
+    await tunnel.debugRunLatencyProbe();
+    expect(core.selected, ['out-2']);
+    expect(tunnel.connectedServerName.value, 'Латвия');
+
+    core.selected.clear();
+    core.groupDelays = {'out-0': 1460, 'out-1': 120, 'out-2': 87};
+    await tunnel.debugRunLatencyProbe();
+    expect(core.selected, ['out-1'], reason: 'выбранная ожила — она и нужна');
+    expect(tunnel.connectedServerName.value, 'Германия');
+
+    // На выбранной остаёмся, даже если соседка быстрее.
+    core.selected.clear();
+    core.groupDelays = {'out-0': 1460, 'out-1': 900, 'out-2': 87};
+    await tunnel.debugRunLatencyProbe();
+    expect(core.selected, isEmpty);
+    await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 60)));
 
   test('проверка серверов не стартует, пока идёт подключение', () async {

@@ -1,7 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
-    show OutboundGroup, OutboundGroupItem, SessionOptions, TrafficStats;
+    show
+        LogEntry,
+        LogLevel,
+        OutboundGroup,
+        OutboundGroupItem,
+        SessionOptions,
+        TrafficStats;
 import 'package:vpnonline_app/services/singbox_runtime.dart';
 
 /// Управляемая заглушка нативного ядра.
@@ -177,9 +183,51 @@ class FakeRuntime implements SingboxRuntimeClient {
     closeAllCount++;
   }
 
+  /// Что ядро напишет в журнал (уровень debug) о не ответивших участниках:
+  /// `{'out-1': 'dial tcp …: i/o timeout'}`.
+  Map<String, String> groupFailureLogs = {};
+
+  /// Вызывается в начале каждого замера с его номером (с единицы) — чтобы
+  /// сценарий мог поменять ответы ядра между проходами.
+  void Function(int run)? onUrlTest;
+  int _urlTestRuns = 0;
+
+  /// Отдать снимок группы прямо сейчас — как настоящее ядро, которое при
+  /// первом же новом результате присылает всю группу, в том числе числа
+  /// прошлого замера у ещё не перемеренных участников.
+  void emitGroupSnapshot([String groupTag = 'latency']) {
+    _groups.add([
+      OutboundGroup(tag: groupTag, type: 'urltest', items: [
+        for (final e in groupDelays.entries)
+          OutboundGroupItem(
+              tag: e.key,
+              type: 'vless',
+              urlTestDelayMs: e.value,
+              urlTestTime: groupResultTimes[e.key] == null
+                  ? null
+                  : DateTime.fromMillisecondsSinceEpoch(
+                      groupResultTimes[e.key]!.millisecondsSinceEpoch ~/
+                          1000)),
+      ]),
+    ]);
+  }
+
   @override
   Future<void> urlTest(String groupTag) async {
     calls.add('urlTest');
+    onUrlTest?.call(++_urlTestRuns);
+    if (groupFailureLogs.isNotEmpty) {
+      Timer(const Duration(milliseconds: 10), () {
+        emitCoreLog([
+          for (final e in groupFailureLogs.entries)
+            LogEntry(
+                level: LogLevel.debug,
+                message: '\x1B[36mDEBUG\x1B[0m[0042] outbound ${e.key} '
+                    'unavailable: ${e.value}',
+                time: DateTime.now()),
+        ]);
+      });
+    }
     if (groupDelays.isEmpty) return;
     Timer(const Duration(milliseconds: 30), () {
       _groups.add([

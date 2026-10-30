@@ -2686,6 +2686,7 @@ class TunnelService {
     Timer? deadline;
     Timer? cancelWatch;
     final startedAt = DateTime.now();
+    final previousEnd = _lastGroupCollectEnd;
     final collected = <String, int>{};
     // Кто уже отчитался — включая тех, кто отчитался отказом (0xFFFF). Без
     // них сбор ждал ответа и от мёртвых участников, которые не ответят
@@ -2719,7 +2720,9 @@ class TunnelService {
             // назад активная локация так и «отвечала» своими старыми 86 мс,
             // самовосстановление считало её живой и не переключалось —
             // человек сидел без интернета, пока не переподключался сам.
-            if (isStaleGroupResult(item, startedAt)) continue;
+            if (isStaleGroupResult(item, startedAt, previousEnd: previousEnd)) {
+              continue;
+            }
             final index = _indexOfOutboundTag(tag);
             if (index == null || index >= order.length) continue;
             if (delay >= _urlTestFailedDelayMs) {
@@ -2765,6 +2768,7 @@ class TunnelService {
       deadline?.cancel();
       cancelWatch?.cancel();
       await sub?.cancel();
+      _lastGroupCollectEnd = DateTime.now();
     }
   }
 
@@ -2868,14 +2872,58 @@ class TunnelService {
   /// приходят от неё, и часть — чуть раньше нашего начала. Отбросить их
   /// значило бы объявить молчащей всю живую сессию. Старые числа, из-за
   /// которых упавшая локация считалась живой, — это минуты, а не секунды.
+  ///
+  /// [previousEnd] — когда закончился прошлый сбор по этой группе. Всё, что
+  /// ядро отдало до него, прошлый сбор уже видел, и свежим оно не считается
+  /// при любом запасе. Без этого второй проход «Реальной проверки» сразу
+  /// принимал числа первого и заканчивался, ничего не перемерив («второй
+  /// проход уточнил 0 и оживил 0 из 34»), — а он и даёт прогретые числа.
   @visibleForTesting
-  static bool isStaleGroupResult(dynamic item, DateTime startedAt) {
+  static bool isStaleGroupResult(dynamic item, DateTime startedAt,
+      {DateTime? previousEnd}) {
     final time = groupResultTime(item);
     if (time == null) return false;
-    return time.isBefore(startedAt.subtract(_groupResultTolerance));
+    var threshold = startedAt.subtract(_groupResultTolerance);
+    if (previousEnd != null) {
+      // libbox отдаёт время с точностью до секунды: свежее — со следующей.
+      final afterPrevious = DateTime.fromMillisecondsSinceEpoch(
+          (previousEnd.millisecondsSinceEpoch ~/ 1000 + 1) * 1000);
+      if (afterPrevious.isAfter(threshold)) threshold = afterPrevious;
+    }
+    return time.isBefore(threshold);
   }
 
   static const _groupResultTolerance = Duration(seconds: 15);
+
+  /// Строка ядра о провалившейся проверке участника группы (уровень debug):
+  /// «outbound out-3 unavailable: dial tcp …: i/o timeout».
+  static final _urlTestUnavailable =
+      RegExp(r'outbound (out-\d+|proxy) unavailable: (.+)$');
+
+  /// Тот же конфиг с другим уровнем журнала ядра.
+  static String _withLogLevel(String config, String level) {
+    try {
+      final map = jsonDecode(config) as Map<String, dynamic>;
+      map['log'] = {...?(map['log'] as Map<String, dynamic>?), 'level': level};
+      return jsonEncode(map);
+    } catch (_) {
+      return config;
+    }
+  }
+
+  /// Причина отказа для журнала: без хвоста адресов, не длиннее строки.
+  @visibleForTesting
+  static String shortReason(String reason) => _shortReason(reason);
+
+  static String _shortReason(String reason) {
+    final clean = reason.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return clean.length <= 140 ? clean : '${clean.substring(0, 137)}...';
+  }
+
+  /// Когда закончился последний сбор задержек по группе — см.
+  /// [isStaleGroupResult]. После нового подъёма ядра сбрасывать не нужно:
+  /// все результаты свежего ядра и так позже.
+  DateTime? _lastGroupCollectEnd;
 
   /// 'out-3' -> 3. Когда локация в подписке одна, группы-селектора нет и
   /// единственный outbound называется 'proxy' — это нулевой участник.
@@ -4260,36 +4308,62 @@ class TunnelService {
   /// 200 мс — чтобы не прыгать туда-сюда из-за случайного всплеска. Числа —
   /// сглаженные (минимум по окну замеров). Открытые соединения не рвём:
   /// они доживают на прежней, новые идут через быструю.
+  ///
+  /// Выбрал страну сам — её не трогаем, какой бы медленной она ни была. Но
+  /// если сейчас работает не она, а замена (выбранная не отвечала при
+  /// подключении или замолчала потом), замену выбирало приложение. Тогда:
+  /// выбранная снова ответила — возвращаемся на неё, как и обещали человеку;
+  /// всё ещё молчит — с медленной замены уходим на быструю по общему
+  /// правилу. По журналу 30.10: вместо молчащей «Англии» работала
+  /// «Франция · Париж» с 5164 мс, и переход был заперт ручным выбором.
   Future<void> _preferFasterIfAuto(Map<String, int> smoothed) async {
     final order = _sessionOutboundRemarks;
-    if (order.length < 2 || !isConnected || smoothed.length < 2) return;
+    if (order.length < 2 || !isConnected || smoothed.isEmpty) return;
     if (_switchInProgress || _connectInProgress || isBusy) return;
-    if (await LocalPrefs.instance
-        .getBool(PrefKeys.serverChosenManually, fallback: false)) {
-      return;
-    }
     final activeName = connectedServerName.value;
     if (activeName == null) return;
     final active = _matchRemark(order, activeName);
     if (active == null) return;
+    if (await LocalPrefs.instance
+        .getBool(PrefKeys.serverChosenManually, fallback: false)) {
+      final chosenName =
+          await LocalPrefs.instance.getString(PrefKeys.selectedServerId);
+      if (chosenName == null || chosenName.trim().isEmpty) return;
+      final chosen = _matchRemark(order, chosenName);
+      if (chosen == active) return; // работает выбранная
+      if (chosen != null && smoothed[chosen] != null) {
+        await _selectInSession(
+            chosen,
+            'Выбранная локация "$chosen" снова отвечает '
+            '(${smoothed[chosen]} мс) — вернулся на неё с "$active"');
+        return;
+      }
+    }
     final current = smoothed[active];
     if (current == null) return; // молчит — это дело самовосстановления
+    if (smoothed.length < 2) return;
     final best = smoothed.entries.reduce((a, b) => a.value <= b.value ? a : b);
     if (best.key == active) return;
     if (!shouldPreferFaster(current: current, best: best.value)) return;
-    final index = order.indexOf(best.key);
+    await _selectInSession(
+        best.key,
+        'Локация "$active" медленная ($current мс) — перешёл на '
+        '"${best.key}" (${best.value} мс) без разрыва туннеля');
+  }
+
+  /// Переключает селектор сессии на [remark], не опуская туннель.
+  Future<void> _selectInSession(String remark, String logMessage) async {
+    final index = _sessionOutboundRemarks.indexOf(remark);
     if (index < 0) return;
     try {
       await _client
           .selectOutbound('proxy', 'out-$index')
           .timeout(_nativeCallTimeout);
-      connectedServerName.value = best.key;
-      _lastPreferredHostName = best.key;
+      connectedServerName.value = remark;
+      _lastPreferredHostName = remark;
       _persistSessionRoute();
       _closeLiveClient();
-      unawaited(AppLogService.instance.log(
-          'Локация "$active" медленная ($current мс) — перешёл на '
-          '"${best.key}" (${best.value} мс) без разрыва туннеля'));
+      unawaited(AppLogService.instance.log(logMessage));
     } catch (_) {}
   }
 
@@ -4844,7 +4918,12 @@ class TunnelService {
     }
     if (usable.isEmpty) return results;
 
-    final config = _buildSingBoxConfig(
+    // Уровень debug — только ради одной строки ядра: «outbound out-3
+    // unavailable: <причина>». Без неё в журнале было лишь «не ответил», и
+    // понять, почему у нас молчит сервер, который в Happ работает, было
+    // нечем. В журнал приложения debug-строки не попадают (coreLogSeverity),
+    // причины разбираются отдельной подпиской ниже.
+    final config = _withLogLevel(_buildSingBoxConfig(
       usable.first,
       dnsProtection: false,
       blockAds: false,
@@ -4860,7 +4939,7 @@ class TunnelService {
       monitoringOptionsSupported: await _coreSupportsMonitoringOptions(),
       multiDnsSupported: await _coreSupportsMultiDns(),
       alternates: usable.skip(1).toList(),
-    );
+    ), 'debug');
 
     // Последняя проверка перед тем, как поднимать собственную сессию:
     // подготовка выше занимает секунды (чтение подписки, опрос ядра), и за это
@@ -4870,6 +4949,9 @@ class TunnelService {
     if (_probeCancelRequested) return results;
 
     _probeInProgress = true;
+    // Причина отказа по каждому участнику — первая, что назвало ядро.
+    final reasons = <int, String>{};
+    StreamSubscription<dynamic>? reasonSub;
     await _stateSub?.cancel();
     await _statsSub?.cancel();
     await _faultSub?.cancel();
@@ -4880,6 +4962,24 @@ class TunnelService {
     _coreLogSub = null;
 
     try {
+      reasonSub = _client.coreLogStream.listen((entries) {
+        if (entries is! List) return;
+        for (final entry in entries) {
+          final String message;
+          try {
+            message = '${entry.message}';
+          } catch (_) {
+            continue;
+          }
+          final match =
+              _urlTestUnavailable.firstMatch(cleanCoreLogMessage(message));
+          if (match == null) continue;
+          final index = _indexOfOutboundTag(match.group(1)!);
+          if (index != null) {
+            reasons.putIfAbsent(index, () => match.group(2)!.trim());
+          }
+        }
+      }, onError: (_) {});
       try {
         await _client.checkConfig(config);
       } catch (e) {
@@ -4979,13 +5079,18 @@ class TunnelService {
           'Проверка всех локаций: второй проход уточнил $lowered '
           'и оживил $revived из ${order.length}'));
 
-      for (final profile in usable) {
+      for (var i = 0; i < usable.length; i++) {
+        final profile = usable[i];
         if (profile.remark.isEmpty) continue;
         final delay = best[profile.remark];
+        final reason = reasons[i];
         results[profile.remark] = delay != null
             ? RealCheckResult(ok: true, latencyMs: delay)
-            : const RealCheckResult(
-                ok: false, error: 'не ответил на две проверки подряд');
+            : RealCheckResult(
+                ok: false,
+                error: reason == null
+                    ? 'не ответил на две проверки подряд'
+                    : 'не ответил: ${_shortReason(reason)}');
       }
       unawaited(_saveLatencySnapshot({
         for (final entry in results.entries)
@@ -4998,6 +5103,7 @@ class TunnelService {
               '${e.value.ok ? '${e.value.latencyMs} мс' : e.value.error}').join('; ')}'));
       return results;
     } finally {
+      await reasonSub?.cancel();
       // Гасим собственную сессию только если ядро всё ещё наше: подключение
       // могло забрать владение, не дождавшись нас, и тогда сессия сейчас его.
       // Без этой проверки проверка обрывала пользователю туннель сразу после
