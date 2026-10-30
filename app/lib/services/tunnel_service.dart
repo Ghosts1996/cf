@@ -484,6 +484,13 @@ class TunnelService {
   Timer? _latencyProbeTimer;
   bool _latencyProbeRunning = false;
   final Map<String, List<int>> _latencySamples = {};
+  // Сколько замеров подряд участник сессии не ответил. Один промах — ещё не
+  // «не отвечает»: по журналу 30.10 второй замер разгона раз за разом
+  // приносил ответы только от трёх-четырёх локаций из двенадцати, хотя
+  // полминуты назад отвечали все, — и живые «Германия (3)» и «LTE Обход»
+  // получали красную отметку на час, а выбранную «Германию (3)» следующее
+  // подключение обходило стороной.
+  final Map<String, int> _latencyMisses = {};
   // Каждый прогон — это URLTest ядра по ВСЕМ локациям сессии сразу, то есть
   // столько же VLESS/Reality-рукопожатий, сколько серверов в подписке. Пока их
   // было четыре, это было незаметно. С двумя десятками внешних нод раз в 25
@@ -1974,6 +1981,7 @@ class TunnelService {
     _latencyProbeTimer?.cancel();
     _latencyProbeTimer = null;
     _restartLiveCheck(shouldRun && _sessionOutboundRemarks.length > 1);
+    if (!shouldRun || newSession) _latencyMisses.clear();
     if (!shouldRun) {
       // Историю окна сбрасываем: следующая сессия — другие соединения, и
       // мешать замеры разных сессий в одном минимуме нельзя.
@@ -2074,7 +2082,28 @@ class TunnelService {
       // это удваивало и без того тяжёлую пачку рукопожатий, а устойчивость
       // даёт окно замеров ниже: минимум по нескольким циклам работает так же,
       // просто набирается не за один цикл, а за несколько.
-      final raw = await measureLatenciesThroughTunnel();
+      // Окно короче, чем у проверки серверов: живые участники сессии
+      // отвечают за секунды, а мёртвые не ответят и за сорок. Пока замер
+      // идёт, проверка живости его ждёт.
+      final raw = await measureLatenciesThroughTunnel(
+          timeout: const Duration(seconds: 20));
+
+      // Промахи считаем, только если ответил хоть кто-то: иначе это сеть
+      // телефона, а не серверы.
+      if (raw.isNotEmpty) {
+        for (final remark in _sessionOutboundRemarks) {
+          if (remark.isEmpty) continue;
+          if (raw.containsKey(remark)) {
+            _latencyMisses.remove(remark);
+          } else {
+            _latencyMisses[remark] = (_latencyMisses[remark] ?? 0) + 1;
+          }
+        }
+      }
+      // Не ответил один раз подряд — оставляем его прошлое число: на
+      // карточке не мигает «нет ответа», и в мёртвые он не записан.
+      bool missedOnce(String remark) =>
+          !raw.containsKey(remark) && _latencyMisses[remark] == 1;
 
       final smoothed = <String, int>{};
       for (final entry in raw.entries) {
@@ -2091,8 +2120,14 @@ class TunnelService {
         smoothed[entry.key] = samples.reduce((a, b) => a < b ? a : b);
       }
       // Локация выпала из прогона — забываем её историю, иначе после
-      // возвращения она унаследует устаревшие значения.
-      _latencySamples.removeWhere((remark, _) => !raw.containsKey(remark));
+      // возвращения она унаследует устаревшие значения. Кроме выпавших один
+      // раз: у них прошлое число остаётся до следующего замера.
+      _latencySamples.removeWhere(
+          (remark, _) => !raw.containsKey(remark) && !missedOnce(remark));
+      for (final entry in _latencySamples.entries) {
+        if (!missedOnce(entry.key) || entry.value.isEmpty) continue;
+        smoothed[entry.key] = entry.value.reduce((a, b) => a < b ? a : b);
+      }
 
       // Запасной вариант: если ядро не отдало задержку ни по одной локации
       // (группы нет — старая сессия, ядро не поддержало urltest), меряем
@@ -2138,10 +2173,10 @@ class TunnelService {
       unawaited(_clearDeadMarks(raw.keys));
       // Не ответившие на замер участники сессии — кандидаты в мёртвые: в
       // следующую сессию они идут в конец и не занимают места живых. Только
-      // если ответил хоть кто-то: иначе это сеть телефона, а не серверы.
+      // после двух промахов подряд и только если ответил хоть кто-то.
       if (raw.isNotEmpty) {
-        unawaited(_markLocationsDead(
-            _sessionOutboundRemarks.where((r) => !raw.containsKey(r))));
+        unawaited(_markLocationsDead(_sessionOutboundRemarks.where(
+            (r) => !raw.containsKey(r) && (_latencyMisses[r] ?? 0) >= 2)));
       }
       // Результат замера в журнал: если ядро не достучалось ни до одной
       // локации, это первое, что стоит увидеть при разборе.
@@ -2149,7 +2184,11 @@ class TunnelService {
           'Задержка через туннель: '
           '${smoothed.entries.map((e) => '${e.key} — ${e.value} мс').join('; ')}'));
       await _recoverIfActiveOutboundIsDead(raw);
-      await _preferFasterIfAuto(smoothed);
+      // Переходить — только на тех, кто ответил именно сейчас.
+      await _preferFasterIfAuto({
+        for (final e in smoothed.entries)
+          if (raw.containsKey(e.key)) e.key: e.value,
+      });
     } finally {
       _latencyProbeRunning = false;
     }
@@ -2297,6 +2336,16 @@ class TunnelService {
         if (!stillOurs()) return;
       }
       if (await _liveProbe(fresh: true)) return;
+      // Идёт плановый замер — дожидаемся его, а не бросаем проверку: связь
+      // уже пропала, и следующий тик через полминуты — это полминуты без
+      // интернета. Раньше замер в сессии обрывался почти сразу (см.
+      // _collectGroupDelays), и столкнуться с ним было нельзя.
+      final waitUntil = DateTime.now().add(const Duration(seconds: 25));
+      while (_latencyProbeRunning &&
+          stillOurs() &&
+          DateTime.now().isBefore(waitUntil)) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
       if (!stillOurs() || _latencyProbeRunning) return;
 
       unawaited(AppLogService.instance.log(
@@ -2732,6 +2781,16 @@ class TunnelService {
     // никогда, и каждый замер с мёртвым сервером в сессии досиживал окно
     // целиком.
     final reported = <String>{};
+    // Отказы, записанные ещё до начала замера. Чаще всего это вердикт
+    // фонового мониторинга ядра (см. _monitoringOptions), а не нашей
+    // проверки, и он бывает неверен. Если только из-за них «отчитались
+    // все», сбор не закрываем сразу: даём свежей проверке несколько секунд
+    // вернуть живым серверам их числа. Раньше замер заканчивался в ту же
+    // секунду с ответами от четырёх локаций из двенадцати.
+    final startSecond = DateTime.fromMillisecondsSinceEpoch(
+        startedAt.millisecondsSinceEpoch ~/ 1000 * 1000);
+    final oldFailures = <String>{};
+    Timer? grace;
 
     void finish() {
       if (completer.isCompleted) return;
@@ -2765,7 +2824,16 @@ class TunnelService {
             final index = _indexOfOutboundTag(tag);
             if (index == null || index >= order.length) continue;
             if (delay >= _urlTestFailedDelayMs) {
-              if (order[index].isNotEmpty) reported.add(order[index]);
+              final failed = order[index];
+              if (failed.isNotEmpty) {
+                reported.add(failed);
+                final time = groupResultTime(item);
+                if (time != null && time.isBefore(startSecond)) {
+                  oldFailures.add(failed);
+                } else {
+                  oldFailures.remove(failed);
+                }
+              }
               continue;
             }
             // Ключ — remark из VLESS-ссылки ("VPNonLine | 🇩🇪 Германия — Франкфурт").
@@ -2783,7 +2851,16 @@ class TunnelService {
             onResult?.call(remark, delay);
           }
           // Все, кого ждали, отчитались — досиживать окно незачем.
-          if (reported.containsAll(expected)) finish();
+          if (reported.containsAll(expected)) {
+            final rest =
+                _oldFailureGrace - DateTime.now().difference(startedAt);
+            if (rest <= Duration.zero ||
+                oldFailures.every(collected.containsKey)) {
+              finish();
+            } else {
+              grace ??= Timer(rest, finish);
+            }
+          }
         }
       }, onError: (_) => finish());
 
@@ -2792,8 +2869,17 @@ class TunnelService {
       // до сорока секунд, а подключение ждёт освобождения ядра двенадцать.
       // Без этой проверки проверка успевала не уложиться, и подключение
       // стартовало поверх неё.
+      //
+      // Только для проверки серверов, а не для замера внутри сессии. Просьбу
+      // уступить подключение выставляет каждое подключение, и если проверки
+      // не было, она так и оставалась выставленной. Замер в сессии видел её
+      // и обрывался через 0,2 секунды, успевая собрать лишь уже готовые
+      // числа: в журнале 30.10 — один активный сервер на замер, а все
+      // остальные живые серверы сессии каждый раз записывались в «не
+      // отвечает».
+      final cancellable = _nativeOwner == 'probe';
       cancelWatch = Timer.periodic(const Duration(milliseconds: 200), (t) {
-        if (_probeCancelRequested) {
+        if (cancellable && _probeCancelRequested) {
           t.cancel();
           finish();
         }
@@ -2806,10 +2892,15 @@ class TunnelService {
     } finally {
       deadline?.cancel();
       cancelWatch?.cancel();
+      grace?.cancel();
       await sub?.cancel();
       _lastGroupCollectEnd = DateTime.now();
     }
   }
+
+  /// Сколько замер ждёт свежих ответов, если «отчитались» все, но часть —
+  /// отказом, записанным до его начала (см. _collectGroupDelays).
+  static const _oldFailureGrace = Duration(seconds: 6);
 
   /// Задержка одного участника группы `latency` по версии самого ядра.
   /// Используется «Реальной проверкой», где сессия поднята временно и
@@ -3333,10 +3424,18 @@ class TunnelService {
   /// его редким и лёгким: раз в час, тем же адресом, что и наш замер, и не
   /// больше трёх проверок разом — чтобы в первые секунды после подключения
   /// дюжина рукопожатий не толкалась с трафиком пользователя.
+  ///
+  /// Таймаут проверки — те же 15 секунд, что у группы `latency`. Свой отказ
+  /// мониторинг пишет в общую с группой историю как 65535, а по умолчанию
+  /// ждёт ответа всего 5 секунд. Сразу после подключения, когда все
+  /// приложения разом идут в сеть, живой, но медленный сервер в них не
+  /// укладывался — и приложение, читая историю, красило его «не отвечает»
+  /// (журнал 30.10: «Германия (3)» и «LTE Обход» отвечали за 0,2–1,5 с).
   static const Map<String, dynamic> _monitoringOptions = {
     'interval': '1h',
     'urls': [_latencyTestUrl],
     'workers': 3,
+    'url_test_timeout': '15s',
   };
 
   Future<bool> _coreSupportsMonitoringOptions() async {

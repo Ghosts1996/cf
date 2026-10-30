@@ -442,7 +442,9 @@ void main() {
     addTearDown(() => server.close(force: true));
     await tunnel.connect(_subscription);
     tunnel.appInForeground = true;
-    await Future<void>.delayed(const Duration(milliseconds: 300));
+    // Проверка связи после подключения (через две секунды) должна пройти,
+    // пока сервер жив, — иначе восстановление сделает она, а не тик.
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
     core.selected.clear();
 
     // Туннель жив — никаких переключений.
@@ -453,7 +455,7 @@ void main() {
     // Сервер умер: запросы через туннель не проходят, а соседи по группе
     // отвечают.
     await server.close(force: true);
-    core.groupDelays = {'out-1': 60, 'out-2': 40};
+    core.groupDelays = {'out-0': 65535, 'out-1': 60, 'out-2': 40};
     await tunnel.debugLiveCheckTick();
     expect(core.selected, contains('out-2'),
         reason: 'переключение на самую быструю живую локацию');
@@ -468,7 +470,7 @@ void main() {
     addTearDown(() => server.close(force: true));
     await tunnel.connect(_subscription);
     tunnel.appInForeground = true;
-    await Future<void>.delayed(const Duration(milliseconds: 300));
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
     core.selected.clear();
 
     // Журнал от 23.10: «Германия» отвечала 86 мс в 18:22, в 18:24 упала. В
@@ -626,6 +628,91 @@ void main() {
     expect(tunnel.latencyForHostName('Латвия'), 70);
     await tunnel.disconnect();
     expect(tunnel.sessionMeasured, isFalse);
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('один пропущенный замер — ещё не «не отвечает»: число остаётся, '
+      'отметка — только после второго промаха подряд', () async {
+    // Журнал 30.10: второй замер разгона принёс ответы от четырёх локаций
+    // из двенадцати, хотя полминуты назад отвечали все, и живые «Германия
+    // (3)» и «LTE Обход» получили красную отметку на час.
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    tunnel.appInForeground = true;
+    core.groupDelays = {'out-0': 40, 'out-1': 55, 'out-2': 70};
+    await tunnel.debugRunLatencyProbe();
+    expect(tunnel.latencyForHostName('Нидерланды'), 55);
+
+    core.groupDelays = {'out-0': 41, 'out-1': 65535, 'out-2': 71};
+    await tunnel.debugRunLatencyProbe();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(tunnel.latencyForHostName('Нидерланды'), 55,
+        reason: 'один промах — прошлое число остаётся');
+    expect(tunnel.isLocationDead('Нидерланды'), isFalse);
+
+    await tunnel.debugRunLatencyProbe();
+    expect(await waitUntil(() => tunnel.isLocationDead('Нидерланды')), isTrue,
+        reason: 'второй промах подряд — уже «не отвечает»');
+    expect(tunnel.latencyForHostName('Нидерланды'), isNull);
+
+    // Ответил — счёт промахов с нуля, отметка снята.
+    core.groupDelays = {'out-0': 40, 'out-1': 56, 'out-2': 70};
+    await tunnel.debugRunLatencyProbe();
+    expect(await waitUntil(() => !tunnel.isLocationDead('Нидерланды')), isTrue);
+    core.groupDelays = {'out-0': 40, 'out-1': 65535, 'out-2': 70};
+    await tunnel.debugRunLatencyProbe();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(tunnel.isLocationDead('Нидерланды'), isFalse);
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('замер в сессии не обрывается просьбой «уступи подключению», '
+      'оставшейся от самого подключения', () async {
+    // Каждое подключение просит идущую проверку серверов свернуться. Проверки
+    // не было — просьба оставалась, и все замеры сессии обрывались через
+    // 0,2 секунды: отвечал один активный сервер, остальные — «не отвечает».
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    core.groupDelays = {};
+    core.onUrlTest = (_) {
+      Timer(const Duration(milliseconds: 600), () {
+        core.groupDelays = {'out-0': 40, 'out-1': 55, 'out-2': 70};
+        core.emitGroupSnapshot();
+      });
+    };
+    final measured = await tunnel.measureLatenciesThroughTunnel();
+    expect(measured, {'Германия': 40, 'Нидерланды': 55, 'Латвия': 70});
+    core.onUrlTest = null;
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('старые отказы мониторинга не закрывают замер раньше свежих ответов',
+      () async {
+    // Журнал 30.10: замер закончился в ту же секунду с ответами от четырёх
+    // локаций из двенадцати. Остальные «отчитались» отказами 65535, которые
+    // фоновый мониторинг ядра записал ещё до начала замера.
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
+    final before = DateTime.now().subtract(const Duration(seconds: 1));
+    core.groupDelays = {'out-0': 40, 'out-1': 65535, 'out-2': 65535};
+    core.groupResultTimes = {'out-1': before, 'out-2': before};
+    core.onUrlTest = (_) {
+      Timer(const Duration(seconds: 1), () {
+        core.groupDelays = {'out-0': 40, 'out-1': 55, 'out-2': 70};
+        core.groupResultTimes = {
+          'out-1': DateTime.now(),
+          'out-2': DateTime.now(),
+        };
+        core.emitGroupSnapshot();
+      });
+    };
+    final measured = await tunnel.measureLatenciesThroughTunnel();
+    expect(measured, {'Германия': 40, 'Нидерланды': 55, 'Латвия': 70});
+    core.onUrlTest = null;
+    await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 60)));
 
   test('все молчали, пока на секунды пропадала сеть — сессию не рвём и '
