@@ -17,6 +17,7 @@ import 'package:vpnonline_app/services/local_prefs.dart';
 import 'package:vpnonline_app/services/tunnel_service.dart';
 
 import 'support/fake_runtime.dart';
+import 'support/fake_xray.dart';
 
 // Три локации: в сессии будет группа-селектор, как на телефоне.
 const _subscription =
@@ -689,4 +690,95 @@ void main() {
     expect(tunnel.connectedServerName.value, 'Германия');
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 40)));
+
+  group('серверы, которые sing-box не умеет, — через Xray', () {
+    // Германия и Латвия — обычный VLESS, «Мобильный» требует шифрования VLESS
+    // (encryption=mlkem…): его умеет только Xray.
+    const withEncrypted =
+        'vless://11111111-1111-1111-1111-111111111111@de.example.com:443'
+        '?type=tcp&security=reality&pbk=e8Q_05VmcuO12_QIua9nojVHZViU73hqOOZShYo52-c'
+        '&sid=aa&sni=yahoo.com&fp=chrome#Германия\n'
+        'vless://22222222-2222-2222-2222-222222222222@m.example.com:1505'
+        '?type=grpc&serviceName=grpc&security=reality'
+        '&pbk=e8Q_05VmcuO12_QIua9nojVHZViU73hqOOZShYo52-c&sid=bb'
+        '&sni=iv.kommersant.ru&fp=qq'
+        '&encryption=mlkem768x25519plus.native.0rtt.KEY#Мобильный\n'
+        'vless://33333333-3333-3333-3333-333333333333@lv.example.com:443'
+        '?type=tcp&security=reality&pbk=e8Q_05VmcuO12_QIua9nojVHZViU73hqOOZShYo52-c'
+        '&sid=cc&sni=yahoo.com&fp=chrome#Латвия';
+
+    Map<String, dynamic> outboundOf(String config, String tag) =>
+        ((jsonDecode(config) as Map<String, dynamic>)['outbounds'] as List)
+            .cast<Map<String, dynamic>>()
+            .firstWhere((o) => o['tag'] == tag);
+
+    test('подключение поднимает Xray, sing-box ходит к серверу через его '
+        'SOCKS-вход; «Отключить» гасит Xray', () async {
+      final server = await startWorkingTunnel();
+      addTearDown(() => server.close(force: true));
+      final xray = FakeXray();
+      final t = TunnelService.withRuntime(core, xray: xray);
+      await t.connect(withEncrypted);
+      expect(t.isConnected, isTrue);
+      expect(t.connectedServerName.value, 'Германия');
+      expect(xray.configs, hasLength(1));
+      final xrayConfig = jsonDecode(xray.configs.single) as Map<String, dynamic>;
+      final inbound = (xrayConfig['inbounds'] as List).single as Map;
+      final user = ((xrayConfig['outbounds'] as List).first
+          as Map)['settings']['vnext'][0]['users'][0] as Map;
+      expect(user['encryption'], 'mlkem768x25519plus.native.0rtt.KEY');
+
+      final socks = outboundOf(core.lastConfig!, 'out-1');
+      expect(socks['type'], 'socks');
+      expect(socks['server'], '127.0.0.1');
+      expect(socks['server_port'], inbound['port']);
+      final account = (inbound['settings']['accounts'] as List).single as Map;
+      expect(socks['username'], account['user']);
+      expect(socks['password'], account['pass']);
+      // Обычные серверы — как и раньше, прямо из sing-box.
+      expect(outboundOf(core.lastConfig!, 'out-0')['type'], 'vless');
+      expect(t.isInSession('Мобильный'), isTrue);
+
+      await t.disconnect();
+      expect(xray.running, isFalse);
+      expect(xray.stops, greaterThanOrEqualTo(1));
+    }, timeout: const Timeout(Duration(seconds: 40)));
+
+    test('Xray не поднялся — подключаемся к остальным, без него', () async {
+      final server = await startWorkingTunnel();
+      addTearDown(() => server.close(force: true));
+      final xray = FakeXray(startSucceeds: false);
+      final t = TunnelService.withRuntime(core, xray: xray);
+      await t.connect(withEncrypted);
+      expect(t.isConnected, isTrue);
+      expect(t.isInSession('Мобильный'), isFalse);
+      final outbounds =
+          ((jsonDecode(core.lastConfig!) as Map)['outbounds'] as List)
+              .cast<Map<String, dynamic>>();
+      expect(outbounds.where((o) => o['type'] == 'socks'), isEmpty);
+      await t.disconnect();
+    }, timeout: const Timeout(Duration(seconds: 40)));
+
+    test('в подписке нет таких серверов — Xray не запускается', () async {
+      final server = await startWorkingTunnel();
+      addTearDown(() => server.close(force: true));
+      final xray = FakeXray();
+      final t = TunnelService.withRuntime(core, xray: xray);
+      await t.connect(_subscription);
+      expect(t.isConnected, isTrue);
+      expect(xray.configs, isEmpty);
+      await t.disconnect();
+    }, timeout: const Timeout(Duration(seconds: 40)));
+
+    test('проверка серверов меряет их через Xray и гасит его после', () async {
+      final xray = FakeXray();
+      final t = TunnelService.withRuntime(core, xray: xray);
+      core.groupDelays = {'out-0': 90, 'out-1': 70, 'out-2': 60};
+      final results = await t.realCheckAllProfiles(withEncrypted);
+      expect(results['Мобильный']?.ok, isTrue);
+      expect(results['Мобильный']?.latencyMs, 70);
+      expect(xray.configs, hasLength(1));
+      expect(xray.running, isFalse);
+    }, timeout: const Timeout(Duration(seconds: 60)));
+  });
 }

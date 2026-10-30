@@ -27,8 +27,8 @@ void main() {
   group('listSubscriptionLocations', () {
     final tunnel = TunnelService.instance;
 
-    test('ссылки с шифрованием VLESS помечены неподдерживаемыми, encryption=none '
-        '— обычные', () async {
+    test('без Xray ссылки с шифрованием VLESS помечены неподдерживаемыми, '
+        'encryption=none — обычные', () async {
       // Ядро Xray (Happ) умеет «шифрование VLESS» (encryption=mlkem768…),
       // sing-box — нет: такой сервер у нас молча не отвечал.
       const subscription =
@@ -47,7 +47,6 @@ void main() {
       final finland = locations.firstWhere((l) => l.remark == 'Finland');
       expect(finland.supported, isTrue);
       expect(finland.protocol, 'vless');
-      expect(await tunnel.listProfileNames(subscription), ['Finland']);
     });
 
     // Подписка с внешними нодами: две vless-локации, одна hysteria2 и одна

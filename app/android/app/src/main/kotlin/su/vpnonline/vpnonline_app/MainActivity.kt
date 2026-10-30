@@ -111,6 +111,40 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         watchScreen(flutterEngine)
+        // Ядро Xray для серверов, которые sing-box не умеет (см. XrayProcess).
+        // Запуск и остановка ждут процесс до полусекунды — не на главном
+        // потоке, чтобы интерфейс не замирал.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "vpnonline/xray")
+            .setMethodCallHandler { call, result ->
+                val context = applicationContext
+                fun background(work: () -> Any?) {
+                    Thread {
+                        val value = try {
+                            work()
+                        } catch (e: Exception) {
+                            runOnUiThread { result.error("xray", e.toString(), null) }
+                            return@Thread
+                        }
+                        runOnUiThread { result.success(value) }
+                    }.start()
+                }
+                when (call.method) {
+                    "available" -> result.success(XrayProcess.available(context))
+                    "isRunning" -> result.success(XrayProcess.isRunning())
+                    "start" -> {
+                        val config = call.argument<String>("config")
+                        if (config == null) {
+                            result.error("xray", "config is required", null)
+                        } else {
+                            background { XrayProcess.start(context, config) }
+                        }
+                    }
+                    "ensureRunning" -> background { XrayProcess.ensureRunning(context) }
+                    "stop" -> background { XrayProcess.stop(context); null }
+                    "readLog" -> background { XrayProcess.readLog(context) }
+                    else -> result.notImplemented()
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {

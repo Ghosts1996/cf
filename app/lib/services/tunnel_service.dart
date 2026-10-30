@@ -14,9 +14,12 @@ import 'app_log_service.dart';
 import 'location_names.dart';
 import 'local_prefs.dart';
 import 'singbox_runtime.dart';
+import 'xray_runtime.dart';
 
 class TunnelService {
-  TunnelService._() : _client = createSingboxRuntime();
+  TunnelService._()
+      : _client = createSingboxRuntime(),
+        _xray = XrayRuntime.forPlatform();
   static final TunnelService instance = TunnelService._();
 
   /// Отдельный экземпляр поверх заданного ядра — только для тестов.
@@ -26,9 +29,22 @@ class TunnelService {
   /// на телефоне — дело случая; подменив ядро управляемой заглушкой, их можно
   /// гонять детерминированно, в каждой сборке.
   @visibleForTesting
-  TunnelService.withRuntime(this._client);
+  TunnelService.withRuntime(this._client, {XrayRuntime? xray})
+      : _xray = xray ?? const NoXrayRuntime();
 
   final SingboxRuntimeClient _client;
+
+  /// Ядро Xray рядом с sing-box — для серверов, которые sing-box не умеет
+  /// (см. xray_runtime.dart).
+  final XrayRuntime _xray;
+
+  /// Xray нужен поднятой сессии: сторож держит его живым, «Отключить»
+  /// гасит вместе с туннелем.
+  bool _sessionUsesXray = false;
+
+  /// Xray однажды не поднялся в этом запуске приложения — дальше серверы,
+  /// которым он нужен, в сессию не берём: они только занимали бы место.
+  bool _xrayBroken = false;
 
   // Верхняя граница на любой вызов в нативный код плагина.
   //
@@ -1135,6 +1151,7 @@ class TunnelService {
         _connectStartedAt = restored ?? DateTime.now();
         if (restored == null) _persistConnectStart(_connectStartedAt);
         _restoreSessionRouteIfMissing();
+        unawaited(_attachXray());
       } else {
         // Туннель по данным нативной стороны не поднят — сбрасываем отметку
         // времени в памяти.
@@ -1313,6 +1330,17 @@ class TunnelService {
     _durationTicker?.cancel();
     _durationTicker = null;
     _restartLatencyProbe(shouldRun);
+    // Туннель погасили не из приложения (кнопка в уведомлении, настройки
+    // Android) — Xray без него не нужен. Во время подключения и смены
+    // сервера туннель гаснет на секунды по нашей же воле: там Xray
+    // перезапускает само подключение.
+    if (!shouldRun &&
+        _sessionUsesXray &&
+        !_connectInProgress &&
+        !_switchInProgress &&
+        !_probeInProgress) {
+      unawaited(_stopXray());
+    }
     if (!shouldRun) {
       _lastNativeRxBytes = null;
       _lastNativeTxBytes = null;
@@ -1557,6 +1585,7 @@ class TunnelService {
     if (_connectInProgress || _switchInProgress || _probeInProgress) return;
     if (_hardKillSwitchEngaged) return;
     if (status.value?.state != TunnelConnState.connected) return;
+    unawaited(_keepXrayAlive());
     dynamic actual;
     try {
       actual = await _getServiceStateNative();
@@ -1908,10 +1937,14 @@ class TunnelService {
       final result = <SubscriptionLocation>[];
       for (final p in profiles) {
         if (p.remark.isEmpty) continue;
+        // Шифрование VLESS умеет только Xray: без него такой узел честно
+        // помечен неподдерживаемым, а не «не отвечает».
+        final encryptedWithoutXray =
+            p.requiresVlessEncryption && !await _isProfileSupported(p);
         result.add(SubscriptionLocation(
           remark: p.remark,
-          protocol: p.protocol,
-          supported: true,
+          protocol: encryptedWithoutXray ? vlessEncryptionLabel : p.protocol,
+          supported: !encryptedWithoutXray,
           host: p.host,
           port: p.port,
           security: p.security,
@@ -3464,10 +3497,34 @@ class TunnelService {
   /// Пройдёт ли профиль в конфиг: базовый список транспортов плюс то, что
   /// ядро подтвердило само (см. [_coreSupportsTransport]).
   Future<bool> _isProfileSupported(_ParsedVless p) async {
+    if (await _singboxSupports(p)) return true;
+    return _canUseXray(p);
+  }
+
+  /// Подключит ли этот сервер сам sing-box.
+  Future<bool> _singboxSupports(_ParsedVless p) async {
+    if (p.requiresVlessEncryption) return false;
     if (_isTransportSupported(p)) return true;
     final type = (p.transportType ?? '').trim();
     if (type.isEmpty) return true;
     return _coreSupportsTransport(type);
+  }
+
+  /// Сервер пойдёт через Xray: sing-box его не умеет, а Xray — да.
+  Future<bool> _needsXray(_ParsedVless p) async =>
+      !await _singboxSupports(p) && await _canUseXray(p);
+
+  Future<bool> _canUseXray(_ParsedVless p) async =>
+      !_xrayBroken && _xraySupports(p) && await _xray.available();
+
+  /// Что из ссылок умеет собрать [_xrayOutbound].
+  static bool _xraySupports(_ParsedVless p) {
+    const protocols = {'vless', 'trojan', 'vmess'};
+    const transports = {'tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'};
+    const securities = {'none', 'tls', 'reality'};
+    return protocols.contains(p.protocol) &&
+        transports.contains(p.transportType ?? 'tcp') &&
+        securities.contains(p.security);
   }
 
   _ParsedVless? _matchProfile(List<_ParsedVless> profiles, String? hostName) {
@@ -3703,16 +3760,17 @@ class TunnelService {
     // Имя пакета нужно только в VPN-режиме и только в режиме исключений: при
     // splitTunnelMode == 'include' через туннель идут лишь явно выбранные
     // приложения, и нашего среди них нет.
-    final String? selfPackage =
+    String? selfPackage =
         (!proxyOnly && excludeAppFromTunnel && splitTunnelMode != 'include')
             ? await _resolveSelfPackageName()
             : null;
     // Set, а не List: если пользователь сам отметил наше приложение на экране
     // исключений, дубликат в exclude_package не нужен.
-    final excludedPackages = <String>{
-      if (splitTunnelMode != 'include') ...selectedPackages,
-      if (selfPackage != null) selfPackage,
-    }.toList();
+    List<String> excludedPackagesFor(String? self) => <String>{
+          if (splitTunnelMode != 'include') ...selectedPackages,
+          if (self != null) self,
+        }.toList();
+    var excludedPackages = excludedPackagesFor(selfPackage);
     _sessionAppBypassesTunnel = proxyOnly || selfPackage != null;
 
     // Время по этапам подготовки — в журнал вместе с итогом. Одно общее
@@ -3798,16 +3856,35 @@ class TunnelService {
         '[${ordered.map((p) => '${p.remark.isEmpty ? p.host : p.remark}:'
             '${p.transportType ?? 'tcp'}/${p.security}').join(', ')}]'
         '${skippedCount > 0 ? '; пропущено ядром: $skippedCount' : ''}'));
-    final encrypted = _cachedOthers
-        .where((o) => o.protocol == vlessEncryptionLabel)
-        .map((o) => o.remark)
-        .toList();
-    if (encrypted.isNotEmpty) {
+    final encryptedSkipped = <String>[
+      for (var i = 0; i < ordered.length; i++)
+        if (!supportFlags[i] && ordered[i].requiresVlessEncryption)
+          ordered[i].remark.isEmpty ? ordered[i].host : ordered[i].remark,
+    ];
+    if (encryptedSkipped.isNotEmpty) {
       unawaited(AppLogService.instance.log(
-          'Подписка: ${encrypted.length} локаций требуют шифрования VLESS '
-          '(encryption=mlkem…) — ядро приложения его не поддерживает, в '
-          'сессию они не идут: ${encrypted.join(', ')}',
+          'Подписка: ${encryptedSkipped.length} локаций требуют шифрования VLESS '
+          '(encryption=mlkem…), а Xray в этой сборке нет — в сессию они не '
+          'идут: ${encryptedSkipped.join(', ')}',
           level: AppLogLevel.warning));
+    }
+    // Xray открывает соединения к серверам сам, из процесса приложения. Если
+    // приложение не исключено из VPN, они пошли бы обратно в туннель — в
+    // sing-box, а оттуда снова в Xray, по кругу. Поэтому, когда в подписке
+    // есть серверы для Xray, приложение исключается из туннеля всегда.
+    if (!proxyOnly && splitTunnelMode != 'include' && selfPackage == null) {
+      var xrayInUse = false;
+      for (final p in usable) {
+        if (await _needsXray(p)) {
+          xrayInUse = true;
+          break;
+        }
+      }
+      if (xrayInUse) {
+        selfPackage = await _resolveSelfPackageName();
+        excludedPackages = excludedPackagesFor(selfPackage);
+        _sessionAppBypassesTunnel = selfPackage != null;
+      }
     }
     // Сколько заняла подготовка до первой попытки поднять ядро. Без этих
     // чисел «долго подключается» невозможно разобрать со стороны
@@ -3860,7 +3937,7 @@ class TunnelService {
         // «Италиями» в сессии самовосстановление «уходило на живую Италию» и
         // попадало на мёртвую с тем же именем.
         final sessionNames = <String>{profile.remark};
-        final alternates = (_selectorSupported && !proxyOnly)
+        var alternates = (_selectorSupported && !proxyOnly)
             ? usable
                 .where((e) =>
                     !identical(e, profile) &&
@@ -3868,6 +3945,23 @@ class TunnelService {
                 .take(_maxSessionAlternates)
                 .toList()
             : const <_ParsedVless>[];
+        // Серверы, которые sing-box не умеет, обслуживает Xray: поднимаем его
+        // под эту сессию. Не поднялся — такие серверы из сессии убираем, а
+        // если такой сам выбранный — переходим к следующему.
+        final xrayPrep = await _prepareXray([profile, ...alternates]);
+        if (xrayPrep.failed) {
+          if (!await _singboxSupports(profile)) {
+            lastFailure = 'Xray не запустился — сервер "${profile.remark}" '
+                'без него не подключить';
+            continue;
+          }
+          final kept = <_ParsedVless>[];
+          for (final e in alternates) {
+            if (await _singboxSupports(e)) kept.add(e);
+          }
+          alternates = kept;
+        }
+        final xrayPlan = xrayPrep.plan;
         String build(List<_ParsedVless> alts, String? adPath) =>
             _buildSingBoxConfig(
               profile,
@@ -3893,6 +3987,7 @@ class TunnelService {
               monitoringOptionsSupported: monitoringOptionsSupported,
               alternates: alts,
               adBlockRuleSetPath: adPath,
+              xray: xrayPlan,
             );
         var adPath = adBlockRuleSetPath;
         var config = build(alternates, adPath);
@@ -4166,6 +4261,7 @@ class TunnelService {
         final connectedName = activeProfile.remark.isNotEmpty
             ? activeProfile.remark
             : (preferredHostName ?? 'VPNOnline');
+        _sessionUsesXray = xrayPlan != null;
         _commitConnectedSession(
           connectedName: connectedName,
           proxyOnly: proxyOnly,
@@ -4178,6 +4274,7 @@ class TunnelService {
         // Отказ Android поднять VpnService — не про сервер. Перебирать
         // остальные локации бессмысленно: каждая упрётся в то же самое.
         await _settleAfterDisconnect();
+        await _stopXray();
         throw TunnelException(_corePortStuck ? _corePortStuckMessage : e.message);
       } catch (e) {
         lastFailure = e;
@@ -4190,6 +4287,7 @@ class TunnelService {
     // продолжаться, даже когда одна из них не удалась (сети нет, телефон в
     // метро). А если сессии и не было, флаг и так false: первая же неудачная
     // попытка вручную не превратится в бесконечный фоновый цикл.
+    await _stopXray();
     if (_corePortStuck && isPortBusyFault(lastError.value)) {
       throw TunnelException(_corePortStuckMessage);
     }
@@ -4666,6 +4764,7 @@ class TunnelService {
     try {
       return await _realCheckProfileOwned(connectionString, hostName);
     } finally {
+      await _stopXray(owner: 'probe');
       if (_nativeOwner == 'probe') _nativeOwner = null;
       _probeCancelRequested = false;
     }
@@ -4707,6 +4806,10 @@ class TunnelService {
     // HEAD-запрос на только что поднятой и сразу гасимой сессии — Mux добавит
     // лишнее рукопожатие и целый RTT, ничего не дав взамен. На боевое
     // подключение это не влияет: там значение берётся из LocalPrefs.
+    final xrayPrep = await _prepareXray([profile], owner: 'probe');
+    if (xrayPrep.failed) {
+      return const RealCheckResult(ok: false, error: 'Xray не запустился');
+    }
     final config = _buildSingBoxConfig(
       profile,
       dnsProtection: false,
@@ -4726,6 +4829,7 @@ class TunnelService {
       // локациях это вдвое-втрое растягивало проверку и завышало числа.
       monitoringOptionsSupported: await _coreSupportsMonitoringOptions(),
       multiDnsSupported: await _coreSupportsMultiDns(),
+      xray: xrayPrep.plan,
     );
 
     if (_probeCancelRequested) {
@@ -4914,7 +5018,7 @@ class TunnelService {
     // Локация с транспортом, которого ядро не знает, отправила бы в отказ весь
     // конфиг целиком — отсеиваем её до сборки, но в результат кладём внятную
     // причину, а не «нет ответа».
-    final usable = <_ParsedVless>[];
+    var usable = <_ParsedVless>[];
     final results = <String, RealCheckResult>{};
     for (final profile in profiles) {
       if (await _isProfileSupported(profile)) {
@@ -4922,12 +5026,31 @@ class TunnelService {
       } else if (profile.remark.isNotEmpty) {
         results[profile.remark] = RealCheckResult(
           ok: false,
-          error: 'Транспорт ${profile.transportType ?? "?"} не поддерживается '
-              'установленным ядром',
+          error: profile.requiresVlessEncryption
+              ? 'Шифрование VLESS умеет только Xray, а его в этой сборке нет'
+              : 'Транспорт ${profile.transportType ?? "?"} не поддерживается '
+                  'установленным ядром',
         );
       }
     }
     if (usable.isEmpty) return results;
+
+    // Серверы, которые sing-box не умеет, проверяются через Xray — так же,
+    // как потом пойдёт к ним трафик.
+    final xrayPrep = await _prepareXray(usable, owner: 'probe');
+    if (xrayPrep.failed) {
+      final kept = <_ParsedVless>[];
+      for (final profile in usable) {
+        if (await _singboxSupports(profile)) {
+          kept.add(profile);
+        } else if (profile.remark.isNotEmpty) {
+          results[profile.remark] =
+              const RealCheckResult(ok: false, error: 'Xray не запустился');
+        }
+      }
+      usable = kept;
+      if (usable.isEmpty) return results;
+    }
 
     // Уровень debug — только ради одной строки ядра: «outbound out-3
     // unavailable: <причина>». Без неё в журнале было лишь «не ответил», и
@@ -4950,6 +5073,7 @@ class TunnelService {
       monitoringOptionsSupported: await _coreSupportsMonitoringOptions(),
       multiDnsSupported: await _coreSupportsMultiDns(),
       alternates: usable.skip(1).toList(),
+      xray: xrayPrep.plan,
     ), 'debug');
 
     // Последняя проверка перед тем, как поднимать собственную сессию:
@@ -4957,7 +5081,10 @@ class TunnelService {
     // время пользователь вполне мог нажать «Подключить». Поднять сессию сейчас
     // значило бы заставить его подключение досиживать таймаут — ровно то, от
     // чего мы и уходим.
-    if (_probeCancelRequested) return results;
+    if (_probeCancelRequested) {
+      await _stopXray(owner: 'probe');
+      return results;
+    }
 
     _probeInProgress = true;
     // Причина отказа по каждому участнику — первая, что назвало ядро.
@@ -5126,6 +5253,8 @@ class TunnelService {
         } catch (_) {}
         await Future.delayed(const Duration(milliseconds: 350));
       }
+      // Xray проверки гасим, только если его не забрало подключение.
+      await _stopXray(owner: 'probe');
       // Через ??=: подключение могло восстановить их раньше нас, забрав
       // владение. Переприсвоение поверх живой подписки оставило бы вторую
       // висеть и удваивало каждое событие ядра.
@@ -5385,9 +5514,311 @@ class TunnelService {
   /// Прячет в тексте конфига то, что даёт доступ к серверу: uuid ключа,
   /// публичный ключ и short id Reality. Всё остальное — адреса, порты,
   /// транспорт, флаги TLS — остаётся, иначе журнал бесполезен для разбора.
+  // ── Xray ────────────────────────────────────────────────────────────────
+
+  /// Xray сейчас запущен приложением.
+  bool _xrayStarted = false;
+
+  /// Для чего он запущен: `session` — боевое подключение, `probe` —
+  /// «Реальная проверка». Проверка гасит только свой Xray: подключение,
+  /// нажатое посреди неё, поднимает свой.
+  String _xrayOwner = 'session';
+
+  /// Поднимает Xray для серверов [session], которые sing-box не умеет.
+  /// `plan` null — Xray не нужен (и погашен, если работал); `failed` — он
+  /// нужен, но не поднялся: такие серверы вызывающий убирает из сессии.
+  Future<({_XrayPlan? plan, bool failed})> _prepareXray(
+      List<_ParsedVless> session,
+      {String owner = 'session'}) async {
+    final needed = <_ParsedVless>[];
+    for (final p in session) {
+      if (await _needsXray(p)) needed.add(p);
+    }
+    if (needed.isEmpty) {
+      await _stopXray(owner: owner);
+      return (plan: null, failed: false);
+    }
+    _xrayOwner = owner;
+    final ports = Map<_ParsedVless, int>.identity();
+    for (final p in needed) {
+      ports[p] = await _freeLoopbackPort();
+    }
+    final random = math.Random.secure();
+    String secret() =>
+        List.generate(16, (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'))
+            .join();
+    final plan = _XrayPlan(ports, secret(), secret());
+    var ok = await _xray.start(_buildXrayConfig(needed, ports, plan.user, plan.pass));
+    if (ok) ok = await _waitLoopbackPort(ports[needed.first]!);
+    final output = await _xray.readLog();
+    final names = needed.map((p) => p.remark.isEmpty ? p.host : p.remark).join(', ');
+    if (!ok) {
+      _xrayBroken = true;
+      _xrayStarted = false;
+      await _xray.stop();
+      unawaited(AppLogService.instance.log(
+          'Xray не запустился — серверы, которым он нужен, в этот раз '
+          'пропущены: $names. Xray: ${_tailLines(output, 6)}',
+          level: AppLogLevel.error));
+      return (plan: null, failed: true);
+    }
+    _xrayStarted = true;
+    _logXrayOutput(output);
+    unawaited(AppLogService.instance.log(
+        'Через Xray (sing-box их не умеет): ${needed.length} — $names'));
+    return (plan: plan, failed: false);
+  }
+
+  /// Приложение открыли поверх работающей сессии. Если та шла через Xray,
+  /// нативная сторона помнит его конфиг: процесс жив — продолжаем его
+  /// сторожить, упал — поднимаем снова.
+  Future<void> _attachXray() async {
+    if (_sessionUsesXray) return;
+    final state = await _xray.ensureRunning();
+    if (state == 'running' || state == 'restarted') {
+      _xrayStarted = true;
+      _sessionUsesXray = true;
+    }
+  }
+
+  /// Гасит Xray. [owner] — гасить, только если он запущен для этого.
+  Future<void> _stopXray({String? owner}) async {
+    if (owner != null && owner != _xrayOwner) return;
+    _sessionUsesXray = false;
+    if (!_xrayStarted) return;
+    _xrayStarted = false;
+    await _xray.stop();
+  }
+
+  /// Сторож: Xray нужен сессии, а процесса нет — поднимаем с тем же конфигом.
+  /// Заодно переносим в журнал приложения его предупреждения и ошибки.
+  Future<void> _keepXrayAlive() async {
+    if (!_sessionUsesXray) return;
+    final state = await _xray.ensureRunning();
+    if (state == 'restarted') {
+      unawaited(AppLogService.instance.log(
+          'Xray остановился — поднял его снова', level: AppLogLevel.warning));
+    } else if (state == 'failed') {
+      unawaited(AppLogService.instance.log(
+          'Xray остановился и не поднимается — серверы через него не работают',
+          level: AppLogLevel.error));
+    }
+    _logXrayOutput(await _xray.readLog());
+  }
+
+  /// В журнал приложения — только предупреждения и ошибки Xray, не больше
+  /// двадцати строк за раз.
+  void _logXrayOutput(String output) {
+    if (output.isEmpty) return;
+    final lines = output
+        .split('\n')
+        .map((l) => l.trim())
+        .where((l) =>
+            l.contains('[Warning]') ||
+            l.contains('[Error]') ||
+            l.toLowerCase().contains('failed'))
+        .take(20)
+        .map((l) => (message: 'Xray: $l', level: AppLogLevel.warning))
+        .toList();
+    if (lines.isNotEmpty) unawaited(AppLogService.instance.logBatch(lines));
+  }
+
+  static String _tailLines(String text, int count) {
+    final lines = text
+        .split('\n')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+    return lines.skip(math.max(0, lines.length - count)).join(' | ');
+  }
+
+  static Future<int> _freeLoopbackPort() async {
+    final socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final port = socket.port;
+    await socket.close();
+    return port;
+  }
+
+  /// Ждёт, пока Xray начнёт слушать порт: sing-box не должен ходить в него
+  /// раньше.
+  static Future<bool> _waitLoopbackPort(int port,
+      {Duration timeout = const Duration(seconds: 3)}) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      try {
+        final socket = await Socket.connect(InternetAddress.loopbackIPv4, port,
+            timeout: const Duration(milliseconds: 300));
+        socket.destroy();
+        return true;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      }
+    }
+    return false;
+  }
+
+  /// Outbound Xray для сервера из ссылки — ровно то, что собрал бы из той же
+  /// ссылки сам Xray (Happ): поля один в один из параметров ссылки.
+  static Map<String, dynamic> _xrayOutbound(_ParsedVless p, String tag) {
+    final transport = p.transportType ?? 'tcp';
+    final host = p.transportHost?.trim() ?? '';
+    final path = p.transportPath ?? '';
+    final stream = <String, dynamic>{
+      'network': transport,
+      'security': p.security,
+    };
+    switch (transport) {
+      case 'ws':
+        stream['wsSettings'] = {
+          'path': path.isEmpty ? '/' : path,
+          if (host.isNotEmpty) 'host': host,
+        };
+      case 'grpc':
+        stream['grpcSettings'] = {
+          'serviceName': path,
+          if ((p.xhttpMode ?? '').toLowerCase() == 'multi') 'multiMode': true,
+          if ((p.grpcAuthority ?? '').isNotEmpty) 'authority': p.grpcAuthority,
+        };
+      case 'xhttp':
+        stream['xhttpSettings'] = {
+          'path': path.isEmpty ? '/' : path,
+          if (host.isNotEmpty) 'host': host,
+          'mode': (p.xhttpMode ?? '').isEmpty ? 'auto' : p.xhttpMode,
+          if (p.xhttpExtra != null) 'extra': p.xhttpExtra,
+        };
+      case 'httpupgrade':
+        stream['httpupgradeSettings'] = {
+          'path': path.isEmpty ? '/' : path,
+          if (host.isNotEmpty) 'host': host,
+        };
+    }
+    if (p.security == 'reality') {
+      stream['realitySettings'] = {
+        'serverName': p.sni ?? '',
+        'fingerprint': (p.fp ?? '').isEmpty ? 'chrome' : p.fp,
+        'publicKey': p.pbk ?? '',
+        'shortId': p.sid ?? '',
+        if ((p.spx ?? '').isNotEmpty) 'spiderX': p.spx,
+        if ((p.pqv ?? '').isNotEmpty) 'mldsa65Verify': p.pqv,
+      };
+    } else if (p.security == 'tls') {
+      stream['tlsSettings'] = {
+        'serverName': p.sni ?? p.host,
+        if ((p.fp ?? '').isNotEmpty) 'fingerprint': p.fp,
+        if ((p.alpn ?? '').isNotEmpty)
+          'alpn': p.alpn!.split(',').map((e) => e.trim()).toList(),
+        if (p.allowInsecure) 'allowInsecure': true,
+      };
+    }
+
+    final Map<String, dynamic> settings;
+    switch (p.protocol) {
+      case 'trojan':
+        settings = {
+          'servers': [
+            {'address': p.host, 'port': p.port, 'password': p.password ?? ''},
+          ],
+        };
+      case 'vmess':
+        settings = {
+          'vnext': [
+            {
+              'address': p.host,
+              'port': p.port,
+              'users': [
+                {'id': p.uuid, 'security': p.vmessSecurity ?? 'auto'},
+              ],
+            },
+          ],
+        };
+      default:
+        settings = {
+          'vnext': [
+            {
+              'address': p.host,
+              'port': p.port,
+              'users': [
+                {
+                  'id': p.uuid,
+                  'encryption': (p.vlessEncryption ?? '').trim().isEmpty
+                      ? 'none'
+                      : p.vlessEncryption!.trim(),
+                  if ((p.flow ?? '').isNotEmpty) 'flow': p.flow,
+                },
+              ],
+            },
+          ],
+        };
+    }
+    return {
+      'tag': tag,
+      'protocol': p.protocol,
+      'settings': settings,
+      'streamSettings': stream,
+    };
+  }
+
+  /// Конфиг Xray: на каждый сервер — свой SOCKS-вход на 127.0.0.1 с паролем
+  /// (чтобы этим входом не пользовались другие приложения телефона) и
+  /// правило «этот вход — в этот сервер».
+  static String _buildXrayConfig(List<_ParsedVless> profiles,
+      Map<_ParsedVless, int> ports, String user, String pass) {
+    final inbounds = <Map<String, dynamic>>[];
+    final outbounds = <Map<String, dynamic>>[];
+    final rules = <Map<String, dynamic>>[];
+    for (var i = 0; i < profiles.length; i++) {
+      final port = ports[profiles[i]];
+      if (port == null) continue;
+      inbounds.add({
+        'tag': 'in-$i',
+        'listen': '127.0.0.1',
+        'port': port,
+        'protocol': 'socks',
+        'settings': {
+          'auth': 'password',
+          'accounts': [
+            {'user': user, 'pass': pass},
+          ],
+          'udp': true,
+          'ip': '127.0.0.1',
+        },
+      });
+      outbounds.add(_xrayOutbound(profiles[i], 'out-$i'));
+      rules.add({
+        'inboundTag': ['in-$i'],
+        'outboundTag': 'out-$i',
+      });
+    }
+    outbounds.add({'tag': 'block', 'protocol': 'blackhole'});
+    return jsonEncode({
+      'log': {'loglevel': 'warning'},
+      'inbounds': inbounds,
+      'outbounds': outbounds,
+      'routing': {'rules': rules},
+    });
+  }
+
+  @visibleForTesting
+  static String debugBuildXrayConfig(List<String> links) {
+    final profiles = [
+      for (final link in links) _ParsedVless.tryParseAny(link)!,
+    ];
+    final ports = Map<_ParsedVless, int>.identity();
+    for (var i = 0; i < profiles.length; i++) {
+      ports[profiles[i]] = 30000 + i;
+    }
+    return _buildXrayConfig(profiles, ports, 'u', 'p');
+  }
+
   static String _maskSecrets(String config) {
     var masked = config;
-    for (final field in ['uuid', 'public_key', 'short_id', 'password']) {
+    for (final field in [
+      'uuid',
+      'public_key',
+      'short_id',
+      'password',
+      'username',
+    ]) {
       masked = masked.replaceAllMapped(
         RegExp('"$field"\\s*:\\s*"([^"]*)"'),
         (m) {
@@ -5561,6 +5992,8 @@ class TunnelService {
     String? adBlockRuleSetPath,
     // Принимает ли ядро `experimental.monitoring` (см. _monitoringOptions).
     bool monitoringOptionsSupported = false,
+    // Серверы, которые идут через Xray, и их SOCKS-порты (см. _XrayPlan).
+    _XrayPlan? xray,
   }) {
     final adBlockRuleSet = blockAds && adBlockRuleSetPath != null;
     // Сборка одного proxy-outbound вынесена в функцию, чтобы тот же код собрал
@@ -5568,6 +6001,20 @@ class TunnelService {
     // outbound'ом смена страны требовала нового конфига и перезапуска ядра, то
     // есть разрыва туннеля.
     Map<String, dynamic> buildProxyOutbound(_ParsedVless p, String outboundTag) {
+      // Сервер, который sing-box не умеет, обслуживает Xray: sing-box ходит
+      // к нему через локальный SOCKS-вход Xray.
+      final xrayPort = xray?.ports[p];
+      if (xrayPort != null) {
+        return <String, dynamic>{
+          'type': 'socks',
+          'tag': outboundTag,
+          'server': '127.0.0.1',
+          'server_port': xrayPort,
+          'version': '5',
+          'username': xray!.user,
+          'password': xray.pass,
+        };
+      }
       // Shadowsocks и hysteria2 стоят особняком: у них нет ни транспорта
       // (ws/grpc/xhttp), ни привычного блока tls — всё описывается своими
       // полями. Собираем их отдельно и сразу возвращаем.
@@ -6467,21 +6914,13 @@ class TunnelService {
 
     final result = <_ParsedVless>[];
     final parsedLines = <String>{};
-    // Узлы с шифрованием VLESS: в сессию их не берём — ядро к ним не
-    // подключится, а место из двенадцати они бы заняли и висели бы
-    // «не отвечает». На экране они честно помечены как неподдерживаемые.
-    final encrypted = <({String remark, String protocol})>[];
+    // Узлы с шифрованием VLESS остаются в списке: sing-box их не умеет, но
+    // их подключает Xray (см. _isProfileSupported). Там, где Xray нет, они
+    // отсеиваются там же и на экране помечены как неподдерживаемые.
     for (final line in allLines) {
       final parsed = _ParsedVless.tryParseAny(line);
       if (parsed == null) continue;
       parsedLines.add(line);
-      if (parsed.requiresVlessEncryption) {
-        encrypted.add((
-          remark: parsed.remark.isNotEmpty ? parsed.remark : parsed.host,
-          protocol: vlessEncryptionLabel,
-        ));
-        continue;
-      }
       result.add(parsed);
     }
 
@@ -6498,7 +6937,7 @@ class TunnelService {
       if (protocol == 'http' || protocol == 'https') continue;
       others.add((remark: _remarkOfLink(line), protocol: protocol));
     }
-    _cachedOthers = [...encrypted, ...others];
+    _cachedOthers = others;
 
     return result;
   }
@@ -6902,6 +7341,8 @@ class TunnelService {
     } catch (e) {
       lastError.value = 'Отключение не удалось: $e';
     } finally {
+      // Xray жил только ради этой сессии.
+      await _stopXray();
       connectedServerName.value = null;
       localProxyAddress.value = null;
       // `_lastConnectionString` обнуляется ровно в той же точке, что и публичный
@@ -7171,6 +7612,17 @@ class _VpnServiceStartException implements Exception {
   String toString() => message;
 }
 
+/// Какие серверы сессии обслуживает Xray и на каких локальных портах.
+class _XrayPlan {
+  _XrayPlan(this.ports, this.user, this.pass);
+
+  /// Сервер -> SOCKS-порт Xray на 127.0.0.1. По идентичности: в подписке
+  /// бывают одноимённые серверы.
+  final Map<_ParsedVless, int> ports;
+  final String user;
+  final String pass;
+}
+
 class _ParsedVless {
   _ParsedVless({
     this.protocol = 'vless',
@@ -7199,8 +7651,18 @@ class _ParsedVless {
     this.obfsType,
     this.obfsPassword,
     this.vlessEncryption,
+    this.pqv,
+    this.grpcAuthority,
     required this.remark,
   });
+
+  /// `pqv` из ссылки: ключ проверки подписи сервера Reality (ML-DSA-65).
+  /// Понимает только Xray.
+  final String? pqv;
+
+  /// `authority` из ссылки для gRPC — заголовок `:authority`. Понимает только
+  /// Xray.
+  final String? grpcAuthority;
 
   /// `encryption` из VLESS-ссылки. Обычно `none`; иначе — «шифрование VLESS»
   /// новых версий Xray (`mlkem768x25519plus.…`): сервер с ним принимает
@@ -7602,6 +8064,8 @@ class _ParsedVless {
             _isTruthy(q['allowinsecure']) ||
             _isTruthy(q['insecure']),
         vlessEncryption: q['encryption'],
+        pqv: q['pqv'],
+        grpcAuthority: q['authority'],
         remark: remark,
       );
     } catch (_) {
