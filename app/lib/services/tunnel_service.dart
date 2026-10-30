@@ -2712,8 +2712,13 @@ class TunnelService {
     // неработающей, хотя ядро до неё просто не дошло.
     final expected = order.toSet();
     final batches = (order.length + 9) ~/ 10;
+    // Мёртвый участник держит место в пачке до 15 секунд (таймаут проверки
+    // в ядре), а не 5, как считалось раньше. На сорока локациях с двумя
+    // десятками молчащих окно в 44 секунды кончалось раньше, чем ядро
+    // доходило до последних пачек, и живые серверы из них объявлялись «не
+    // отвечает». Окно заканчивается и раньше — как только отчитались все.
     final window = timeout ??
-        Duration(seconds: (8 * batches + 12).clamp(25, 90));
+        Duration(seconds: (15 * batches + 10).clamp(30, 150));
 
     final completer = Completer<Map<String, int>>();
     StreamSubscription<dynamic>? sub;
@@ -5006,9 +5011,13 @@ class TunnelService {
   ///
   /// [onResult] получает каждое число по ходу проверки (лучшее из уже
   /// измеренных для этой локации) — экран показывает его сразу.
+  ///
+  /// [recheckAll] — проверку попросил человек кнопкой: перепроверяются все
+  /// серверы, в том числе те, что недавно не ответили и через Xray.
   Future<Map<String, RealCheckResult>> realCheckAllProfiles(
       String connectionString,
-      {void Function(String remark, int delayMs)? onResult}) async {
+      {void Function(String remark, int delayMs)? onResult,
+      bool recheckAll = false}) async {
     // Владельца берём первой строкой, до любого await: подготовка занимает
     // секунды, и всё это время клиент обязан считаться занятым.
     if (isConnected || isBusy || _nativeOwner != null || _connectInProgress) {
@@ -5017,8 +5026,8 @@ class TunnelService {
     _nativeOwner = 'probe';
     _probeCancelRequested = false;
     try {
-      final results =
-          await _realCheckAllProfilesOwned(connectionString, onResult: onResult);
+      final results = await _realCheckAllProfilesOwned(connectionString,
+          onResult: onResult, recheckAll: recheckAll);
       // Ответившие на проверку живы — снимаем с них отметку «не отвечает».
       // Раньше её снимал только замер внутри сессии, и локация, которую
       // проверка только что подтвердила, так и висела в списке красной.
@@ -5035,7 +5044,8 @@ class TunnelService {
 
   Future<Map<String, RealCheckResult>> _realCheckAllProfilesOwned(
       String connectionString,
-      {void Function(String remark, int delayMs)? onResult}) async {
+      {void Function(String remark, int delayMs)? onResult,
+      bool recheckAll = false}) async {
     // Лучшее число по каждой локации за оба прохода — его и отдаём экрану.
     final shown = <String, int>{};
     void report(String remark, int delay) {
@@ -5263,7 +5273,7 @@ class TunnelService {
           if (best[p.remark] == null &&
               !(xrayPrep.plan?.ports.containsKey(p) ?? false))
             p,
-      ]);
+      ], recheckAll: recheckAll, onResult: report);
       for (final entry in viaXray.entries) {
         best[entry.key.remark] = entry.value;
       }
@@ -5635,15 +5645,21 @@ class TunnelService {
   /// запоминаем, и дальше подключаем его через Xray. Возвращает задержку
   /// ответивших.
   Future<Map<_ParsedVless, int>> _discoverViaXray(
-      List<_ParsedVless> failed) async {
+      List<_ParsedVless> failed,
+      {bool recheckAll = false,
+      void Function(String remark, int delayMs)? onResult}) async {
     final now = DateTime.now();
     _xrayFailedAt.removeWhere(
         (_, at) => now.difference(at) > const Duration(minutes: 30));
+    // Пропуск недавно не ответивших — только для автоматической проверки.
+    // По кнопке «Проверить» перепроверяется всё: человек хочет видеть
+    // свежий ответ по каждому серверу, а не вчерашний отказ.
     final candidates = <_ParsedVless>[
       for (final p in failed)
         if (p.remark.isNotEmpty &&
             _xraySupports(p) &&
-            !_xrayFailedAt.containsKey(LocationNames.normalize(p.remark)))
+            (recheckAll ||
+                !_xrayFailedAt.containsKey(LocationNames.normalize(p.remark))))
           p,
     ];
     if (candidates.isEmpty || _xrayBroken || _probeCancelRequested) {
@@ -5660,7 +5676,10 @@ class TunnelService {
         final p = queue.removeLast();
         final delay =
             await socksHttpDelay(plan.ports[p]!, plan.user, plan.pass);
-        if (delay != null) found[p] = delay;
+        if (delay != null) {
+          found[p] = delay;
+          onResult?.call(p.remark, delay);
+        }
       }
     }
 

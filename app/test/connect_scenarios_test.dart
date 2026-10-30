@@ -807,6 +807,16 @@ void main() {
       core.groupDelays = {'out-0': 90, 'out-1': 65535, 'out-2': 60};
       final results = await t.realCheckAllProfiles(_subscription);
       expect(results['Нидерланды']?.ok, isFalse);
+      final probes = xray.configs.length;
+      expect(probes, 1, reason: 'Нидерланды попробовали через Xray');
+
+      // Автоматическая проверка недавний отказ через Xray не повторяет…
+      await t.realCheckAllProfiles(_subscription);
+      expect(xray.configs.length, probes);
+      // …а кнопка «Проверить» — перепроверяет всё.
+      await t.realCheckAllProfiles(_subscription, recheckAll: true);
+      expect(xray.configs.length, probes + 1);
+
       final server = await startWorkingTunnel();
       addTearDown(() => server.close(force: true));
       final before = xray.configs.length;

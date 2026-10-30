@@ -123,7 +123,8 @@ class _ServersScreenState extends State<ServersScreen> {
       unsupportedProtocol: _unsupportedProtocols.containsKey(id),
       dead: ping.deadNow,
       corePing: ping.core,
-      checkFailed: (realCheck != null && !realCheck.ok) || ping.silentInSession,
+      checkFailed: (!_realChecking && realCheck != null && !realCheck.ok) ||
+          ping.silentInSession,
       inSubscription: _realEndpoints[id] != null,
       subscriptionKnown:
           _realEndpoints.isNotEmpty || _unsupportedProtocols.isNotEmpty,
@@ -160,7 +161,12 @@ class _ServersScreenState extends State<ServersScreen> {
     // первый же замер или проверка, где она ответит. Подписываем так только
     // свежую отметку: спустя час без новой проверки это уже не «не
     // отвечает», а «неизвестно».
+    // Пока идёт проверка, старое «не отвечает» не показываем: сервер прямо
+    // сейчас перепроверяется, и на карточке — «проверяю…», пока не придёт
+    // ответ. Раньше старая отметка висела до конца проверки, и выглядело
+    // так, будто такие серверы не проверяются вовсе.
     final deadNow = live == null &&
+        !_realChecking &&
         !_checkedThisRun.contains(id) &&
         _tunnel.isLocationDead(id, within: _realCheckMaxAge);
     // Какое число показать. С туннелем — живой замер; без него — проверка,
@@ -965,7 +971,7 @@ class _ServersScreenState extends State<ServersScreen> {
       // 5006 мс» у живого сервера) и успевал получить отказ «сейчас активен
       // другой туннель» на промежутке между двумя сессиями.
       final byRemark = await _tunnel.realCheckAllProfiles(connectionString,
-          onResult: (remark, delayMs) {
+          recheckAll: !silent, onResult: (remark, delayMs) {
         partial[remark] = delayMs;
         flush ??= Timer(const Duration(milliseconds: 300), applyPartial);
       });
