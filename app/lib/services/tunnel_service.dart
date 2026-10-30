@@ -3798,6 +3798,17 @@ class TunnelService {
         '[${ordered.map((p) => '${p.remark.isEmpty ? p.host : p.remark}:'
             '${p.transportType ?? 'tcp'}/${p.security}').join(', ')}]'
         '${skippedCount > 0 ? '; пропущено ядром: $skippedCount' : ''}'));
+    final encrypted = _cachedOthers
+        .where((o) => o.protocol == vlessEncryptionLabel)
+        .map((o) => o.remark)
+        .toList();
+    if (encrypted.isNotEmpty) {
+      unawaited(AppLogService.instance.log(
+          'Подписка: ${encrypted.length} локаций требуют шифрования VLESS '
+          '(encryption=mlkem…) — ядро приложения его не поддерживает, в '
+          'сессию они не идут: ${encrypted.join(', ')}',
+          level: AppLogLevel.warning));
+    }
     // Сколько заняла подготовка до первой попытки поднять ядро. Без этих
     // чисел «долго подключается» невозможно разобрать со стороны
     // пользователя: непонятно, ждём мы подписку, ответы ядра о его
@@ -6410,6 +6421,10 @@ class TunnelService {
   /// в открытом виде или под base64. Разбираем мы не все из них, но узнать
   /// список нужно в любом случае: нераспознанные строки попадают в
   /// [_cachedOthers] и честно показываются на экране как неподдерживаемые.
+  /// Как на экране «Серверы» назван узел, которому нужно шифрование VLESS:
+  /// «протокол vless encryption · приложение его пока не поддерживает».
+  static const vlessEncryptionLabel = 'vless encryption';
+
   static final RegExp _nodeLinkPattern = RegExp(
       r'(?:vless|vmess|trojan|ss|ssr|hysteria2?|hy2|tuic|wireguard|wg|ssh)://',
       caseSensitive: false);
@@ -6452,12 +6467,22 @@ class TunnelService {
 
     final result = <_ParsedVless>[];
     final parsedLines = <String>{};
+    // Узлы с шифрованием VLESS: в сессию их не берём — ядро к ним не
+    // подключится, а место из двенадцати они бы заняли и висели бы
+    // «не отвечает». На экране они честно помечены как неподдерживаемые.
+    final encrypted = <({String remark, String protocol})>[];
     for (final line in allLines) {
       final parsed = _ParsedVless.tryParseAny(line);
-      if (parsed != null) {
-        result.add(parsed);
-        parsedLines.add(line);
+      if (parsed == null) continue;
+      parsedLines.add(line);
+      if (parsed.requiresVlessEncryption) {
+        encrypted.add((
+          remark: parsed.remark.isNotEmpty ? parsed.remark : parsed.host,
+          protocol: vlessEncryptionLabel,
+        ));
+        continue;
       }
+      result.add(parsed);
     }
 
     // Строки, которые разобрать не вышло, запоминаем отдельно: подключиться к
@@ -6473,7 +6498,7 @@ class TunnelService {
       if (protocol == 'http' || protocol == 'https') continue;
       others.add((remark: _remarkOfLink(line), protocol: protocol));
     }
-    _cachedOthers = others;
+    _cachedOthers = [...encrypted, ...others];
 
     return result;
   }
@@ -7173,8 +7198,22 @@ class _ParsedVless {
     this.alterId = 0,
     this.obfsType,
     this.obfsPassword,
+    this.vlessEncryption,
     required this.remark,
   });
+
+  /// `encryption` из VLESS-ссылки. Обычно `none`; иначе — «шифрование VLESS»
+  /// новых версий Xray (`mlkem768x25519plus.…`): сервер с ним принимает
+  /// только клиентов, которые шифруют так же.
+  final String? vlessEncryption;
+
+  /// Ссылка требует шифрования VLESS. Ядро приложения (sing-box) его не
+  /// умеет: подключение к такому серверу молча не проходит, хотя в Happ на
+  /// ядре Xray он работает.
+  bool get requiresVlessEncryption {
+    final value = vlessEncryption?.trim().toLowerCase() ?? '';
+    return value.isNotEmpty && value != 'none';
+  }
 
   /// Протокол узла: vless | trojan | vmess | shadowsocks | hysteria2.
   ///
@@ -7562,6 +7601,7 @@ class _ParsedVless {
         allowInsecure: _isTruthy(q['allowInsecure']) ||
             _isTruthy(q['allowinsecure']) ||
             _isTruthy(q['insecure']),
+        vlessEncryption: q['encryption'],
         remark: remark,
       );
     } catch (_) {

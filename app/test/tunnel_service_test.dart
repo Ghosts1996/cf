@@ -27,6 +27,29 @@ void main() {
   group('listSubscriptionLocations', () {
     final tunnel = TunnelService.instance;
 
+    test('ссылки с шифрованием VLESS помечены неподдерживаемыми, encryption=none '
+        '— обычные', () async {
+      // Ядро Xray (Happ) умеет «шифрование VLESS» (encryption=mlkem768…),
+      // sing-box — нет: такой сервер у нас молча не отвечал.
+      const subscription =
+          'vless://11111111-1111-1111-1111-111111111111@m.example.com:1505'
+          '?type=grpc&serviceName=grpc&security=reality&pbk=PUBKEY&sid=aa'
+          '&sni=iv.kommersant.ru&fp=qq'
+          '&encryption=mlkem768x25519plus.native.0rtt.SECRETKEY'
+          '#Mobile%20%235\n'
+          'vless://22222222-2222-2222-2222-222222222222@fi.example.com:443'
+          '?type=grpc&serviceName=grpc&security=reality&pbk=PUBKEY&sid=bb'
+          '&sni=yahoo.com&fp=chrome&encryption=none#Finland';
+      final locations = await tunnel.listSubscriptionLocations(subscription);
+      final mobile = locations.firstWhere((l) => l.remark == 'Mobile #5');
+      expect(mobile.supported, isFalse);
+      expect(mobile.protocol, TunnelService.vlessEncryptionLabel);
+      final finland = locations.firstWhere((l) => l.remark == 'Finland');
+      expect(finland.supported, isTrue);
+      expect(finland.protocol, 'vless');
+      expect(await tunnel.listProfileNames(subscription), ['Finland']);
+    });
+
     // Подписка с внешними нодами: две vless-локации, одна hysteria2 и одна
     // shadowsocks. Ровно такой список приходит с тех пор, как бот стал
     // дописывать в подписку клиента ноды из чужих подписок.
