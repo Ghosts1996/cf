@@ -499,6 +499,23 @@ void main() {
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 90)));
 
+  test('после замера локация сессии без числа — «не ответила», а не '
+      '«измеряю…» навсегда', () async {
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    tunnel.appInForeground = true;
+    expect(tunnel.sessionMeasured, isFalse, reason: 'замера ещё не было');
+    core.groupDelays = {'out-0': 40, 'out-1': 65535, 'out-2': 70};
+    await tunnel.debugRunLatencyProbe();
+    expect(tunnel.sessionMeasured, isTrue);
+    expect(tunnel.isInSession('Нидерланды'), isTrue);
+    expect(tunnel.latencyForHostName('Нидерланды'), isNull);
+    expect(tunnel.latencyForHostName('Латвия'), 70);
+    await tunnel.disconnect();
+    expect(tunnel.sessionMeasured, isFalse);
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
   test('все молчали, пока на секунды пропадала сеть — сессию не рвём и '
       'дюжину локаций «не отвечает» не помечаем', () async {
     final server = await startWorkingTunnel();

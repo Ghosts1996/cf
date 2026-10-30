@@ -11,6 +11,7 @@ import 'package:http/io_client.dart';
 import 'package:app_settings/app_settings.dart';
 import 'ad_block_rules.dart';
 import 'app_log_service.dart';
+import 'location_names.dart';
 import 'local_prefs.dart';
 import 'singbox_runtime.dart';
 
@@ -204,6 +205,16 @@ class TunnelService {
   /// списка. Задача запоминает номер при старте и молча выходит, если он
   /// сменился.
   int _sessionGeneration = 0;
+
+  /// Номер сессии, в которой замер задержки уже хоть раз завершился.
+  int _measuredGeneration = -1;
+
+  /// В этой сессии замер уже прошёл. Локация сессии, у которой после него
+  /// нет числа, — не ответила, и экран пишет «нет ответа», а не
+  /// «измеряю…» до бесконечности.
+  bool get sessionMeasured =>
+      isConnected && _measuredGeneration == _sessionGeneration;
+
   bool _userInitiatedDisconnect = false;
   String? _lastConnectionString;
   String? _lastPreferredHostName;
@@ -391,7 +402,13 @@ class TunnelService {
   bool isLocationDead(String hostName, {Duration? within}) {
     final needle = _normalizedName(hostName);
     if (needle.isEmpty) return false;
-    final at = _deadMarkTimes[needle];
+    // Точное имя, иначе — то же имя с названием сервиса через «|». По
+    // вхождению — нет: мёртвая «Швеция» не должна метить «Швеция · Стокгольм».
+    final key = _deadMarkTimes.containsKey(needle)
+        ? needle
+        : LocationNames.find(_deadMarkTimes.keys, hostName, (k) => k,
+            known: _knownNames, loose: false);
+    final at = key == null ? null : _deadMarkTimes[key];
     if (at == null) return false;
     if (within == null) return true;
     return DateTime.now().millisecondsSinceEpoch - at < within.inMilliseconds;
@@ -403,8 +420,29 @@ class TunnelService {
   /// ключу, а не перебором с регуляркой.
   Map<String, int> _deadMarkTimes = const <String, int>{};
 
-  static String _normalizedName(String name) =>
-      name.replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
+  static String _normalizedName(String name) => LocationNames.normalize(name);
+
+  /// Все имена локаций, которые сейчас известны: подписка и сессия. Нужны
+  /// [LocationNames.find]: имя, которое есть дословно, — отдельная локация,
+  /// и с похожими её не путаем.
+  Set<String> get _knownNames {
+    final profiles = _cachedProfiles;
+    final session = _sessionOutboundRemarks;
+    if (identical(profiles, _knownNamesFor) &&
+        identical(session, _knownNamesSession)) {
+      return _knownNamesCache;
+    }
+    _knownNamesFor = profiles;
+    _knownNamesSession = session;
+    return _knownNamesCache = LocationNames.normalizedSet([
+      ...?profiles?.map((p) => p.remark),
+      ...session,
+    ]);
+  }
+
+  List<_ParsedVless>? _knownNamesFor;
+  List<String>? _knownNamesSession;
+  Set<String> _knownNamesCache = const <String>{};
 
   Future<void> _publishDeadLocations() async {
     try {
@@ -2059,6 +2097,7 @@ class TunnelService {
         _emptyLatencyRuns = 0;
       }
       latencyByRemark.value = smoothed;
+      _measuredGeneration = _sessionGeneration;
       unawaited(_saveLatencySnapshot(smoothed));
       unawaited(_clearDeadMarks(raw.keys));
       // Не ответившие на замер участники сессии — кандидаты в мёртвые: в
@@ -2088,18 +2127,8 @@ class TunnelService {
   /// Имя локации из списка сессии, соответствующее показанному имени.
   /// Сопоставление по вхождению — той же логикой, что _matchProfile: панель
   /// 3x-ui дописывает в remark название сервиса.
-  static String? _matchRemark(List<String> remarks, String name) {
-    final needle = name.trim().toLowerCase();
-    if (needle.isEmpty) return null;
-    for (final remark in remarks) {
-      if (remark.trim().toLowerCase() == needle) return remark;
-    }
-    for (final remark in remarks) {
-      final hay = remark.trim().toLowerCase();
-      if (hay.contains(needle) || needle.contains(hay)) return remark;
-    }
-    return null;
-  }
+  String? _matchRemark(List<String> remarks, String name) =>
+      LocationNames.find(remarks, name, (r) => r, known: _knownNames);
 
   // ── Проверка живости туннеля ───────────────────────────────────────────
   //
@@ -2566,14 +2595,10 @@ class TunnelService {
   /// разошлись в логике сопоставления.
   int? latencyForHostName(String? hostName) {
     if (hostName == null || hostName.isEmpty) return null;
-    final needle = hostName.toLowerCase().trim();
-    for (final entry in latencyByRemark.value.entries) {
-      final remark = entry.key.toLowerCase();
-      if (remark == needle || remark.contains(needle) || needle.contains(remark)) {
-        return entry.value;
-      }
-    }
-    return null;
+    return LocationNames.find(
+            latencyByRemark.value.entries, hostName, (e) => e.key,
+            known: _knownNames)
+        ?.value;
   }
 
   /// Когда началась текущая сессия (для таймера в уведомлении). null — не
@@ -3391,16 +3416,10 @@ class TunnelService {
 
   _ParsedVless? _matchProfile(List<_ParsedVless> profiles, String? hostName) {
     if (hostName == null || hostName.isEmpty) return null;
-    final needle = hostName.trim().toLowerCase();
-    for (final p in profiles) {
-      if (p.remark.trim().toLowerCase() == needle) return p;
-    }
-    for (final p in profiles) {
-      final remark = p.remark.trim().toLowerCase();
-      if (remark.isEmpty) continue;
-      if (remark.contains(needle) || needle.contains(remark)) return p;
-    }
-    return null;
+    // Нестрогое сравнение здесь опаснее всего: по «Германия №1» подключалась
+    // «Германия №1 · gRPC», если та стояла в подписке раньше.
+    return LocationNames.find(profiles, hostName, (p) => p.remark,
+        known: _knownNames);
   }
 
   /// Публичная обёртка над `_connectInternal`: не даёт двум подключениям
@@ -4311,17 +4330,11 @@ class TunnelService {
     int rank(_ParsedVless p) {
       final own = latency[p.remark];
       if (own != null) return own;
-      // Имена в подписке и в замере могут отличаться префиксом сервиса —
-      // сопоставляем так же мягко, как это делает latencyForHostName.
-      final needle = p.remark.trim().toLowerCase();
-      if (needle.isEmpty) return 1 << 20;
-      for (final entry in latency.entries) {
-        final key = entry.key.trim().toLowerCase();
-        if (key == needle || key.contains(needle) || needle.contains(key)) {
-          return entry.value;
-        }
-      }
-      return 1 << 20; // не измерена — после измеренных, но не выброшена
+      // Имена в подписке и в замере могут отличаться названием сервиса —
+      // сопоставляем по тем же правилам, что latencyForHostName.
+      final found = LocationNames.find(latency.entries, p.remark, (e) => e.key,
+          known: _knownNames);
+      return found?.value ?? 1 << 20; // не измерена — после измеренных
     }
 
     // Один порядок для всех случаев: живые по последнему замеру — от самой

@@ -10,6 +10,7 @@ import '../state/selected_server.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
 import '../services/locale_service.dart';
+import '../services/location_names.dart';
 
 /// Экран выбора сервера.
 ///
@@ -61,6 +62,29 @@ class _ServersScreenState extends State<ServersScreen> {
     return <dynamic>[...own, ..._subscriptionOnlyHosts];
   }
 
+  /// Имена всех локаций экрана — для [LocationNames.find]: имя, которое на
+  /// экране есть дословно, — отдельная локация, и с похожими её не путаем.
+  Set<String> get _knownHostNames {
+    final own = _hosts;
+    final extra = _subscriptionOnlyHosts;
+    if (identical(own, _knownFor) && identical(extra, _knownForExtra)) {
+      return _knownCache;
+    }
+    _knownFor = own;
+    _knownForExtra = extra;
+    return _knownCache = LocationNames.normalizedSet([
+      for (final raw in [...?own, ...extra])
+        (raw as Map<String, dynamic>)['host_name'] as String? ?? '',
+    ]);
+  }
+
+  List<dynamic>? _knownFor;
+  List<Map<String, dynamic>>? _knownForExtra;
+  Set<String> _knownCache = const <String>{};
+
+  static String _hostIdOf(dynamic raw) =>
+      (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
+
   /// Тот же список, но по возрастанию пинга: сверху самые быстрые, снизу те,
   /// что не отвечают.
   ///
@@ -99,7 +123,7 @@ class _ServersScreenState extends State<ServersScreen> {
       unsupportedProtocol: _unsupportedProtocols.containsKey(id),
       dead: ping.deadNow,
       corePing: ping.live ?? ping.saved,
-      checkFailed: realCheck != null && !realCheck.ok,
+      checkFailed: (realCheck != null && !realCheck.ok) || ping.silentInSession,
       inSubscription: _realEndpoints[id] != null,
       subscriptionKnown:
           _realEndpoints.isNotEmpty || _unsupportedProtocols.isNotEmpty,
@@ -113,7 +137,8 @@ class _ServersScreenState extends State<ServersScreen> {
   /// для места в списке: раньше сортировка брала результат проверки любой
   /// давности, а подпись — только свежий, и наверху списка оказывались
   /// серверы с надписью «не отвечает» — по их числам многочасовой давности.
-  ({int? live, int? saved, bool deadNow}) _pingSourcesFor(String id) {
+  ({int? live, int? saved, bool deadNow, bool silentInSession}) _pingSourcesFor(
+      String id) {
     // Живое число от ядра есть только при поднятом туннеле и только после
     // первого прогона замерщика.
     final live = _tunnel.isConnected ? _tunnel.latencyForHostName(id) : null;
@@ -133,7 +158,17 @@ class _ServersScreenState extends State<ServersScreen> {
     // отвечает», а «неизвестно».
     final deadNow = live == null &&
         _tunnel.isLocationDead(id, within: _realCheckMaxAge);
-    return (live: live, saved: saved, deadNow: deadNow);
+    // Локация в сессии, замер по сессии уже прошёл, а числа у неё нет — она
+    // не ответила. Раньше такая висела на «измеряю…» навсегда.
+    final silentInSession = live == null &&
+        _tunnel.sessionMeasured &&
+        _tunnel.isInSession(id);
+    return (
+      live: live,
+      saved: saved,
+      deadNow: deadNow,
+      silentInSession: silentInSession,
+    );
   }
   String? _error;
   bool _loading = true;
@@ -511,19 +546,14 @@ class _ServersScreenState extends State<ServersScreen> {
     // ("VPNonLine | 🇬🇧 Англия"), а экран работает с host_name из /hosts
     // ("🇬🇧 Англия") — панель 3x-ui дописывает в remark название сервиса. По
     // собственным ключам ответа ни один не совпал бы с именем локации.
-    // Сопоставляем по вхождению — той же логикой, что TunnelService._matchProfile.
+    // Сопоставляем по тем же правилам, что TunnelService (LocationNames).
     final byHostName = <String, int>{};
     for (final host in (_allHosts ?? const <dynamic>[])) {
-      final hostName = (host as Map<String, dynamic>)['host_name'] as String?;
-      if (hostName == null || hostName.isEmpty) continue;
-      final needle = hostName.toLowerCase().trim();
-      for (final entry in measured.entries) {
-        final remark = entry.key.toLowerCase();
-        if (remark == needle || remark.contains(needle)) {
-          byHostName[hostName] = entry.value;
-          break;
-        }
-      }
+      final hostName = _hostIdOf(host);
+      if (hostName.isEmpty) continue;
+      final found = LocationNames.find(measured.entries, hostName, (e) => e.key,
+          known: _knownHostNames);
+      if (found != null) byHostName[hostName] = found.value;
     }
     if (byHostName.isEmpty) return;
 
@@ -732,17 +762,9 @@ class _ServersScreenState extends State<ServersScreen> {
   String? _hostNameFor(String remark) {
     final hosts = _hosts;
     if (hosts == null) return null;
-    final needle = remark.trim().toLowerCase();
-    if (needle.isEmpty) return null;
-    for (final raw in hosts) {
-      final id = (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
-      if (id.isEmpty) continue;
-      final hay = id.trim().toLowerCase();
-      if (hay == needle || needle.contains(hay) || hay.contains(needle)) {
-        return id;
-      }
-    }
-    return null;
+    final found =
+        LocationNames.find(hosts, remark, _hostIdOf, known: _knownHostNames);
+    return found == null ? null : _hostIdOf(found);
   }
 
   Future<void> _loadActiveConnectionString() async {
@@ -954,29 +976,14 @@ class _ServersScreenState extends State<ServersScreen> {
   /// TunnelService._matchProfile и latencyForHostName.
   RealCheckResult? _resultForHostName(
       Map<String, RealCheckResult> byRemark, String hostName) {
-    final needle = hostName.trim().toLowerCase();
-    if (needle.isEmpty) return null;
-    for (final entry in byRemark.entries) {
-      final remark = entry.key.trim().toLowerCase();
-      if (remark == needle) return entry.value;
-    }
-    // Точного совпадения нет — ищем по вхождению, но только если кандидат
-    // ровно один. Раньше брался первый попавшийся, и на трёх десятках узлов
+    // Раньше брался первый попавшийся по вхождению, и на трёх десятках узлов
     // с похожими именами («США», «⚡ США», «⚡ США #2», «Нидерланды»,
     // «Нидерланды | №1») локация регулярно получала чужой результат: живая
     // подписывалась мёртвой и наоборот. Лучше честно ничего не показать, чем
-    // показать чужое.
-    RealCheckResult? found;
-    var matches = 0;
-    for (final entry in byRemark.entries) {
-      final remark = entry.key.trim().toLowerCase();
-      if (remark.contains(needle) || needle.contains(remark)) {
-        found = entry.value;
-        matches++;
-        if (matches > 1) return null;
-      }
-    }
-    return found;
+    // показать чужое — правила в LocationNames.find.
+    return LocationNames.find(byRemark.entries, hostName, (e) => e.key,
+            known: _knownHostNames)
+        ?.value;
   }
 
   /// Оценка локации для авто-балансировки. `null` означает "этой локации в
@@ -1033,20 +1040,9 @@ class _ServersScreenState extends State<ServersScreen> {
     if (hosts == null || connectedName == null || connectedName.isEmpty) {
       return null;
     }
-    final needle = connectedName.trim().toLowerCase();
-    String idOf(dynamic raw) =>
-        (raw as Map<String, dynamic>)['host_name'] as String? ?? '';
-    for (final raw in hosts) {
-      final id = idOf(raw);
-      if (id.isNotEmpty && id.trim().toLowerCase() == needle) return id;
-    }
-    for (final raw in hosts) {
-      final id = idOf(raw);
-      if (id.isEmpty) continue;
-      final hay = id.trim().toLowerCase();
-      if (needle.contains(hay) || hay.contains(needle)) return id;
-    }
-    return null;
+    final found = LocationNames.find(hosts, connectedName, _hostIdOf,
+        known: _knownHostNames);
+    return found == null ? null : _hostIdOf(found);
   }
 
   void _maybeApplyAutoBalance() {
@@ -1642,6 +1638,9 @@ class _ServersScreenState extends State<ServersScreen> {
                   // и подключаться некуда — но и «измеряю…» до скончания веков
                   // писать нельзя, экран выглядит зависшим.
                   pingLabel = tr('нет в подписке');
+                  pingColor = AppColors.offline;
+                } else if (sources.silentInSession) {
+                  pingLabel = tr('нет ответа');
                   pingColor = AppColors.offline;
                 } else if (_tunnel.isConnected && _tunnel.isInSession(id)) {
                   pingLabel = tr('измеряю...');
