@@ -5634,8 +5634,9 @@ class TunnelService {
     }
     _xrayStarted = true;
     _logXrayOutput(output);
-    unawaited(AppLogService.instance.log(
-        'Через Xray (sing-box их не умеет): ${needed.length} — $names'));
+    unawaited(AppLogService.instance.log(owner == 'probe'
+        ? 'Проверяю через Xray: ${needed.length} — $names'
+        : 'Через Xray: ${needed.length} — $names'));
     return (plan: plan, failed: false);
   }
 
@@ -5800,18 +5801,31 @@ class TunnelService {
   /// двадцати строк за раз.
   void _logXrayOutput(String output) {
     if (output.isEmpty) return;
-    final lines = output
-        .split('\n')
-        .map((l) => l.trim())
-        .where((l) =>
-            l.contains('[Warning]') ||
-            l.contains('[Error]') ||
-            l.toLowerCase().contains('failed'))
+    // Одно и то же предупреждение Xray пишет на каждый сервер: на подписке
+    // с полутора десятками gRPC-серверов журнал заполняли восемнадцать
+    // одинаковых строк «gRPC transport is deprecated». Пишем одну и число.
+    final counts = <String, int>{};
+    for (final raw in output.split('\n')) {
+      final l = raw.trim().replaceFirst(_xrayLogTime, '');
+      if (!(l.contains('[Warning]') ||
+          l.contains('[Error]') ||
+          l.toLowerCase().contains('failed'))) {
+        continue;
+      }
+      counts[l] = (counts[l] ?? 0) + 1;
+    }
+    final lines = counts.entries
         .take(20)
-        .map((l) => (message: 'Xray: $l', level: AppLogLevel.warning))
+        .map((e) => (
+              message: e.value > 1 ? 'Xray: ${e.key} (×${e.value})' : 'Xray: ${e.key}',
+              level: AppLogLevel.warning,
+            ))
         .toList();
     if (lines.isNotEmpty) unawaited(AppLogService.instance.logBatch(lines));
   }
+
+  static final _xrayLogTime =
+      RegExp(r'^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d(\.\d+)?\s*');
 
   static String _tailLines(String text, int count) {
     final lines = text
