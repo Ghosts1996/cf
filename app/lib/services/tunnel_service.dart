@@ -561,6 +561,7 @@ class TunnelService {
       // сессии.
       await _loadPersistedSession();
       unawaited(_publishDeadLocations());
+      unawaited(_seedLatencyFromSnapshot());
       await _applyCompatDefaults();
       // Таймаут нужен и здесь: `_client.initialize()` — тоже MethodChannel-вызов,
       // и он единственный оставался без ограничения по времени. Если после свайпа
@@ -2097,6 +2098,7 @@ class TunnelService {
         _emptyLatencyRuns = 0;
       }
       latencyByRemark.value = smoothed;
+      _latencyAt = DateTime.now();
       _measuredGeneration = _sessionGeneration;
       unawaited(_saveLatencySnapshot(smoothed));
       unawaited(_clearDeadMarks(raw.keys));
@@ -2280,6 +2282,7 @@ class TunnelService {
       if (!stillOurs()) return;
       if (measured.isNotEmpty) {
         latencyByRemark.value = {...latencyByRemark.value, ...measured};
+        _latencyAt = DateTime.now();
       }
       if (measured.isEmpty) {
         await _handleWholeSessionSilent();
@@ -2441,6 +2444,7 @@ class TunnelService {
     if (_sessionGeneration != generation || !isConnected) return;
     if (again.isNotEmpty) {
       latencyByRemark.value = {...latencyByRemark.value, ...again};
+      _latencyAt = DateTime.now();
       await _recoverIfActiveOutboundIsDead(again, immediate: true);
       return;
     }
@@ -4143,9 +4147,44 @@ class TunnelService {
     try {
       await LocalPrefs.instance
           .setString(PrefKeys.cachedLatencyJson, jsonEncode(byRemark));
+      await LocalPrefs.instance.setString(PrefKeys.cachedLatencyAt,
+          '${DateTime.now().millisecondsSinceEpoch}');
     } catch (_) {
       // Не смогли сохранить — подключение от этого не зависит.
     }
+  }
+
+  /// Сколько сохранённые числа пинга считаются свежими — столько же, сколько
+  /// результаты «Реальной проверки» на экране «Серверы».
+  static const _latencySnapshotMaxAge = Duration(hours: 1);
+
+  /// Когда получены числа в [latencyByRemark]. null — ещё ни разу.
+  DateTime? _latencyAt;
+
+  /// Числа в [latencyByRemark] свежее часа — их можно показывать и без
+  /// поднятого туннеля.
+  bool get latencyFresh {
+    final at = _latencyAt;
+    return at != null && DateTime.now().difference(at) < _latencySnapshotMaxAge;
+  }
+
+  /// При запуске приложения — последние сохранённые числа пинга, если они
+  /// свежее часа. Раньше после каждого закрытия приложения экран «Серверы»
+  /// начинал с «измеряю…» на всех карточках и ждал нового замера —
+  /// до полуминуты, хотя числа минутной давности лежали на диске.
+  Future<void> _seedLatencyFromSnapshot() async {
+    try {
+      final at = int.tryParse(
+          await LocalPrefs.instance.getString(PrefKeys.cachedLatencyAt) ?? '');
+      if (at == null) return;
+      final savedAt = DateTime.fromMillisecondsSinceEpoch(at);
+      if (DateTime.now().difference(savedAt) >= _latencySnapshotMaxAge) return;
+      final snapshot = await _loadLatencySnapshot();
+      // Замер в этом запуске уже успел — его числа новее.
+      if (snapshot.isEmpty || latencyByRemark.value.isNotEmpty) return;
+      _latencyAt = savedAt;
+      latencyByRemark.value = snapshot;
+    } catch (_) {}
   }
 
   Future<Map<String, int>> _loadLatencySnapshot() async {
@@ -4497,6 +4536,7 @@ class TunnelService {
     if (!stillOurs()) return;
     if (measured.isNotEmpty) {
       latencyByRemark.value = {...latencyByRemark.value, ...measured};
+      _latencyAt = DateTime.now();
     }
     if (measured.isEmpty) {
       await _handleWholeSessionSilent();

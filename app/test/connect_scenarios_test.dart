@@ -5,6 +5,7 @@
 // обратно». На телефоне их воспроизвести — дело случая, здесь они
 // детерминированны и гоняются в каждой сборке.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
@@ -66,6 +67,7 @@ void main() {
     // порядок подключения в следующем.
     for (final key in [
       PrefKeys.cachedLatencyJson,
+      PrefKeys.cachedLatencyAt,
       PrefKeys.deadLocationsJson,
       PrefKeys.subscriptionCacheJson,
     ]) {
@@ -498,6 +500,27 @@ void main() {
     expect(core.connectCount, before + 1);
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 90)));
+
+  test('после закрытия приложения пинг виден сразу, а не «измеряю…»; '
+      'числа старше часа — нет', () async {
+    await LocalPrefs.instance.setString(PrefKeys.cachedLatencyJson,
+        jsonEncode({'Германия': 44, 'Латвия': 70}));
+    await LocalPrefs.instance.setString(PrefKeys.cachedLatencyAt,
+        '${DateTime.now().subtract(const Duration(minutes: 5)).millisecondsSinceEpoch}');
+    final reopened = TunnelService.withRuntime(FakeRuntime());
+    await reopened.syncRuntimeState();
+    expect(await waitUntil(() => reopened.latencyFresh), isTrue);
+    expect(reopened.latencyForHostName('Германия'), 44);
+    expect(reopened.latencyForHostName('Латвия'), 70);
+
+    await LocalPrefs.instance.setString(PrefKeys.cachedLatencyAt,
+        '${DateTime.now().subtract(const Duration(hours: 2)).millisecondsSinceEpoch}');
+    final later = TunnelService.withRuntime(FakeRuntime());
+    await later.syncRuntimeState();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(later.latencyFresh, isFalse);
+    expect(later.latencyForHostName('Германия'), isNull);
+  });
 
   test('после замера локация сессии без числа — «не ответила», а не '
       '«измеряю…» навсегда', () async {
