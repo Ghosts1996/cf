@@ -2660,6 +2660,9 @@ class TunnelService {
   /// outbound'ов там передаётся снаружи.
   Future<Map<String, int>> _collectGroupDelays(
     List<String> order, {
+    // Каждое число — сразу, как ядро его отдало: экран заполняется по ходу
+    // проверки, а не ждёт её конца.
+    void Function(String remark, int delayMs)? onResult,
     // Окно сбора рассчитано на всю подписку целиком. Ядро проверяет
     // участников группы пачками по десять, на каждую даёт до пяти секунд.
     // На четырнадцати нодах вторая пачка просто не успевала отчитаться за
@@ -2735,6 +2738,7 @@ class TunnelService {
             // показывает Hiddify.
             collected[remark] = delay;
             reported.add(remark);
+            onResult?.call(remark, delay);
           }
           // Все, кого ждали, отчитались — досиживать окно незачем.
           if (reported.containsAll(expected)) finish();
@@ -4631,6 +4635,11 @@ class TunnelService {
       // иначе один и тот же сервер показывал бы 60 мс при включённом VPN и
       // 300 мс при выключенном.
       unifiedDelaySupported: await _fastPingEnabled(),
+      // Без этого форк ядра на время проверки запускает свой мониторинг по
+      // умолчанию: те же локации через www.gstatic.com и запросы их IP к
+      // сторонним сервисам — параллельно с нашим замером. На девяноста
+      // локациях это вдвое-втрое растягивало проверку и завышало числа.
+      monitoringOptionsSupported: await _coreSupportsMonitoringOptions(),
       multiDnsSupported: await _coreSupportsMultiDns(),
     );
 
@@ -4766,8 +4775,12 @@ class TunnelService {
   ///
   /// Ключи результата — remark'и из подписки. Сопоставление их с именами
   /// локаций на экране — забота вызывающего.
+  ///
+  /// [onResult] получает каждое число по ходу проверки (лучшее из уже
+  /// измеренных для этой локации) — экран показывает его сразу.
   Future<Map<String, RealCheckResult>> realCheckAllProfiles(
-      String connectionString) async {
+      String connectionString,
+      {void Function(String remark, int delayMs)? onResult}) async {
     // Владельца берём первой строкой, до любого await: подготовка занимает
     // секунды, и всё это время клиент обязан считаться занятым.
     if (isConnected || isBusy || _nativeOwner != null || _connectInProgress) {
@@ -4776,7 +4789,8 @@ class TunnelService {
     _nativeOwner = 'probe';
     _probeCancelRequested = false;
     try {
-      final results = await _realCheckAllProfilesOwned(connectionString);
+      final results =
+          await _realCheckAllProfilesOwned(connectionString, onResult: onResult);
       // Ответившие на проверку живы — снимаем с них отметку «не отвечает».
       // Раньше её снимал только замер внутри сессии, и локация, которую
       // проверка только что подтвердила, так и висела в списке красной.
@@ -4792,7 +4806,17 @@ class TunnelService {
   }
 
   Future<Map<String, RealCheckResult>> _realCheckAllProfilesOwned(
-      String connectionString) async {
+      String connectionString,
+      {void Function(String remark, int delayMs)? onResult}) async {
+    // Лучшее число по каждой локации за оба прохода — его и отдаём экрану.
+    final shown = <String, int>{};
+    void report(String remark, int delay) {
+      final previous = shown[remark];
+      if (previous != null && previous <= delay) return;
+      shown[remark] = delay;
+      onResult?.call(remark, delay);
+    }
+
     await _ensureInitialized();
 
     List<_ParsedVless> profiles;
@@ -4829,6 +4853,11 @@ class TunnelService {
       proxyOnly: true,
       muxEnabled: false,
       unifiedDelaySupported: await _fastPingEnabled(),
+      // Без этого форк ядра на время проверки запускает свой мониторинг по
+      // умолчанию: те же локации через www.gstatic.com и запросы их IP к
+      // сторонним сервисам — параллельно с нашим замером. На девяноста
+      // локациях это вдвое-втрое растягивало проверку и завышало числа.
+      monitoringOptionsSupported: await _coreSupportsMonitoringOptions(),
       multiDnsSupported: await _coreSupportsMultiDns(),
       alternates: usable.skip(1).toList(),
     );
@@ -4905,7 +4934,7 @@ class TunnelService {
       // текущей сессии всё равно уточняет живой замер через туннель.
       final order = usable.map((e) => e.remark).toList(growable: false);
       if (_probeCancelRequested) return results;
-      final best = await _collectGroupDelays(order);
+      final best = await _collectGroupDelays(order, onResult: report);
       // Пользователь нажал «Подключить» — второй проход не начинаем, отдаём
       // что успели измерить и освобождаем ядро.
       if (_probeCancelRequested) {
@@ -4932,7 +4961,7 @@ class TunnelService {
       // Вторая — локация перестаёт умирать от одного промаха. Ядро проверяет
       // участников пачками, и узел, чья пачка не уложилась в окно, молчит
       // ровно так же, как настоящий труп.
-      final second = await _collectGroupDelays(order);
+      final second = await _collectGroupDelays(order, onResult: report);
       var lowered = 0;
       var revived = 0;
       for (final entry in second.entries) {

@@ -215,6 +215,24 @@ void main() {
     await tunnel.disconnect();
   });
 
+  test('проверка серверов отдаёт числа по ходу, а не только в конце',
+      () async {
+    core.groupDelays = {'out-0': 90, 'out-1': 65535, 'out-2': 40};
+    final seen = <String, int>{};
+    DateTime? firstAt;
+    final results = await tunnel.realCheckAllProfiles(_subscription,
+        onResult: (remark, ms) {
+      firstAt ??= DateTime.now();
+      seen[remark] = ms;
+    });
+    final doneAt = DateTime.now();
+    expect(seen, {'Германия': 90, 'Латвия': 40});
+    expect(firstAt, isNotNull);
+    expect(firstAt!.isBefore(doneAt), isTrue);
+    expect(results['Германия']?.latencyMs, 90);
+    expect(results['Нидерланды']?.ok, isFalse);
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
   test('проверка серверов не стартует, пока идёт подключение', () async {
     final connecting = tunnel.connect(_subscription);
     // Подключение ещё готовится — статус «отключено», но ядро уже занято.

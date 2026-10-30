@@ -122,7 +122,7 @@ class _ServersScreenState extends State<ServersScreen> {
     return serverSortRank(
       unsupportedProtocol: _unsupportedProtocols.containsKey(id),
       dead: ping.deadNow,
-      corePing: ping.live ?? ping.saved,
+      corePing: ping.core,
       checkFailed: (realCheck != null && !realCheck.ok) || ping.silentInSession,
       inSubscription: _realEndpoints[id] != null,
       subscriptionKnown:
@@ -137,8 +137,8 @@ class _ServersScreenState extends State<ServersScreen> {
   /// для места в списке: раньше сортировка брала результат проверки любой
   /// давности, а подпись — только свежий, и наверху списка оказывались
   /// серверы с надписью «не отвечает» — по их числам многочасовой давности.
-  ({int? live, int? saved, bool deadNow, bool silentInSession}) _pingSourcesFor(
-      String id) {
+  ({int? live, int? saved, int? core, bool deadNow, bool silentInSession})
+      _pingSourcesFor(String id) {
     // Число от ядра: при поднятом туннеле — всегда, без него — если оно
     // свежее часа. Сразу после запуска это сохранённые числа прошлого
     // замера: раньше каждое открытие приложения начиналось с «измеряю…» на
@@ -161,7 +161,11 @@ class _ServersScreenState extends State<ServersScreen> {
     // свежую отметку: спустя час без новой проверки это уже не «не
     // отвечает», а «неизвестно».
     final deadNow = live == null &&
+        !_checkedThisRun.contains(id) &&
         _tunnel.isLocationDead(id, within: _realCheckMaxAge);
+    // Какое число показать. С туннелем — живой замер; без него — проверка,
+    // если она есть: она идёт прямо сейчас или прошла позже последней сессии.
+    final core = _tunnel.isConnected ? (live ?? saved) : (saved ?? live);
     // Локация в сессии, замер по сессии уже прошёл, а числа у неё нет — она
     // не ответила. Раньше такая висела на «измеряю…» навсегда.
     final silentInSession = live == null &&
@@ -170,6 +174,7 @@ class _ServersScreenState extends State<ServersScreen> {
     return (
       live: live,
       saved: saved,
+      core: core,
       deadNow: deadNow,
       silentInSession: silentInSession,
     );
@@ -262,6 +267,9 @@ class _ServersScreenState extends State<ServersScreen> {
   // локации сессии, и раньше после неё многочасовые числа всех остальных
   // снова считались свежими.
   DateTime? _realCheckResultsAt;
+  // Локации, ответившие в идущей (или последней) проверке. Их число новее
+  // любой отметки «не отвечает».
+  final Set<String> _checkedThisRun = {};
   // Пятнадцать минут, а не десять. Числа теперь переживают перезапуск и
   // показываются сразу при открытии экрана, так что гонять полную проверку
   // часто незачем: она поднимает временную сессию ядра и стоит батареи. Реже
@@ -918,7 +926,37 @@ class _ServersScreenState extends State<ServersScreen> {
     setState(() {
       _realChecking = true;
       _switching = true; // тот же общий замок, что и у переключения туннеля
+      // Числа прошлой проверки, если они уже не свежие, на экране и так не
+      // показывались. Убираем их, чтобы по ходу новой проверки они не
+      // вернулись под видом свежих.
+      if (!_isRealCheckFresh) _realCheckResults.clear();
+      _checkedThisRun.clear();
     });
+
+    // Числа приходят по ходу проверки, и экран показывает их сразу, а не
+    // через минуту-другую, когда закончатся оба прохода по всей подписке:
+    // на девяноста локациях список заполнялся так долго, что выглядел
+    // зависшим. Перерисовка — не чаще трёх раз в секунду.
+    final partial = <String, int>{};
+    Timer? flush;
+    void applyPartial() {
+      flush = null;
+      if (!mounted || partial.isEmpty) return;
+      final known = _knownHostNames;
+      setState(() {
+        for (final raw in _allHosts ?? const <dynamic>[]) {
+          final id = _hostIdOf(raw);
+          if (id.isEmpty) continue;
+          final found = LocationNames.find(partial.entries, id, (e) => e.key,
+              known: known);
+          if (found == null) continue;
+          _realCheckResults[id] =
+              RealCheckResult(ok: true, latencyMs: found.value);
+          _checkedThisRun.add(id);
+        }
+        _realCheckResultsAt = DateTime.now();
+      });
+    }
 
     try {
       // Все локации за один подъём ядра, а не по одной: см.
@@ -926,7 +964,12 @@ class _ServersScreenState extends State<ServersScreen> {
       // экране время запуска сессии вместо задержки канала («работает ·
       // 5006 мс» у живого сервера) и успевал получить отказ «сейчас активен
       // другой туннель» на промежутке между двумя сессиями.
-      final byRemark = await _tunnel.realCheckAllProfiles(connectionString);
+      final byRemark = await _tunnel.realCheckAllProfiles(connectionString,
+          onResult: (remark, delayMs) {
+        partial[remark] = delayMs;
+        flush ??= Timer(const Duration(milliseconds: 300), applyPartial);
+      });
+      flush?.cancel();
       if (!mounted) return;
       // Проверка не дала ничего — подписка не отдалась, ядро не поднялось,
       // сеть моргнула. Прошлые числа в этом случае ценнее пустого экрана:
@@ -1580,7 +1623,7 @@ class _ServersScreenState extends State<ServersScreen> {
                 // VLESS…», хотя числа по ним давно посчитаны и лежат рядом.
                 // Число теперь появляется мгновенно и молча уточняется, когда
                 // придёт свежий замер.
-                final corePing = sources.live ?? sources.saved;
+                final corePing = sources.core;
 
                 // Локация есть в подписке, но написана на протоколе, который
                 // приложение в конфиг не собирает. Показываем её — в других
