@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vpnonline_app/services/tunnel_service.dart';
 
+import 'support/fake_xray.dart';
+
 void main() {
   Map<String, dynamic> build(List<String> links) =>
       jsonDecode(TunnelService.debugBuildXrayConfig(links))
@@ -116,5 +118,31 @@ void main() {
     expect(trojan['streamSettings']['wsSettings'],
         {'path': '/ws', 'host': 't.example.com'});
     expect((config['inbounds'] as List).map((i) => i['port']), [30000, 30001]);
+  });
+
+  test('проба через SOCKS-вход Xray: логин, пароль и два запроса подряд',
+      () async {
+    final xray = FakeXray(answering: {'m.example.com'});
+    await xray.start(TunnelService.debugBuildXrayConfig([
+      'vless://11111111-1111-1111-1111-111111111111@m.example.com:1505'
+          '?type=grpc&serviceName=grpc&security=reality&pbk=PUBKEY#Mobile',
+    ]));
+    addTearDown(xray.stop);
+    final delay = await TunnelService.socksHttpDelay(30000, 'u', 'p');
+    expect(delay, isNotNull);
+    expect(delay, lessThan(2000));
+  });
+
+  test('проба через неработающий вход — null, а не исключение', () async {
+    final xray = FakeXray();
+    await xray.start(TunnelService.debugBuildXrayConfig([
+      'vless://11111111-1111-1111-1111-111111111111@dead.example.com:443'
+          '?type=tcp&security=reality&pbk=PUBKEY#Dead',
+    ]));
+    addTearDown(xray.stop);
+    expect(
+        await TunnelService.socksHttpDelay(30000, 'u', 'p',
+            timeout: const Duration(seconds: 2)),
+        isNull);
   });
 }

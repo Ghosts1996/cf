@@ -180,6 +180,11 @@ class PrefKeys {
   /// свежая или пока локация снова не ответит на замер.
   static const deadLocationsJson = 'servers.dead_locations';
 
+  /// Серверы, которые через sing-box не ответили, а через Xray — ответили:
+  /// JSON-список имён. Дальше они подключаются через Xray (см.
+  /// TunnelService._needsXray).
+  static const xrayPreferredJson = 'servers.xray_preferred';
+
   /// Последняя успешно загруженная подписка: `{source, body, savedAt}`.
   /// Подключение берёт серверы отсюда сразу, не дожидаясь сети, а свежую
   /// копию подтягивает в фоне (TunnelService._loadProfiles).

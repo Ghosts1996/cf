@@ -70,6 +70,7 @@ void main() {
       PrefKeys.cachedLatencyJson,
       PrefKeys.cachedLatencyAt,
       PrefKeys.selectedServerId,
+      PrefKeys.xrayPreferredJson,
       PrefKeys.deadLocationsJson,
       PrefKeys.subscriptionCacheJson,
     ]) {
@@ -769,6 +770,50 @@ void main() {
       expect(xray.configs, isEmpty);
       await t.disconnect();
     }, timeout: const Timeout(Duration(seconds: 40)));
+
+    test('не ответил через sing-box, ответил через Xray — дальше он '
+        'подключается через Xray', () async {
+      // Журнал 30.10: «Мобильный интернет» — обычный VLESS gRPC Reality,
+      // sing-box его «умеет», но достучаться не может, а Happ (Xray) — может.
+      final xray = FakeXray(answering: {'nl.example.com'});
+      final t = TunnelService.withRuntime(core, xray: xray);
+      core.groupDelays = {'out-0': 90, 'out-1': 65535, 'out-2': 60};
+      final results = await t.realCheckAllProfiles(_subscription);
+      expect(results['Нидерланды']?.ok, isTrue,
+          reason: 'через Xray сервер ответил');
+      expect(results['Нидерланды']?.latencyMs, isNotNull);
+      expect(results['Германия']?.latencyMs, 90);
+      expect(xray.configs.last, contains('nl.example.com'));
+      expect(xray.running, isFalse, reason: 'после проверки Xray погашен');
+
+      final server = await startWorkingTunnel();
+      addTearDown(() => server.close(force: true));
+      await t.connect(_subscription);
+      expect(t.isConnected, isTrue);
+      final socks = ((jsonDecode(core.lastConfig!) as Map)['outbounds'] as List)
+          .cast<Map<String, dynamic>>()
+          .where((o) => o['type'] == 'socks')
+          .toList();
+      expect(socks, hasLength(1), reason: 'только Нидерланды — через Xray');
+      expect(xray.configs.last, contains('nl.example.com'));
+      expect(xray.configs.last, isNot(contains('de.example.com')));
+      await t.disconnect();
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('не ответил ни через sing-box, ни через Xray — остаётся как есть',
+        () async {
+      final xray = FakeXray();
+      final t = TunnelService.withRuntime(core, xray: xray);
+      core.groupDelays = {'out-0': 90, 'out-1': 65535, 'out-2': 60};
+      final results = await t.realCheckAllProfiles(_subscription);
+      expect(results['Нидерланды']?.ok, isFalse);
+      final server = await startWorkingTunnel();
+      addTearDown(() => server.close(force: true));
+      final before = xray.configs.length;
+      await t.connect(_subscription);
+      expect(xray.configs.length, before, reason: 'Xray сессии не нужен');
+      await t.disconnect();
+    }, timeout: const Timeout(Duration(seconds: 60)));
 
     test('проверка серверов меряет их через Xray и гасит его после', () async {
       final xray = FakeXray();

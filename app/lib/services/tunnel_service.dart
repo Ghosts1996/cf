@@ -578,6 +578,7 @@ class TunnelService {
       await _loadPersistedSession();
       unawaited(_publishDeadLocations());
       unawaited(_seedLatencyFromSnapshot());
+      unawaited(_loadXrayPreferred());
       await _applyCompatDefaults();
       // Таймаут нужен и здесь: `_client.initialize()` — тоже MethodChannel-вызов,
       // и он единственный оставался без ограничения по времени. Если после свайпа
@@ -3510,9 +3511,47 @@ class TunnelService {
     return _coreSupportsTransport(type);
   }
 
-  /// Сервер пойдёт через Xray: sing-box его не умеет, а Xray — да.
-  Future<bool> _needsXray(_ParsedVless p) async =>
-      !await _singboxSupports(p) && await _canUseXray(p);
+  /// Сервер пойдёт через Xray: sing-box его не умеет — или умеет, но не
+  /// достучался, а Xray достучался (см. [_discoverViaXray]).
+  Future<bool> _needsXray(_ParsedVless p) async {
+    if (!await _canUseXray(p)) return false;
+    if (!await _singboxSupports(p)) return true;
+    return _xrayPreferred.contains(LocationNames.normalize(p.remark));
+  }
+
+  /// Нормализованные имена серверов, которые работают только через Xray.
+  Set<String> _xrayPreferred = <String>{};
+
+  /// Не ответили и через Xray — когда. Полчаса такие через Xray не
+  /// перепроверяем: мёртвый для обоих ядер сервер иначе добавлял бы к каждой
+  /// проверке лишние секунды.
+  final Map<String, DateTime> _xrayFailedAt = {};
+
+  Future<void> _loadXrayPreferred() async {
+    try {
+      final raw = await LocalPrefs.instance.getString(PrefKeys.xrayPreferredJson);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return;
+      _xrayPreferred = {
+        for (final name in decoded)
+          if (name is String && name.isNotEmpty) name,
+      };
+    } catch (_) {}
+  }
+
+  Future<void> _markXrayPreferred(Iterable<String> remarks) async {
+    final added = {
+      for (final r in remarks)
+        if (LocationNames.normalize(r).isNotEmpty) LocationNames.normalize(r),
+    };
+    if (added.isEmpty) return;
+    _xrayPreferred = {..._xrayPreferred, ...added};
+    try {
+      await LocalPrefs.instance.setString(
+          PrefKeys.xrayPreferredJson, jsonEncode(_xrayPreferred.toList()));
+    } catch (_) {}
+  }
 
   Future<bool> _canUseXray(_ParsedVless p) async =>
       !_xrayBroken && _xraySupports(p) && await _xray.available();
@@ -5217,6 +5256,18 @@ class TunnelService {
           'Проверка всех локаций: второй проход уточнил $lowered '
           'и оживил $revived из ${order.length}'));
 
+      // Не ответившие через sing-box — ещё раз через Xray (если он есть):
+      // ответившие дальше подключаются через него.
+      final viaXray = await _discoverViaXray([
+        for (final p in usable)
+          if (best[p.remark] == null &&
+              !(xrayPrep.plan?.ports.containsKey(p) ?? false))
+            p,
+      ]);
+      for (final entry in viaXray.entries) {
+        best[entry.key.remark] = entry.value;
+      }
+
       for (var i = 0; i < usable.length; i++) {
         final profile = usable[i];
         if (profile.remark.isEmpty) continue;
@@ -5538,6 +5589,13 @@ class TunnelService {
       await _stopXray(owner: owner);
       return (plan: null, failed: false);
     }
+    return _startXray(needed, owner: owner);
+  }
+
+  /// Запускает Xray ровно для [needed]: на каждый — свой SOCKS-вход.
+  Future<({_XrayPlan? plan, bool failed})> _startXray(
+      List<_ParsedVless> needed,
+      {required String owner}) async {
     _xrayOwner = owner;
     final ports = Map<_ParsedVless, int>.identity();
     for (final p in needed) {
@@ -5567,6 +5625,117 @@ class TunnelService {
     unawaited(AppLogService.instance.log(
         'Через Xray (sing-box их не умеет): ${needed.length} — $names'));
     return (plan: plan, failed: false);
+  }
+
+  /// Серверы, которые через sing-box не ответили, — ещё раз, через Xray.
+  ///
+  /// Ядра разные, и бывает, что сервер принимает только одно из них: в Happ
+  /// (ядро Xray) он работает, у нас через sing-box — нет, и по журналу не
+  /// угадать почему. Вместо догадок — проверка: ответил через Xray —
+  /// запоминаем, и дальше подключаем его через Xray. Возвращает задержку
+  /// ответивших.
+  Future<Map<_ParsedVless, int>> _discoverViaXray(
+      List<_ParsedVless> failed) async {
+    final now = DateTime.now();
+    _xrayFailedAt.removeWhere(
+        (_, at) => now.difference(at) > const Duration(minutes: 30));
+    final candidates = <_ParsedVless>[
+      for (final p in failed)
+        if (p.remark.isNotEmpty &&
+            _xraySupports(p) &&
+            !_xrayFailedAt.containsKey(LocationNames.normalize(p.remark)))
+          p,
+    ];
+    if (candidates.isEmpty || _xrayBroken || _probeCancelRequested) {
+      return const {};
+    }
+    if (!await _xray.available()) return const {};
+    final started = await _startXray(candidates, owner: 'probe');
+    final plan = started.plan;
+    if (plan == null) return const {};
+    final found = Map<_ParsedVless, int>.identity();
+    final queue = [...candidates];
+    Future<void> worker() async {
+      while (queue.isNotEmpty && !_probeCancelRequested) {
+        final p = queue.removeLast();
+        final delay =
+            await socksHttpDelay(plan.ports[p]!, plan.user, plan.pass);
+        if (delay != null) found[p] = delay;
+      }
+    }
+
+    await Future.wait([for (var i = 0; i < 6; i++) worker()]);
+    for (final p in candidates) {
+      if (!found.containsKey(p)) {
+        _xrayFailedAt[LocationNames.normalize(p.remark)] = DateTime.now();
+      }
+    }
+    _logXrayOutput(await _xray.readLog());
+    if (found.isNotEmpty) {
+      await _markXrayPreferred(found.keys.map((p) => p.remark));
+    }
+    unawaited(AppLogService.instance.log(
+        'Через Xray ответили ${found.length} из ${candidates.length} серверов, '
+        'не ответивших через sing-box'
+        '${found.isEmpty ? '' : ': ${found.entries.map((e) => '${e.key.remark} — ${e.value} мс').join('; ')} — дальше они подключаются через Xray'}',
+        level: found.isEmpty ? AppLogLevel.info : AppLogLevel.warning));
+    return found;
+  }
+
+  /// Задержка до адреса проверки через SOCKS-вход Xray: по одному
+  /// соединению два HEAD-запроса подряд, в ответ — время второго (первый
+  /// платит за рукопожатие с сервером, как и «быстрый пинг» у sing-box).
+  /// null — сервер не ответил.
+  @visibleForTesting
+  static Future<int?> socksHttpDelay(int port, String user, String pass,
+      {Duration timeout = const Duration(seconds: 8)}) async {
+    Socket? socket;
+    _SocketReader? reader;
+    try {
+      socket = await Socket.connect(InternetAddress.loopbackIPv4, port,
+          timeout: timeout);
+      // Ошибка записи (вход оборвал соединение) приходит не исключением из
+      // add(), а в `done` — без обработчика она улетела бы мимо try/catch.
+      unawaited(socket.done.then<void>((_) {}, onError: (Object _) {}));
+      reader = _SocketReader(socket);
+      Future<List<int>> read(int n) => reader!.read(n).timeout(timeout);
+      socket.add([5, 1, 2]); // SOCKS5, один способ входа — логин/пароль
+      final method = await read(2);
+      if (method[0] != 5 || method[1] != 2) return null;
+      final u = utf8.encode(user);
+      final p = utf8.encode(pass);
+      socket.add([1, u.length, ...u, p.length, ...p]);
+      if ((await read(2))[1] != 0) return null;
+      final uri = Uri.parse(_latencyTestUrl);
+      final host = utf8.encode(uri.host);
+      final port80 = uri.hasPort ? uri.port : 80;
+      socket.add(
+          [5, 1, 0, 3, host.length, ...host, port80 >> 8, port80 & 0xff]);
+      final reply = await read(4);
+      if (reply[1] != 0) return null;
+      final addressLength = switch (reply[3]) {
+        1 => 4,
+        4 => 16,
+        _ => (await read(1))[0],
+      };
+      await read(addressLength + 2);
+      final request = utf8.encode('HEAD ${uri.path.isEmpty ? '/' : uri.path} '
+          'HTTP/1.1\r\nHost: ${uri.host}\r\nUser-Agent: VPNonLine\r\n'
+          'Connection: keep-alive\r\n\r\n');
+      int? last;
+      for (var i = 0; i < 2; i++) {
+        final watch = Stopwatch()..start();
+        socket.add(request);
+        if (!await reader.readHttpHead().timeout(timeout)) break;
+        last = watch.elapsedMilliseconds;
+      }
+      return last;
+    } catch (_) {
+      return null;
+    } finally {
+      reader?.cancel();
+      socket?.destroy();
+    }
   }
 
   /// Приложение открыли поверх работающей сессии. Если та шла через Xray,
@@ -7611,6 +7780,67 @@ class _VpnServiceStartException implements Exception {
   final String message;
   @override
   String toString() => message;
+}
+
+/// Чтение из сокета порциями нужной длины — для SOCKS-рукопожатия и
+/// заголовков HTTP-ответа в [TunnelService.socksHttpDelay].
+class _SocketReader {
+  _SocketReader(Socket socket) {
+    _sub = socket.listen((data) {
+      _buffer.addAll(data);
+      _wake();
+    }, onError: (Object _) {
+      _closed = true;
+      _wake();
+    }, onDone: () {
+      _closed = true;
+      _wake();
+    });
+  }
+
+  late final StreamSubscription<List<int>> _sub;
+  final List<int> _buffer = [];
+  bool _closed = false;
+  Completer<void>? _waiter;
+
+  void _wake() {
+    final waiter = _waiter;
+    _waiter = null;
+    waiter?.complete();
+  }
+
+  Future<void> _more() {
+    if (_closed) throw const SocketException('соединение закрыто');
+    return (_waiter ??= Completer<void>()).future;
+  }
+
+  Future<List<int>> read(int count) async {
+    while (_buffer.length < count) {
+      await _more();
+    }
+    final out = _buffer.sublist(0, count);
+    _buffer.removeRange(0, count);
+    return out;
+  }
+
+  /// Заголовки HTTP-ответа целиком; true — это действительно HTTP-ответ.
+  Future<bool> readHttpHead() async {
+    while (true) {
+      for (var i = 0; i + 3 < _buffer.length; i++) {
+        if (_buffer[i] == 13 &&
+            _buffer[i + 1] == 10 &&
+            _buffer[i + 2] == 13 &&
+            _buffer[i + 3] == 10) {
+          final head = ascii.decode(_buffer.sublist(0, i), allowInvalid: true);
+          _buffer.removeRange(0, i + 4);
+          return head.startsWith('HTTP/');
+        }
+      }
+      await _more();
+    }
+  }
+
+  void cancel() => _sub.cancel();
 }
 
 /// Какие серверы сессии обслуживает Xray и на каких локальных портах.
