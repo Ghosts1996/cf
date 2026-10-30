@@ -3979,7 +3979,9 @@ class TunnelService {
         // встречаются по два раза — это разные серверы, а замеры, отметки о
         // замолчавших и выбор пользователя приложение ведёт по имени. С двумя
         // «Италиями» в сессии самовосстановление «уходило на живую Италию» и
-        // попадало на мёртвую с тем же именем.
+        // попадало на мёртвую с тем же именем. Теперь вторая получает при
+        // разборе подписки имя «Италия (2)» (uniqueRemarks) и идёт в сессию
+        // своим сервером; проверка здесь — страховка.
         final sessionNames = <String>{profile.remark};
         var alternates = (_selectorSupported && !proxyOnly)
             ? usable
@@ -7077,7 +7079,7 @@ class TunnelService {
     // список ссылок.
     if (text.startsWith('{') || text.startsWith('[')) {
       final fromJson = _parseSingboxJsonOutbounds(text);
-      if (fromJson.isNotEmpty) return fromJson;
+      if (fromJson.isNotEmpty) return uniqueRemarks(fromJson);
     }
 
     // Раскрываем base64 по любой ссылке узла, а не только по vless://.
@@ -7107,6 +7109,9 @@ class TunnelService {
     // их подключает Xray (см. _isProfileSupported). Там, где Xray нет, они
     // отсеиваются там же и на экране помечены как неподдерживаемые.
     for (final line in allLines) {
+      // Одна и та же ссылка дважды — один сервер: в подписке 30.10 так
+      // повторялись все «LTE Обход».
+      if (parsedLines.contains(line)) continue;
       final parsed = _ParsedVless.tryParseAny(line);
       if (parsed == null) continue;
       parsedLines.add(line);
@@ -7128,7 +7133,40 @@ class TunnelService {
     }
     _cachedOthers = others;
 
-    return result;
+    return uniqueRemarks(result);
+  }
+
+  /// Разные серверы под одним именем получают различимые: «Германия»,
+  /// «Германия (2)», «Германия (3)».
+  ///
+  /// Приложение ведёт серверы по имени — пинг, отметки «не отвечает», выбор
+  /// человека, место в сессии. В подписке 30.10 под «🇩🇪 Германия» было три
+  /// разных сервера, под «🇺🇸 США» — два; на экране они сливались в одну
+  /// карточку, и ей доставался результат последнего: мёртвая «Германия»
+  /// заслоняла живую, хотя в Happ, где каждый сервер — своя строка, она
+  /// отвечала. Первый сервер имя сохраняет, так что выбор и отметки по нему
+  /// не теряются.
+  static List<_ParsedVless> uniqueRemarks(List<_ParsedVless> profiles) {
+    final taken = <String>{
+      for (final p in profiles) LocationNames.normalize(p.remark),
+    };
+    final seen = <String>{};
+    return [
+      for (final p in profiles)
+        if (p.remark.trim().isEmpty ||
+            seen.add(LocationNames.normalize(p.remark)))
+          p
+        else
+          p.withRemark(() {
+            for (var n = 2;; n++) {
+              final candidate = '${p.remark.trim()} ($n)';
+              if (taken.add(LocationNames.normalize(candidate))) {
+                seen.add(LocationNames.normalize(candidate));
+                return candidate;
+              }
+            }
+          }()),
+    ];
   }
 
   /// Имя узла из ссылки — то, что стоит после `#`. Панели пишут туда название
@@ -7986,6 +8024,39 @@ class _ParsedVless {
   /// Встречается у ключей с самоподписанным сертификатом.
   final bool allowInsecure;
   final String remark; // Имя сервера
+
+  /// Тот же сервер под другим именем — см. TunnelService.uniqueRemarks.
+  _ParsedVless withRemark(String newRemark) => _ParsedVless(
+        protocol: protocol,
+        uuid: uuid,
+        host: host,
+        port: port,
+        security: security,
+        pbk: pbk,
+        fp: fp,
+        sni: sni,
+        sid: sid,
+        flow: flow,
+        spx: spx,
+        alpn: alpn,
+        transportType: transportType,
+        xhttpMode: xhttpMode,
+        xhttpExtra: xhttpExtra,
+        transportHost: transportHost,
+        transportPath: transportPath,
+        packetEncoding: packetEncoding,
+        allowInsecure: allowInsecure,
+        password: password,
+        method: method,
+        vmessSecurity: vmessSecurity,
+        alterId: alterId,
+        obfsType: obfsType,
+        obfsPassword: obfsPassword,
+        vlessEncryption: vlessEncryption,
+        pqv: pqv,
+        grpcAuthority: grpcAuthority,
+        remark: newRemark,
+      );
 
   /// «Да» в понимании панелей — и `1`, и `true`.
   static bool _isTruthy(String? value) {

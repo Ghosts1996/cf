@@ -49,6 +49,41 @@ void main() {
       expect(finland.protocol, 'vless');
     });
 
+    test('разные серверы под одним именем — отдельные локации, '
+        'повтор той же ссылки — одна', () async {
+      // Подписка 30.10: под «🇩🇪 Германия» три разных сервера, под «🇺🇸 США»
+      // два, а «LTE Обход» повторялись одной и той же ссылкой. Приложение
+      // ведёт серверы по имени, и одноимённые сливались в одну карточку с
+      // результатом последнего — живая «Германия» показывалась мёртвой.
+      String link(String host, String name) =>
+          'vless://11111111-1111-1111-1111-111111111111@$host:443'
+          '?type=tcp&security=reality&pbk=PUBKEY&sid=aa&sni=yahoo.com'
+          '&fp=chrome#${Uri.encodeComponent(name)}';
+      final lte = link('lte.example.com', 'LTE Обход 2');
+      final subscription = [
+        link('de1.example.com', '🇩🇪 Германия'),
+        link('de2.example.com', '🇩🇪 Германия'),
+        link('us1.example.com', '🇺🇸 США'),
+        lte,
+        link('de3.example.com', '🇩🇪 Германия'),
+        link('us2.example.com', '🇺🇸 США'),
+        lte,
+        // Уже есть «(2)» в самой подписке — новое имя с ним не совпадает.
+        link('pl.example.com', '🇺🇸 США (2)'),
+      ].join('\n');
+
+      final locations = await tunnel.listSubscriptionLocations(subscription);
+      expect([for (final l in locations) '${l.remark}@${l.host}'], [
+        '🇩🇪 Германия@de1.example.com',
+        '🇩🇪 Германия (2)@de2.example.com',
+        '🇺🇸 США@us1.example.com',
+        'LTE Обход 2@lte.example.com',
+        '🇩🇪 Германия (3)@de3.example.com',
+        '🇺🇸 США (3)@us2.example.com',
+        '🇺🇸 США (2)@pl.example.com',
+      ]);
+    });
+
     // Подписка с внешними нодами: две vless-локации, одна hysteria2 и одна
     // shadowsocks. Ровно такой список приходит с тех пор, как бот стал
     // дописывать в подписку клиента ноды из чужих подписок.

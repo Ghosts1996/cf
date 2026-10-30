@@ -43,6 +43,10 @@ class LocationNames {
 
   /// [long] содержит [short] отдельными словами: «мобильный интернет 11» не
   /// содержит «мобильный интернет 1» — после него идёт цифра.
+  ///
+  /// Номер сверх имени — другой сервер, а не то же имя подлиннее: «германия
+  /// (2)» — второй сервер под именем «германия» (см.
+  /// TunnelService.uniqueRemarks), и на экране он своя карточка.
   static bool _containsAsWords(String long, String short) {
     if (short.isEmpty || long.length <= short.length) return false;
     var from = 0;
@@ -52,10 +56,15 @@ class LocationNames {
       final end = i + short.length;
       final beforeOk = i == 0 || !_wordChar.hasMatch(long[i - 1]);
       final afterOk = end >= long.length || !_wordChar.hasMatch(long[end]);
-      if (beforeOk && afterOk) return true;
+      if (beforeOk && afterOk) {
+        final rest = long.substring(0, i) + long.substring(end);
+        return !_numberOnly.hasMatch(rest);
+      }
       from = i + 1;
     }
   }
+
+  static final _numberOnly = RegExp(r'^[\s(#№]*\d+[\s)]*$');
 
   /// Та же локация, что [name], среди [candidates]; null — нет такой или
   /// подходят несколько.

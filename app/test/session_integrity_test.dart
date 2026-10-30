@@ -82,7 +82,10 @@ void main() {
     });
   });
 
-  test('одноимённые локации в одну сессию не попадают', () async {
+  test('одноимённые локации идут в сессию под разными именами', () async {
+    // Раньше вторую «Италию» в сессию не брали: приложение ведёт серверы по
+    // имени, и две одноимённые путались. Теперь вторая называется
+    // «Италия (2)» и работает как отдельная локация — как в Happ.
     final server = await _workingTunnel();
     addTearDown(() => server.close(force: true));
     final italy2 = _link(
@@ -95,7 +98,12 @@ void main() {
         .where((o) => '${(o as Map)['tag']}'.startsWith('out-'))
         .map((o) => (o as Map)['server'])
         .toList();
-    expect(outbounds, ['de.example.com', 'it1.example.com', 'nl.example.com']);
+    expect(outbounds, [
+      'de.example.com',
+      'it1.example.com',
+      'nl.example.com',
+      'it2.example.com',
+    ]);
     await tunnel.disconnect();
   });
 
