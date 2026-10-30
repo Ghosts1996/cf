@@ -85,6 +85,29 @@ jobs:
       - name: Run tests
         run: flutter test --coverage || true
 
+      # Ядро Xray — для серверов, которые sing-box не умеет (шифрование VLESS
+      # и другое, что есть только в Xray). Исполняемый файл кладётся в APK как
+      # libxray.so: запускать файлы Android разрешает только из каталога
+      # нативных библиотек (см. XrayProcess.kt). Версия и контрольная сумма
+      # прибиты — сборка не подхватывает новый Xray молча. На устройствах без
+      # arm64 Xray нет, и такие серверы просто помечены неподдерживаемыми.
+      - name: Bundle Xray core
+        env:
+          XRAY_VERSION: v26.9.30
+          XRAY_ARM64_SHA256: dbe43ff5a3547ecf8bce2f10af802cdbb97f1eb9af5b6dddd04dbcf3105ede8e
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/xray"
+          mkdir -p "$tmp"
+          curl -fsSL --retry 3 -o "$tmp/arm64.zip" \
+            "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/Xray-android-arm64-v8a.zip"
+          echo "$XRAY_ARM64_SHA256  $tmp/arm64.zip" | sha256sum -c -
+          unzip -o -q "$tmp/arm64.zip" xray LICENSE -d "$tmp/arm64"
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a android/app/src/main/assets/xray
+          install -m 755 "$tmp/arm64/xray" android/app/src/main/jniLibs/arm64-v8a/libxray.so
+          cp "$tmp/arm64/LICENSE" android/app/src/main/assets/xray/LICENSE
+          ls -la android/app/src/main/jniLibs/arm64-v8a/
+
       # flutter build apk сам ретраит Gradle один раз при сетевой ошибке, но
       # при двух 429 подряд этого мало. 429 — временный отказ, а не ошибка
       # проекта, поэтому обёртка даёт до 3 попыток с паузой 30 секунд.

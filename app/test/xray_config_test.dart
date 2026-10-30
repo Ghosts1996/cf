@@ -61,6 +61,7 @@ void main() {
     expect(config['routing'], {
       'rules': [
         {
+          'type': 'field',
           'inboundTag': ['in-0'],
           'outboundTag': 'out-0',
         },

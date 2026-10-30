@@ -5785,6 +5785,7 @@ class TunnelService {
       });
       outbounds.add(_xrayOutbound(profiles[i], 'out-$i'));
       rules.add({
+        'type': 'field',
         'inboundTag': ['in-$i'],
         'outboundTag': 'out-$i',
       });

@@ -29,3 +29,7 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+
+# Ядро Xray кладёт в сборку CI (build-android.yml, «Bundle Xray core»).
+/android/app/src/main/jniLibs/*/libxray.so
+/android/app/src/main/assets/xray/
