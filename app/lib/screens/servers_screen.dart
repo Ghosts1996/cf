@@ -710,6 +710,11 @@ class _ServersScreenState extends State<ServersScreen> {
     final unsupported = <String, String>{};
     final extra = <Map<String, dynamic>>[];
     final seen = <String>{};
+    // Имена подписки: локация из /hosts, чьё имя есть в подписке дословно,
+    // достаётся ей, а не похожей («Англия (через Москву)» — отдельная
+    // карточка, а не та же «Англия»).
+    final taken =
+        LocationNames.normalizedSet([for (final l in locations) l.remark]);
 
     for (final location in locations) {
       final remark = location.remark.trim();
@@ -719,7 +724,7 @@ class _ServersScreenState extends State<ServersScreen> {
       // подписки: 3x-ui дописывает в remark название сервиса. Раскладывая по
       // remark'у, экран потом не находил ни адрес, ни транспорт своей же
       // локации и молча откатывался на запасной замер по домену подписки.
-      final ownHostName = _hostNameFor(remark);
+      final ownHostName = _hostNameFor(remark, taken: taken);
       final key = ownHostName ?? remark;
       if (location.supported && location.host != null && location.port != null) {
         endpoints[key] = (
@@ -777,11 +782,11 @@ class _ServersScreenState extends State<ServersScreen> {
   /// если такой локации среди собственных панелей нет. Сопоставление по
   /// вхождению — той же логикой, что TunnelService._matchProfile: панель
   /// 3x-ui дописывает в remark название сервиса ("VPNonLine | 🇩🇪 Германия").
-  String? _hostNameFor(String remark) {
+  String? _hostNameFor(String remark, {Set<String> taken = const {}}) {
     final hosts = _hosts;
     if (hosts == null) return null;
-    final found =
-        LocationNames.find(hosts, remark, _hostIdOf, known: _knownHostNames);
+    final found = LocationNames.find(hosts, remark, _hostIdOf,
+        known: _knownHostNames, taken: taken);
     return found == null ? null : _hostIdOf(found);
   }
 
@@ -1667,7 +1672,10 @@ class _ServersScreenState extends State<ServersScreen> {
                     pingLabel = '$corePing ${tr('мс · медленно')}';
                     pingColor = AppColors.warning;
                   }
-                } else if (_realChecking) {
+                } else if (_realChecking &&
+                    (!_tunnel.isConnected || _tunnel.isInSession(id))) {
+                  // С поднятым VPN проверка меряет только локации сессии;
+                  // остальные «проверяю…» не дождутся — у них подпись ниже.
                   pingLabel = tr('проверяю...');
                   pingColor = AppColors.textDim;
                 } else if (realCheck != null && !realCheck.ok) {

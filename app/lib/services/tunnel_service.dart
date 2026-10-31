@@ -2040,12 +2040,11 @@ class TunnelService {
   /// Возвращает то, что получилось: имя локации из подписки -> задержка в мс.
   Future<Map<String, int>> refreshLatencyNow() async {
     if (!isConnected) return const <String, int>{};
-    // Два прогона подряд, а не один. Пользователь нажал кнопку и ждёт ответа,
-    // так что лишние секунды здесь дешевле завышенного числа: второй прогон
-    // идёт по уже прогретым соединениям и добавляет в окно минимума замер
-    // без платы за установку соединения.
-    await _runLatencyProbe(force: true);
-    if (!isConnected) return latencyByRemark.value;
+    // Один прогон. Раньше их было два подряд — ради прогретых соединений во
+    // втором, — но тогда прогон обрывался почти сразу (см.
+    // _collectGroupDelays). Теперь он честно ждёт ответов до 20 секунд, и два
+    // подряд держали весь список на «проверяю…» до сорока. Числа приходят на
+    // экран по ходу прогона, а минимум по окну замеров набирается за циклы.
     await _runLatencyProbe(force: true);
     return latencyByRemark.value;
   }
@@ -2086,7 +2085,16 @@ class TunnelService {
       // отвечают за секунды, а мёртвые не ответят и за сорок. Пока замер
       // идёт, проверка живости его ждёт.
       final raw = await measureLatenciesThroughTunnel(
-          timeout: const Duration(seconds: 20));
+          timeout: const Duration(seconds: 20),
+          // Число — на экран сразу, как ядро его отдало: прогон длится до 20
+          // секунд, и ждать его конца, глядя на «проверяю…», незачем.
+          onResult: (remark, delay) {
+            final samples = _latencySamples[remark];
+            final best = samples == null || samples.isEmpty
+                ? delay
+                : samples.fold(delay, (a, b) => a < b ? a : b);
+            latencyByRemark.value = {...latencyByRemark.value, remark: best};
+          });
 
       // Промахи считаем, только если ответил хоть кто-то: иначе это сеть
       // телефона, а не серверы.
@@ -2728,10 +2736,11 @@ class TunnelService {
   /// сессия собрана без группы или платформа не Android.
   Future<Map<String, int>> measureLatenciesThroughTunnel({
     Duration? timeout,
+    void Function(String remark, int delayMs)? onResult,
   }) async {
     final remarks = _sessionOutboundRemarks;
     if (remarks.isEmpty || !isConnected) return const <String, int>{};
-    return _collectGroupDelays(remarks, timeout: timeout);
+    return _collectGroupDelays(remarks, timeout: timeout, onResult: onResult);
   }
 
   /// Сам сбор задержек по группе `latency`: просит ядро прогнать URLTest и

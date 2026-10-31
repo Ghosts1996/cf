@@ -3,9 +3,13 @@ import 'package:vpnonline_app/services/location_names.dart';
 
 void main() {
   String? find(List<String> candidates, String name,
-          {List<String> known = const [], bool loose = true}) =>
+          {List<String> known = const [],
+          bool loose = true,
+          Set<String> taken = const {}}) =>
       LocationNames.find(candidates, name, (s) => s,
-          known: LocationNames.normalizedSet(known), loose: loose);
+          known: LocationNames.normalizedSet(known),
+          loose: loose,
+          taken: taken);
 
   test('невидимые символы эмодзи и лишние пробелы не мешают', () {
     // В подписке «⚡️» с вариационным селектором, на экране — без него.
@@ -60,6 +64,17 @@ void main() {
     expect(find(['🇬🇧 Англия [premium]'], '🇬🇧 Англия'), '🇬🇧 Англия [premium]');
     expect(find(['🇬🇧 Англия [premium]'], '🇬🇧 Англия', loose: false), isNull);
     expect(find(['Германия №10'], 'Германия №1'), isNull);
+  });
+
+  test('имя, занятое другим именем списка, похожему не достаётся', () {
+    // В подписке есть и «Англия», и «Англия (через Москву)»: вторая —
+    // отдельная карточка, а не та же «Англия» из /hosts.
+    const taken = {'🇬🇧 англия', '🇬🇧 англия (через москву)'};
+    expect(find(['🇬🇧 Англия'], '🇬🇧 Англия (через Москву)', taken: taken),
+        isNull);
+    expect(find(['🇬🇧 Англия'], '🇬🇧 Англия', taken: taken), '🇬🇧 Англия');
+    // Без такой строки в подписке всё как раньше.
+    expect(find(['🇬🇧 Англия'], 'VPNonLine | 🇬🇧 Англия'), '🇬🇧 Англия');
   });
 
   test('номер сверх имени — другой сервер', () {

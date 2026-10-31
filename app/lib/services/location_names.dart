@@ -76,13 +76,15 @@ class LocationNames {
   ///     применяются — иначе «Германия №1» нашлась бы в «Германия №1 · gRPC»;
   ///  3. одно имя — это другое с названием сервиса через «|»;
   ///  4. если [loose] — одно имя входит в другое отдельными словами.
-  /// В шагах 3–4 подходящий кандидат должен быть ровно один.
+  /// В шагах 3–4 подходящий кандидат должен быть ровно один, и кандидаты с
+  /// именами из [taken] (нормализованными) в них не участвуют.
   static T? find<T>(
     Iterable<T> candidates,
     String name,
     String Function(T) nameOf, {
     Set<String> known = const <String>{},
     bool loose = true,
+    Set<String> taken = const <String>{},
   }) {
     final needle = normalize(name);
     if (needle.isEmpty) return null;
@@ -91,6 +93,10 @@ class LocationNames {
       final normalized = normalize(nameOf(candidate));
       if (normalized.isEmpty) continue;
       if (normalized == needle) return candidate;
+      // Кандидат, чьё имя дословно занято другим именем того же списка, —
+      // не наш: «Англия» есть в подписке сама, и «Англия (через Москву)» с
+      // ней не сливается.
+      if (taken.contains(normalized)) continue;
       items.add((candidate, normalized));
     }
     if (known.contains(needle)) return null;

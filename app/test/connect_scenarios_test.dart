@@ -666,6 +666,32 @@ void main() {
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 60)));
 
+  test('замер в сессии отдаёт числа на экран по ходу, а не в конце', () async {
+    // Прогон ждёт ответов до 20 секунд; кнопка «Проверить» раньше держала
+    // весь список на «проверяю…», пока он не кончится.
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    tunnel.latencyByRemark.value = const <String, int>{};
+    core.groupDelays = {'out-0': 40};
+    core.onUrlTest = (_) {
+      Timer(const Duration(milliseconds: 1500), () {
+        core.groupDelays = {'out-0': 40, 'out-1': 55, 'out-2': 70};
+        core.emitGroupSnapshot();
+      });
+    };
+    final probe = tunnel.debugRunLatencyProbe();
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    expect(tunnel.latencyByRemark.value['Германия'], 40,
+        reason: 'первое число уже на экране, прогон ещё идёт');
+    expect(tunnel.latencyByRemark.value.containsKey('Латвия'), isFalse);
+    await probe;
+    expect(tunnel.latencyByRemark.value,
+        {'Германия': 40, 'Нидерланды': 55, 'Латвия': 70});
+    core.onUrlTest = null;
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
   test('замер в сессии не обрывается просьбой «уступи подключению», '
       'оставшейся от самого подключения', () async {
     // Каждое подключение просит идущую проверку серверов свернуться. Проверки
