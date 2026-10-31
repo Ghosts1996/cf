@@ -131,6 +131,7 @@ class _ServersScreenState extends State<ServersScreen> {
       // При включённом VPN карточка TCP-число не показывает (сокеты ушли бы
       // в туннель), значит, и место в списке по нему не считаем.
       tcpPing: _tunnel.isConnected ? null : _livePing[id],
+      previousPing: ping.previous,
     );
   }
 
@@ -138,8 +139,14 @@ class _ServersScreenState extends State<ServersScreen> {
   /// для места в списке: раньше сортировка брала результат проверки любой
   /// давности, а подпись — только свежий, и наверху списка оказывались
   /// серверы с надписью «не отвечает» — по их числам многочасовой давности.
-  ({int? live, int? saved, int? core, bool deadNow, bool silentInSession})
-      _pingSourcesFor(String id) {
+  ({
+    int? live,
+    int? saved,
+    int? core,
+    bool deadNow,
+    bool silentInSession,
+    int? previous,
+  }) _pingSourcesFor(String id) {
     // Число от ядра: при поднятом туннеле — всегда, без него — если оно
     // свежее часа. Сразу после запуска это сохранённые числа прошлого
     // замера: раньше каждое открытие приложения начиналось с «измеряю…» на
@@ -183,7 +190,32 @@ class _ServersScreenState extends State<ServersScreen> {
       core: core,
       deadNow: deadNow,
       silentInSession: silentInSession,
+      previous: core == null ? _previousPingFor(id) : null,
     );
+  }
+
+  /// Число прошлой проверки, которая уже не свежая (старше часа), но не
+  /// старше суток. Свежим его не выдаём — на карточке оно подписано «было»
+  /// и не зелёное, а переключение и порядок подключения по нему не идут.
+  ///
+  /// Раньше такие числа просто прятались: клиент, открывший приложение через
+  /// пару часов, видел «проверяю…» на всех карточках, пока новая проверка не
+  /// дойдёт до конца, и не понимал, какие серверы вообще работают.
+  int? _previousPingFor(String id) {
+    RealCheckResult? result;
+    if (_previousResults.isNotEmpty) {
+      result = _previousResults[id];
+    } else if (!_isRealCheckFresh && _isRealCheckRecent) {
+      result = _realCheckResults[id];
+    }
+    final ms = result?.latencyMs;
+    return result != null && result.ok && ms != null && ms > 0 ? ms : null;
+  }
+
+  bool get _isRealCheckRecent {
+    final last = _realCheckResultsAt;
+    return last != null &&
+        DateTime.now().difference(last) < _previousResultsMaxAge;
   }
   String? _error;
   bool _loading = true;
@@ -286,6 +318,12 @@ class _ServersScreenState extends State<ServersScreen> {
   // Держим заметно больше паузы между проверками, иначе автобалансировка
   // осталась бы вообще без данных в промежутке.
   static const _realCheckMaxAge = Duration(minutes: 60);
+  // Сколько показывать числа прошлой проверки с пометкой «было» — см.
+  // _previousPingFor.
+  static const _previousResultsMaxAge = Duration(hours: 24);
+  // Результаты прошлой, уже не свежей проверки — на время новой: её числа
+  // приходят по одному, а до тех пор карточка показывает «было N мс».
+  Map<String, RealCheckResult> _previousResults = const {};
   // Автопроверка при открытии экрана запускается один раз за сессию экрана:
   // дальше её перезапускает только отключение VPN или кнопка "Проверить".
   bool _autoRealCheckScheduled = false;
@@ -940,7 +978,12 @@ class _ServersScreenState extends State<ServersScreen> {
       // Числа прошлой проверки, если они уже не свежие, на экране и так не
       // показывались. Убираем их, чтобы по ходу новой проверки они не
       // вернулись под видом свежих.
-      if (!_isRealCheckFresh) _realCheckResults.clear();
+      if (!_isRealCheckFresh) {
+        _previousResults = _isRealCheckRecent
+            ? Map.of(_realCheckResults)
+            : const <String, RealCheckResult>{};
+        _realCheckResults.clear();
+      }
       _checkedThisRun.clear();
     });
 
@@ -992,6 +1035,7 @@ class _ServersScreenState extends State<ServersScreen> {
           ..clear()
           ..addAll(_mapRealCheckToHosts(byRemark));
         _realCheckResultsAt = DateTime.now();
+        _previousResults = const {};
       });
       _saveRealCheckResults();
     } finally {
@@ -1672,6 +1716,15 @@ class _ServersScreenState extends State<ServersScreen> {
                     pingLabel = '$corePing ${tr('мс · медленно')}';
                     pingColor = AppColors.warning;
                   }
+                } else if (sources.previous != null) {
+                  // Свежего числа ещё нет, но в прошлой проверке сервер
+                  // работал — так и пишем, не выдавая старое за новое.
+                  final was =
+                      '${tr('было')} ${sources.previous} ${tr('мс')}';
+                  pingLabel = _realChecking
+                      ? '${tr('проверяю...')} · $was'
+                      : was;
+                  pingColor = AppColors.textDim;
                 } else if (_realChecking &&
                     (!_tunnel.isConnected || _tunnel.isInSession(id))) {
                   // С поднятым VPN проверка меряет только локации сессии;
@@ -1872,6 +1925,7 @@ class _ServersScreenState extends State<ServersScreen> {
   bool inSubscription = false,
   bool subscriptionKnown = false,
   int? tcpPing,
+  int? previousPing,
 }) {
   if (unsupportedProtocol) return (group: 4, ms: 0);
   // Карточка подписана «не отвечает» — и в списке ей место среди не
@@ -1882,5 +1936,10 @@ class _ServersScreenState extends State<ServersScreen> {
   if (checkFailed) return (group: 2, ms: 0);
   if (tcpPing != null && tcpPing > 0) return (group: 0, ms: tcpPing);
   if (tcpPing != null && tcpPing < 0) return (group: 2, ms: 0);
-  return (group: 1, ms: 0);
+  // Свежего числа нет, но в прошлой проверке сервер отвечал: среди ещё не
+  // измеренных — первым, по прошлому числу. Выше измеренных сейчас не встаёт.
+  if (previousPing != null && previousPing > 0) {
+    return (group: 1, ms: previousPing);
+  }
+  return (group: 1, ms: 1 << 30);
 }

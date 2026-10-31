@@ -179,6 +179,7 @@ const Map<String, String> translationsEn = {
   'Загрузка обновления': 'Downloading update',
   'нет в подписке': 'not in your subscription',
   'проверяю...': 'checking...',
+  'было': 'was',
   'мс · отличный сигнал': 'ms · excellent signal',
   'мс · стабильно': 'ms · stable',
   'мс · медленно': 'ms · slow',

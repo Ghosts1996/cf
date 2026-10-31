@@ -52,6 +52,31 @@ void main() {
     expect(measuring.group, lessThan(markedDead.group));
   });
 
+  test('число прошлой проверки: среди ещё не измеренных — первым, но ниже '
+      'измеренных сейчас', () {
+    // 31.10: клиент открывал приложение через пару часов и видел
+    // «проверяю…» на всех карточках — рабочие серверы было не отличить.
+    ({int group, int ms}) was(int ms) => serverSortRank(
+        unsupportedProtocol: false,
+        inSubscription: true,
+        subscriptionKnown: true,
+        previousPing: ms);
+    expect(was(80).group, measuring.group);
+    expect(was(80).ms, lessThan(measuring.ms));
+    expect(was(80).ms, lessThan(was(300).ms));
+    expect(alive(900).group, lessThan(was(80).group));
+    // Свежий отказ важнее прошлого числа.
+    expect(
+        serverSortRank(
+                unsupportedProtocol: false,
+                inSubscription: true,
+                subscriptionKnown: true,
+                checkFailed: true,
+                previousPing: 80)
+            .group,
+        dead.group);
+  });
+
   test('весь список выстраивается как ожидается', () {
     final rows = <String, ({int group, int ms})>{
       'Япония 330': alive(330),
