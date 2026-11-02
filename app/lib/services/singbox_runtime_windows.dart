@@ -562,7 +562,8 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
         }
       }));
 
-      final started = await _waitForClashApi(const Duration(seconds: 12));
+      final startTimeout = startTimeoutFor(map);
+      final started = await _waitForClashApi(startTimeout);
       if (!started) {
         final reason = _coreFailureReason();
         await disconnect();
@@ -570,10 +571,10 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
           code: 'CONNECT_FAILED',
           message: reason.isNotEmpty
               ? 'sing-box не запустился: $reason'
-              : 'sing-box не поднялся за 12 секунд. Проверь: запущено ли '
-                  'приложение от имени администратора, лежит ли wintun.dll '
-                  'рядом с sing-box.exe, не занят ли порт $_clashApiPort '
-                  'другим процессом.',
+              : 'sing-box не поднялся за ${startTimeout.inSeconds} секунд. '
+                  'Проверь: запущено ли приложение от имени администратора, '
+                  'лежит ли wintun.dll рядом с sing-box.exe, не занят ли '
+                  'порт $_clashApiPort другим процессом.',
         );
       }
 
@@ -623,6 +624,20 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     }
     return null;
   }
+
+  /// Сколько ждать, пока ядро поднимется.
+  ///
+  /// С TUN — минуту. Сетевой адаптер на части компьютеров создаётся дольше
+  /// десяти секунд: ядро пишет «starting tun interface take too much time to
+  /// finish!» и продолжает его поднимать. Прежние 12 секунд обрывали такой
+  /// запуск на полпути — клиент 02.11 получал отказ на каждом подключении,
+  /// хотя ядру просто не дали закончить. Проверке серверов адаптер не нужен,
+  /// ей хватает прежних 12 секунд.
+  @visibleForTesting
+  static Duration startTimeoutFor(Map<String, dynamic> config) =>
+      hasTunInbound(config)
+          ? const Duration(seconds: 60)
+          : const Duration(seconds: 12);
 
   /// Сессия с TUN (боевое подключение), а не проверка серверов, которой
   /// хватает локального прокси.

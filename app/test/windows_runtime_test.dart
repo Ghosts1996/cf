@@ -2,6 +2,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vpnonline_app/services/clash_api.dart';
 import 'package:vpnonline_app/services/singbox_runtime_windows.dart';
@@ -66,6 +67,28 @@ void main() {
           .firstWhere((i) => i['type'] == 'tun');
       expect(tun['interface_name'], 'VPNonLine');
       expect(tun.containsKey('exclude_package'), isFalse);
+    });
+
+    test('подключению с TUN ядро ждём минуту, проверке серверов — 12 '
+        'секунд', () {
+      // 02.11: «starting tun interface take too much time to finish!» — на
+      // части компьютеров адаптер создаётся дольше десяти секунд, а
+      // приложение обрывало запуск на двенадцатой.
+      expect(WindowsSingboxRuntime.startTimeoutFor(_windowsConfig()),
+          const Duration(seconds: 60));
+      expect(WindowsSingboxRuntime.startTimeoutFor(_probeConfig()),
+          const Duration(seconds: 12));
+    });
+
+    test('медленный адаптер — подсказка перезагрузить и не включать zapret',
+        () {
+      final hint = TunnelService.desktopStartFailureHint(PlatformException(
+          code: 'CONNECT_FAILED',
+          message: 'sing-box не запустился: WARN[0010] inbound/tun[tun-in]: '
+              'starting tun interface take too much time to finish!'));
+      expect(hint, contains('Перезагрузите компьютер'));
+      expect(hint, contains('zapret'));
+      expect(hint, isNot(contains('Android')));
     });
 
     test('проверка серверов поднимает ядро без TUN — адаптер от неё не '

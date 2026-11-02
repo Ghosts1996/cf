@@ -5461,8 +5461,16 @@ class TunnelService {
 
   static String _desktopStartFailureHint(PlatformException error) {
     final reason = (error.message ?? '').trim();
+    // Адаптер не поднялся и за минуту — дело в самой Windows, а не в
+    // настройках: так бывает с зависшими адаптерами прошлых VPN и с
+    // драйверами вроде WinDivert (zapret), которые остаются после выключения.
+    final slowAdapter = reason.contains('take too much time');
     return 'VPN не запустился на компьютере.\n'
         '${reason.isEmpty ? '' : 'Ответ ядра: $reason\n'}'
+        '${slowAdapter ? 'Windows слишком долго создаёт сетевой адаптер VPN. '
+            'Перезагрузите компьютер и подключитесь сразу после запуска, '
+            'не включая zapret и другие VPN: их драйверы и зависшие '
+            'адаптеры мешают создать новый.\n' : ''}'
         'Обычно причина одна из трёх:\n'
         '• включён другой VPN (Hiddify, v2rayN, Happ и т. п.) — закройте его '
         'полностью (значок у часов → «Выход»): два VPN на одном компьютере '
