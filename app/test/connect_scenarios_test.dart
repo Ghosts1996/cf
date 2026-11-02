@@ -177,6 +177,22 @@ void main() {
     expect(tunnel.killSwitchBlocking.value, isFalse);
   });
 
+  test('на компьютере отказ ядра — с его ответом, а не подсказкой про '
+      'Android', () async {
+    // Клиент на Windows 02.11 видел «Android не дал поднять VPN…» — текст
+    // для телефона, а настоящая причина из sing-box.exe терялась.
+    core.throwConnectFailed = 2;
+    Object? error;
+    try {
+      await tunnel.connect(_subscription);
+    } catch (e) {
+      error = e;
+    }
+    expect('$error', contains('Ответ ядра: sing-box не запустился'));
+    expect('$error', contains('другой VPN'));
+    expect('$error', isNot(contains('Android')));
+  });
+
   test('сбой на пути к сессии не делает её обрыв аварией', () async {
     // Первая попытка упала на занятом порту — это сообщение об аварии, но
     // оно было до подключения. Выключение из шторки после него не должно

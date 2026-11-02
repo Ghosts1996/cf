@@ -4259,8 +4259,9 @@ class TunnelService {
             // подписку бессмысленно: каждая локация упрётся в то же самое, а
             // пользователь увидит «не удалось подключиться ни к одному
             // серверу» и решит, что виноваты серверы.
-            throw _VpnServiceStartException(
-                _vpnServiceStartFailureHint(retry));
+            throw _VpnServiceStartException(Platform.isAndroid
+                ? _vpnServiceStartFailureHint(retry)
+                : _desktopStartFailureHint(retry));
           }
         }
 
@@ -5447,6 +5448,28 @@ class TunnelService {
         '• приложению не выдано разрешение на VPN — откройте его и разрешите;\n'
         '• система усыпила приложение — откройте его и нажмите «Подключить» '
         'ещё раз.\n'
+        'Серверы здесь ни при чём: до них дело не дошло.';
+  }
+
+  /// То же для компьютера. Там ядро — отдельная программа sing-box.exe, и
+  /// подсказки про Android (разрешение на VPN, «система усыпила») к нему не
+  /// относятся. Клиент на Windows видел именно их, а настоящий ответ ядра,
+  /// который лежит в сообщении отказа, терялся.
+  @visibleForTesting
+  static String desktopStartFailureHint(PlatformException error) =>
+      _desktopStartFailureHint(error);
+
+  static String _desktopStartFailureHint(PlatformException error) {
+    final reason = (error.message ?? '').trim();
+    return 'VPN не запустился на компьютере.\n'
+        '${reason.isEmpty ? '' : 'Ответ ядра: $reason\n'}'
+        'Обычно причина одна из трёх:\n'
+        '• включён другой VPN (Hiddify, v2rayN, Happ и т. п.) — закройте его '
+        'полностью (значок у часов → «Выход»): два VPN на одном компьютере '
+        'мешают друг другу и могут оставить его без интернета;\n'
+        '• приложение запущено не от имени администратора;\n'
+        '• антивирус блокирует sing-box.exe или wintun.dll — добавьте папку '
+        'приложения в исключения.\n'
         'Серверы здесь ни при чём: до них дело не дошло.';
   }
 

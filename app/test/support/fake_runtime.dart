@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart' show PlatformException;
+
 import 'package:flutter_singbox_client/flutter_singbox_client.dart'
     show
         LogEntry,
@@ -122,10 +124,22 @@ class FakeRuntime implements SingboxRuntimeClient {
   String failMessage = 'Start failed: listen command server: listen tcp '
       '127.0.0.1:10086: bind: address already in use';
 
+  /// Сколько следующих стартов бросит PlatformException(CONNECT_FAILED) —
+  /// как рантайм Windows, когда sing-box.exe не поднялся.
+  int throwConnectFailed = 0;
+  String connectFailedMessage = 'sing-box не запустился: FATAL[0000] start '
+      'service: start inbound/tun[tun-in]: configure tun interface: '
+      'Cannot create a file when that file already exists.';
+
   @override
   Future<void> connect(SessionOptions options) async {
     calls.add('connect');
     lastConfig = options.config;
+    if (throwConnectFailed > 0) {
+      throwConnectFailed--;
+      throw PlatformException(
+          code: 'CONNECT_FAILED', message: connectFailedMessage);
+    }
     connectCount++;
     liveSessions++;
     if (liveSessions > maxLiveSessions) maxLiveSessions = liveSessions;
