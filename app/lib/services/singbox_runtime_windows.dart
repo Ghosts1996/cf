@@ -532,38 +532,33 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     await disconnect();
     _setState('connecting');
     try {
-      final map = prepareWindowsConfig(options.config);
+      var map = prepareWindowsConfig(options.config);
       _latencyUrl = _latencyUrlOf(map) ?? _latencyUrl;
-      _tempDir = await _writeConfig(map);
-      final configPath = _joinPath([_tempDir!.path, 'config.json']);
-
-      _process = await Process.start(
-        _singboxExe,
-        ['run', '-c', configPath],
-        workingDirectory: _singboxDir,
-      );
-      _recentCoreLines.clear();
-      final process = _process!;
-      process.stdout
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(_onCoreLine, onError: (_) {});
-      process.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen(_onCoreLine, onError: (_) {});
-      unawaited(process.exitCode.then((code) {
-        if (identical(_process, process)) _process = null;
-        if (_state != 'disconnected') {
-          final reason = _coreFailureReason();
-          _faultCtrl.add('sing-box неожиданно завершился (код $code)'
-              '${reason.isEmpty ? '' : ': $reason'}');
-          _setState('disconnected');
-        }
-      }));
+      await _launchCore(map);
 
       final startTimeout = startTimeoutFor(map);
-      final started = await _waitForClashApi(startTimeout);
+      var started = await _waitForClashApi(startTimeout);
+      // Адаптер завис на «строгой маршрутизации» — правилах фильтрации через
+      // службу Windows (WFP). На части компьютеров она отвечает минутами или
+      // не отвечает вовсе: её держат драйверы вроде WinDivert из zapret и
+      // сессии прошлых оборванных запусков. Клиент 02.11 упирался в это на
+      // каждом подключении, а в Hiddify тот же компьютер работал. Второй раз
+      // запускаем без неё: туннель тот же, весь трафик идёт в него, только
+      // Windows сможет отправлять DNS-запросы и мимо.
+      if (!started && _process != null && _tunStartStuck() &&
+          strictRouteEnabled(map)) {
+        _coreLogCtrl.add([
+          LogEntry(
+              level: LogLevel.warn,
+              message: 'Windows не включила строгую маршрутизацию за '
+                  '${startTimeout.inSeconds} с — запускаю ядро без неё',
+              time: DateTime.now()),
+        ]);
+        await _stopCore();
+        map = withoutStrictRoute(map);
+        await _launchCore(map);
+        started = await _waitForClashApi(startTimeout);
+      }
       if (!started) {
         final reason = _coreFailureReason();
         await disconnect();
@@ -614,6 +609,61 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     }
   }
 
+  /// Пишет конфиг и запускает sing-box.exe, подписываясь на его вывод.
+  Future<void> _launchCore(Map<String, dynamic> map) async {
+    _tempDir = await _writeConfig(map);
+    final configPath = _joinPath([_tempDir!.path, 'config.json']);
+    _recentCoreLines.clear();
+    final process = await Process.start(
+      _singboxExe,
+      ['run', '-c', configPath],
+      workingDirectory: _singboxDir,
+    );
+    _process = process;
+    process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(_onCoreLine, onError: (_) {});
+    process.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(_onCoreLine, onError: (_) {});
+    unawaited(process.exitCode.then((code) {
+      if (!identical(_process, process)) return;
+      _process = null;
+      if (_state != 'disconnected') {
+        final reason = _coreFailureReason();
+        _faultCtrl.add('sing-box неожиданно завершился (код $code)'
+            '${reason.isEmpty ? '' : ': $reason'}');
+        _setState('disconnected');
+      }
+    }));
+  }
+
+  /// Ядро сообщило, что подъём адаптера не укладывается во время.
+  bool _tunStartStuck() =>
+      _recentCoreLines.any((l) => l.contains('take too much time'));
+
+  @visibleForTesting
+  static bool strictRouteEnabled(Map<String, dynamic> config) {
+    final inbounds = config['inbounds'];
+    if (inbounds is! List) return false;
+    return inbounds
+        .any((i) => i is Map && i['type'] == 'tun' && i['strict_route'] == true);
+  }
+
+  /// Тот же конфиг без строгой маршрутизации у TUN.
+  @visibleForTesting
+  static Map<String, dynamic> withoutStrictRoute(Map<String, dynamic> config) {
+    final copy = jsonDecode(jsonEncode(config)) as Map<String, dynamic>;
+    for (final inbound in (copy['inbounds'] as List? ?? const [])) {
+      if (inbound is Map && inbound['type'] == 'tun') {
+        inbound['strict_route'] = false;
+      }
+    }
+    return copy;
+  }
+
   static String? _latencyUrlOf(Map<String, dynamic> config) {
     final outbounds = config['outbounds'];
     if (outbounds is! List) return null;
@@ -627,16 +677,16 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
 
   /// Сколько ждать, пока ядро поднимется.
   ///
-  /// С TUN — минуту. Сетевой адаптер на части компьютеров создаётся дольше
-  /// десяти секунд: ядро пишет «starting tun interface take too much time to
-  /// finish!» и продолжает его поднимать. Прежние 12 секунд обрывали такой
-  /// запуск на полпути — клиент 02.11 получал отказ на каждом подключении,
-  /// хотя ядру просто не дали закончить. Проверке серверов адаптер не нужен,
-  /// ей хватает прежних 12 секунд.
+  /// С TUN — полминуты на попытку (и ещё полминуты на запасную, без
+  /// строгой маршрутизации, — см. connect). Сетевой адаптер на части
+  /// компьютеров поднимается дольше десяти секунд: ядро пишет «starting tun
+  /// interface take too much time to finish!» и продолжает. Прежние 12 секунд
+  /// обрывали такой запуск на полпути — клиент 02.11 получал отказ на каждом
+  /// подключении. Проверке серверов адаптер не нужен, ей хватает 12 секунд.
   @visibleForTesting
   static Duration startTimeoutFor(Map<String, dynamic> config) =>
       hasTunInbound(config)
-          ? const Duration(seconds: 60)
+          ? const Duration(seconds: 30)
           : const Duration(seconds: 12);
 
   /// Сессия с TUN (боевое подключение), а не проверка серверов, которой
@@ -740,6 +790,13 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     _lastDownload = 0;
     _lastUpload = 0;
 
+    await _stopCore();
+    _setState('disconnected');
+  }
+
+  /// Гасит sing-box.exe и убирает его временный конфиг; состояние сессии не
+  /// трогает — им пользуется и повторный запуск внутри connect().
+  Future<void> _stopCore() async {
     // На Windows сразу sigkill, без предварительного sigterm. Windows не знает
     // POSIX-сигналов, и Dart не доставляет там произвольному дочернему
     // процессу настоящий SIGTERM: sing-box.exe просто не получал команду на
@@ -770,8 +827,6 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     if (dir != null) {
       await dir.delete(recursive: true).catchError((_) => dir);
     }
-
-    _setState('disconnected');
   }
 
   /// Принудительно завершает любые запущенные sing-box.exe по имени —

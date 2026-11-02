@@ -69,15 +69,33 @@ void main() {
       expect(tun.containsKey('exclude_package'), isFalse);
     });
 
-    test('подключению с TUN ядро ждём минуту, проверке серверов — 12 '
-        'секунд', () {
+    test('подключению с TUN ядро ждём полминуты на попытку, проверке '
+        'серверов — 12 секунд', () {
       // 02.11: «starting tun interface take too much time to finish!» — на
       // части компьютеров адаптер создаётся дольше десяти секунд, а
       // приложение обрывало запуск на двенадцатой.
       expect(WindowsSingboxRuntime.startTimeoutFor(_windowsConfig()),
-          const Duration(seconds: 60));
+          const Duration(seconds: 30));
       expect(WindowsSingboxRuntime.startTimeoutFor(_probeConfig()),
           const Duration(seconds: 12));
+    });
+
+    test('запасной запуск — тот же конфиг без строгой маршрутизации', () {
+      // 02.11: адаптер зависал на правилах строгой маршрутизации (WFP), и ни
+      // одно подключение не проходило. Второй запуск — без неё.
+      final config = _windowsConfig();
+      final tun = (config['inbounds'] as List)
+          .cast<Map>()
+          .firstWhere((i) => i['type'] == 'tun');
+      tun['strict_route'] = true;
+      expect(WindowsSingboxRuntime.strictRouteEnabled(config), isTrue);
+      final fallback = WindowsSingboxRuntime.withoutStrictRoute(config);
+      expect(WindowsSingboxRuntime.strictRouteEnabled(fallback), isFalse);
+      expect(WindowsSingboxRuntime.hasTunInbound(fallback), isTrue);
+      expect(WindowsSingboxRuntime.strictRouteEnabled(config), isTrue,
+          reason: 'исходный конфиг не меняется');
+      expect(fallback['outbounds'], config['outbounds']);
+      expect(WindowsSingboxRuntime.strictRouteEnabled(_probeConfig()), isFalse);
     });
 
     test('медленный адаптер — подсказка перезагрузить и не включать zapret',
