@@ -69,9 +69,15 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; shellexec — через ShellExecute, а не CreateProcess. Приложению нужны права
+; администратора (runner.exe.manifest), а пункты postinstall Inno Setup
+; запускает от имени исходного пользователя без них: CreateProcess на таком
+; .exe падает с «код 740, запрошенная операция требует повышения» — так
+; клиент и увидел ошибку сразу после установки. ShellExecute показывает
+; обычный запрос UAC, а если права уже есть — запускает без него.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent shellexec
 ; Автообновление идёт без окон — после него приложение открываем сами.
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifnotsilent
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall skipifnotsilent shellexec
 
 [UninstallDelete]
 ; sing-box.exe/wintun.dll на первом подключении может докачаться и/или
