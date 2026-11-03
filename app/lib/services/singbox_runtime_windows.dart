@@ -58,6 +58,11 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   /// ядро не поднималось (например, отвергло конфиг), приложение могло
   /// сказать только «не поднялся за 12 секунд» — без причины.
   final List<String> _recentCoreLines = <String>[];
+  // Строка ядра «… take too much time to finish!» этого запуска. Отдельно от
+  // _recentCoreLines: там последние двадцать строк, и за полминуты ожидания
+  // их целиком вытесняют ошибки соединений — по журналу 03.11 запасной запуск
+  // так и не случился, а клиенту показали ошибку соединения вместо причины.
+  String? _slowStartLine;
   final List<LogEntry> _pendingCoreLog = <LogEntry>[];
   Timer? _coreLogFlush;
   static final _levelWord =
@@ -112,8 +117,10 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   void _onCoreLine(String raw) {
     final line = raw.trim();
     if (line.isEmpty) return;
-    _recentCoreLines.add(line.replaceAll(_ansi, ''));
+    final clean = line.replaceAll(_ansi, '');
+    _recentCoreLines.add(clean);
     if (_recentCoreLines.length > 20) _recentCoreLines.removeAt(0);
+    if (clean.contains('take too much time')) _slowStartLine ??= clean;
     if (!_levelWord.hasMatch(line)) return;
     _pendingCoreLog.add(
         LogEntry(level: LogLevel.info, message: line, time: DateTime.now()));
@@ -126,17 +133,29 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     });
   }
 
-  /// Чем ядро объяснило свой отказ: последняя строка с ошибкой, иначе
-  /// последняя строка вывода. Пусто — ядро ничего не сказало.
-  String _coreFailureReason() {
-    for (final line in _recentCoreLines.reversed) {
-      if (line.contains('FATAL') ||
-          line.contains('ERROR') ||
-          line.contains('panic')) {
-        return line;
-      }
+  /// Чем ядро объяснило свой отказ. Пусто — ядро ничего не сказало.
+  String _coreFailureReason() =>
+      coreFailureReasonOf(_recentCoreLines, _slowStartLine);
+
+  /// Причина отказа по выводу ядра: авария, затем зависший подъём адаптера,
+  /// затем ошибка запуска. Ошибки отдельных соединений («connection: open
+  /// connection to … i/o timeout») — не причина: пока адаптер поднимается,
+  /// трафик компьютера уже идёт в ядро и упирается в сервер, и такими
+  /// строками забит весь вывод.
+  @visibleForTesting
+  static String coreFailureReasonOf(List<String> lines, String? slowStartLine) {
+    bool perConnection(String line) => line.contains(' connection: ');
+    for (final line in lines.reversed) {
+      if (line.contains('FATAL') || line.contains('panic')) return line;
     }
-    return _recentCoreLines.isEmpty ? '' : _recentCoreLines.last;
+    if (slowStartLine != null) return slowStartLine;
+    for (final line in lines.reversed) {
+      if (line.contains('ERROR') && !perConnection(line)) return line;
+    }
+    for (final line in lines.reversed) {
+      if (!perConnection(line)) return line;
+    }
+    return lines.isEmpty ? '' : lines.last;
   }
 
   @override
@@ -614,6 +633,7 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
     _tempDir = await _writeConfig(map);
     final configPath = _joinPath([_tempDir!.path, 'config.json']);
     _recentCoreLines.clear();
+    _slowStartLine = null;
     final process = await Process.start(
       _singboxExe,
       ['run', '-c', configPath],
@@ -641,8 +661,7 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
   }
 
   /// Ядро сообщило, что подъём адаптера не укладывается во время.
-  bool _tunStartStuck() =>
-      _recentCoreLines.any((l) => l.contains('take too much time'));
+  bool _tunStartStuck() => _slowStartLine != null;
 
   @visibleForTesting
   static bool strictRouteEnabled(Map<String, dynamic> config) {

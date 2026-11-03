@@ -80,6 +80,30 @@ void main() {
           const Duration(seconds: 12));
     });
 
+    test('причина отказа — зависший адаптер, а не ошибки соединений', () {
+      // Журнал 03.11: за полминуты ожидания вывод ядра забили ошибки
+      // соединений, и клиенту показали «dial tcp …: i/o timeout».
+      const slow = 'WARN[0010] inbound/tun[tun-in]: starting tun interface '
+          'take too much time to finish!';
+      final lines = [
+        for (var i = 0; i < 20; i++)
+          'ERROR[0028] [3860687871 5.0s] connection: open connection to '
+              '149.154.167.220:443 using outbound/vless[out-0]: dial tcp '
+              '163.5.41.30:8443: i/o timeout',
+      ];
+      expect(WindowsSingboxRuntime.coreFailureReasonOf(lines, slow), slow);
+      expect(
+          WindowsSingboxRuntime.coreFailureReasonOf(
+              [...lines, 'FATAL[0001] start service: bind: address in use'],
+              slow),
+          contains('FATAL'));
+      expect(
+          WindowsSingboxRuntime.coreFailureReasonOf(
+              ['ERROR[0001] router: rule-set adblock: open file', ...lines],
+              null),
+          contains('router'));
+    });
+
     test('запасной запуск — тот же конфиг без строгой маршрутизации', () {
       // 02.11: адаптер зависал на правилах строгой маршрутизации (WFP), и ни
       // одно подключение не проходило. Второй запуск — без неё.
@@ -98,14 +122,15 @@ void main() {
       expect(WindowsSingboxRuntime.strictRouteEnabled(_probeConfig()), isFalse);
     });
 
-    test('медленный адаптер — подсказка перезагрузить и не включать zapret',
+    test('медленный адаптер — подсказка про автозапуск zapret и режим прокси',
         () {
       final hint = TunnelService.desktopStartFailureHint(PlatformException(
           code: 'CONNECT_FAILED',
           message: 'sing-box не запустился: WARN[0010] inbound/tun[tun-in]: '
               'starting tun interface take too much time to finish!'));
-      expect(hint, contains('Перезагрузите компьютер'));
+      expect(hint, contains('services.msc'));
       expect(hint, contains('zapret'));
+      expect(hint, contains('Режим прокси'));
       expect(hint, isNot(contains('Android')));
     });
 
