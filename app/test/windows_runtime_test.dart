@@ -67,6 +67,9 @@ void main() {
           .firstWhere((i) => i['type'] == 'tun');
       expect(tun['interface_name'], 'VPNonLine');
       expect(tun.containsKey('exclude_package'), isFalse);
+      // MTU 9000 (для Android) на Windows мешал адаптеру wintun подняться —
+      // ставим обычные 1500.
+      expect(tun['mtu'], 1500);
     });
 
     test('подключению с TUN ядро ждём полминуты на попытку, проверке '

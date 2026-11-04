@@ -463,6 +463,11 @@ class WindowsSingboxRuntime implements SingboxRuntimeClient {
           inbound['interface_name'] = 'VPNonLine';
           inbound.remove('include_package');
           inbound.remove('exclude_package');
+          // MTU 9000 — для Android-VpnService; на Windows адаптер wintun
+          // с таким джамбо-MTU на части машин поднимался десятками секунд
+          // или не поднимался вовсе («starting tun interface take too much
+          // time»). Обычные 1500 для wintun — проверенное значение.
+          inbound['mtu'] = 1500;
         }
       }
     }
