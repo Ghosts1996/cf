@@ -123,4 +123,39 @@ void main() {
           reason: 'втрое медленнее, но разница меньше 200 мс');
     });
   });
+
+  group('приоритет зарубежных серверов', () {
+    test('российская локация распознаётся по флагу и названию', () {
+      expect(TunnelService.isRussianLocation('🇷🇺 Россия'), isTrue);
+      expect(TunnelService.isRussianLocation('Россия (3)'), isTrue);
+      expect(
+          TunnelService.isRussianLocation(
+              '🇷🇺 Мобильный интернет #5 | Билайн'),
+          isTrue);
+      expect(TunnelService.isRussianLocation('🇳🇱 Белые списки №3'), isFalse);
+      expect(TunnelService.isRussianLocation('🇬🇧 Англия (через Москву)'),
+          isFalse);
+    });
+
+    test('среди ответивших выбираем самую быструю зарубежную', () {
+      // Россия быстрее всех, но её выход блокировки не обходит — берём
+      // зарубежную.
+      expect(
+          TunnelService.pickPreferredLive(
+              {'🇷🇺 Россия': 45, '🇳🇱 Нидерланды': 90, '🇬🇧 Англия': 120}),
+          '🇳🇱 Нидерланды');
+    });
+
+    test('зарубежных среди ответивших нет — берём самую быструю из всех', () {
+      expect(
+          TunnelService.pickPreferredLive(
+              {'🇷🇺 Россия': 80, '🇷🇺 Мобильный интернет #9': 70}),
+          '🇷🇺 Мобильный интернет #9');
+    });
+
+    test('пустой ввод или нули — null', () {
+      expect(TunnelService.pickPreferredLive(const {}), isNull);
+      expect(TunnelService.pickPreferredLive({'🇷🇺 Россия': 0}), isNull);
+    });
+  });
 }

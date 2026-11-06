@@ -139,7 +139,7 @@ class PrefKeys {
   // Ключ новый ('_v2'): у многих прежний остался выключенным — либо по
   // старому умолчанию, либо его выключила та самая страховка, когда замер
   // принимал старые числа за свежие и терял результаты.
-  static const fastPing = 'settings.fast_ping_v2';
+  static const fastPing = 'settings.fast_ping_v3';
   // Переключает NetworkMode пакета flutter_singbox_client между 'vpn'
   // (системный туннель) и 'proxy' (локальные SOCKS/HTTP-порты без запроса
   // VPN-разрешения). См. tunnel_service.dart и settings_screen.dart.

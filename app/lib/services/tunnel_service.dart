@@ -2163,13 +2163,16 @@ class TunnelService {
         // ради низкого числа и включённый. Три пустых прогона подряд всё
         // равно ловятся за полминуты вместо прежних шести минут.
         if (_sessionFastPing && _emptyLatencyRuns >= 3) {
+          // Только на эту сессию: настройку в prefs не трогаем, чтобы
+          // «быстрый пинг» оставался включённым по умолчанию и следующее
+          // подключение снова его пробовало. Раньше здесь писался
+          // fastPing=false навсегда, и пинг у человека больше не включался.
           _sessionFastPing = false;
           _emptyLatencyRuns = 0;
-          await LocalPrefs.instance.setBool(PrefKeys.fastPing, false);
           unawaited(AppLogService.instance.log(
-              'Быстрый пинг выключен сам: ядро трижды подряд не отдало ни одной '
-              'задержки. Похоже, адрес проверки закрывает соединение после '
-              'первого ответа. Переподключись — пинг считается обычным способом.'));
+              'Быстрый пинг в этой сессии посчитан обычным способом: ядро '
+              'трижды подряд не отдало задержек. Следующее подключение снова '
+              'попробует быстрый пинг.'));
         }
       } else {
         _emptyLatencyRuns = 0;
@@ -2605,22 +2608,18 @@ class TunnelService {
     if (_activeOutboundSilentRuns < 2 && !immediate) return;
     _activeOutboundSilentRuns = 0;
 
-    // Самая быстрая из ответивших.
-    String? bestRemark;
-    int? bestDelay;
-    measured.forEach((remark, delay) {
-      if (bestDelay == null || delay < bestDelay!) {
-        bestDelay = delay;
-        bestRemark = remark;
-      }
-    });
+    // Среди ответивших — зарубежная в приоритете (см. pickPreferredLive):
+    // активная умерла, выбираем живую, и зарубежный выход полезнее
+    // российского. Если зарубежных нет — самая быстрая из оставшихся.
+    final bestRemark = pickPreferredLive(measured);
+    final bestDelay = bestRemark == null ? null : measured[bestRemark];
     if (bestRemark == null) return;
-    final index = order.indexOf(bestRemark!);
+    final index = order.indexOf(bestRemark);
     if (index < 0) return;
 
     try {
       await _client.selectOutbound('proxy', 'out-$index').timeout(_nativeCallTimeout);
-      connectedServerName.value = bestRemark!;
+      connectedServerName.value = bestRemark;
       _lastPreferredHostName = bestRemark;
       _persistSessionRoute();
       unawaited(_markLocationDead(active));
@@ -4606,13 +4605,26 @@ class TunnelService {
     final current = smoothed[active];
     if (current == null) return; // молчит — это дело самовосстановления
     if (smoothed.length < 2) return;
-    final best = smoothed.entries.reduce((a, b) => a.value <= b.value ? a : b);
-    if (best.key == active) return;
-    if (!shouldPreferFaster(current: current, best: best.value)) return;
+    final bestKey = pickPreferredLive(smoothed);
+    if (bestKey == null || bestKey == active) return;
+    final bestMs = smoothed[bestKey]!;
+    // С работающей российской уходим на любую ответившую зарубежную (её выход
+    // обходит блокировки), если та не слишком медленная. С зарубежной на
+    // другую прыгаем только ради заметно меньшего пинга — чтобы не дёргать
+    // соединения зря (из-за частых переключений рвались чаты в Telegram).
+    final preferForeign = isRussianLocation(active) &&
+        !isRussianLocation(bestKey) &&
+        bestMs <= _foreignPreferenceMaxMs;
+    if (!preferForeign && !shouldPreferFaster(current: current, best: bestMs)) {
+      return;
+    }
     await _selectInSession(
-        best.key,
-        'Локация "$active" медленная ($current мс) — перешёл на '
-        '"${best.key}" (${best.value} мс) без разрыва туннеля');
+        bestKey,
+        preferForeign
+            ? 'Перешёл на зарубежную "$bestKey" ($bestMs мс) с российской '
+                '"$active" — зарубежный выход в приоритете'
+            : 'Локация "$active" медленная ($current мс) — перешёл на '
+                '"$bestKey" ($bestMs мс) без разрыва туннеля');
   }
 
   /// Переключает селектор сессии на [remark], не опуская туннель.
@@ -4635,6 +4647,44 @@ class TunnelService {
   @visibleForTesting
   static bool shouldPreferFaster({required int current, required int best}) =>
       current >= best * 2 && current - best >= 200;
+
+  /// Российский сервер (по флагу или названию). Такой выход не обходит
+  /// блокировки зарубежных сайтов — он в приоритете последним.
+  @visibleForTesting
+  static bool isRussianLocation(String remark) {
+    final n = remark.toLowerCase();
+    return remark.contains('🇷🇺') ||
+        n.contains('россия') ||
+        n.contains('мобильный интернет');
+  }
+
+  /// Куда переключаться среди ответивших локаций: зарубежная в приоритете.
+  /// Самая быстрая зарубежная; если зарубежных среди ответивших нет — самая
+  /// быстрая из всех (российская лучше, чем совсем без интернета).
+  @visibleForTesting
+  static String? pickPreferredLive(Map<String, int> responded) {
+    String? bestForeign;
+    int? bestForeignMs;
+    String? bestAny;
+    int? bestAnyMs;
+    responded.forEach((remark, ms) {
+      if (remark.isEmpty || ms <= 0) return;
+      if (bestAnyMs == null || ms < bestAnyMs!) {
+        bestAnyMs = ms;
+        bestAny = remark;
+      }
+      if (!isRussianLocation(remark) &&
+          (bestForeignMs == null || ms < bestForeignMs!)) {
+        bestForeignMs = ms;
+        bestForeign = remark;
+      }
+    });
+    return bestForeign ?? bestAny;
+  }
+
+  /// Насколько медленной может быть зарубежная локация, чтобы ради неё уйти
+  /// с работающей российской. Выше — остаёмся на российской.
+  static const int _foreignPreferenceMaxMs = 800;
 
   Future<void> _markLocationDead(String remark) async {
     if (remark.isEmpty) return;
