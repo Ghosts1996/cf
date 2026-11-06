@@ -145,11 +145,22 @@ jobs:
           retry_wait_seconds: 30
           command: cd app && if [ -f android/keystore/keystore.jks ]; then flutter build apk --release --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }} --dart-define=APP_BUILD=${{ github.run_number }}; else echo "Keystore not found, building unsigned release APK" && flutter build apk --release --no-shrink --dart-define=SHOPBOT_API_KEY=${{ secrets.SHOPBOT_API_KEY }} --dart-define=APP_BUILD=${{ github.run_number }}; fi
 
+      # Облегчённые APK (arm64 / 32-бит) для отправки файлом в Telegram-боте (лимит 50 МБ).
+      # Тот же подписанный APK без библиотек других архитектур: versionCode и подпись те же.
+      - name: Slim per-ABI APKs for the Telegram bot
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        if: env.KEYSTORE_B64 != ''
+        run: bash ../.github/workflows/scripts/slim_apk.sh build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk android/keystore/keystore.jks
+
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          path: app/build/app/outputs/flutter-apk/app-*release.apk
 
       # Публикация релиза — только по галочке при ручном запуске. Каждая
       # опубликованная сборка становится «последней», и все установленные
@@ -179,5 +190,9 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: VPNonLine — сборка ${{ github.run_number }}
           body: ${{ inputs.release_notes }}
-          files: app/build/app/outputs/flutter-apk/app-release.apk
+          files: |
+            app/build/app/outputs/flutter-apk/app-release.apk
+            app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+          fail_on_unmatched_files: false
           make_latest: 'true'
