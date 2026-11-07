@@ -85,6 +85,10 @@ void main() {
     HttpOverrides.global = null;
     core = FakeRuntime();
     tunnel = TunnelService.withRuntime(core);
+    // Адреса тестовой подписки выдуманные: прямой TCP-стук до них ничего не
+    // говорит. Считаем их доступными — проверка доступности тестируется
+    // отдельно.
+    tunnel.endpointReachableProbe = (_, __) async => true;
   });
 
   test('обычное подключение поднимает ровно одну сессию', () async {
@@ -583,7 +587,7 @@ void main() {
   }, timeout: const Timeout(Duration(seconds: 60)));
 
   test('вся сессия молчит, а интернет у телефона есть — сессия '
-      'пересобирается из других локаций, но не чаще раза в 10 минут',
+      'пересобирается из других локаций, повтор не раньше чем через 20 с',
       () async {
     final server = await startWorkingTunnel();
     await tunnel.connect(_subscription);
@@ -607,6 +611,60 @@ void main() {
     expect(core.connectCount, before + 1);
     await tunnel.disconnect();
   }, timeout: const Timeout(Duration(seconds: 90)));
+
+  test('пересборки молчащей сессии идут с нарастающей паузой (20 с → 1 мин '
+      '→ 3 мин), а первый же ответ сбрасывает её', () async {
+    // Журнал 07.11: после первой пересборки приложение десять минут подряд
+    // отвечало «сессию уже пересобирал недавно — жду», а человек сидел без
+    // интернета.
+    final server = await startWorkingTunnel();
+    await tunnel.connect(_subscription);
+    tunnel.directInternetProbe = () async => true;
+    core.groupDelays = {'out-0': 65535, 'out-1': 65535, 'out-2': 65535};
+    await server.close(force: true);
+    var count = core.connectCount;
+
+    Future<bool> rotated() => waitUntil(() => core.connectCount == count + 1,
+        timeout: const Duration(seconds: 20));
+    Future<void> tick() async {
+      await waitUntil(() => tunnel.isConnected);
+      await Future<void>.delayed(const Duration(seconds: 6));
+      await tunnel.debugLiveCheckTick();
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+
+    await tunnel.debugLiveCheckTick();
+    expect(await rotated(), isTrue, reason: 'первая пересборка — сразу');
+    count = core.connectCount;
+    expect(tunnel.debugSessionRotationStreak, 1);
+
+    await tick();
+    expect(core.connectCount, count, reason: 'вторая — не раньше 20 с');
+
+    tunnel.debugAgeSessionRotation(const Duration(seconds: 25));
+    await tick();
+    expect(await rotated(), isTrue,
+        reason: 'прошло 20 с — снова пробуем другие локации, а не ждём 10 минут');
+    count = core.connectCount;
+    expect(tunnel.debugSessionRotationStreak, 2);
+
+    tunnel.debugAgeSessionRotation(const Duration(seconds: 25));
+    await tick();
+    expect(core.connectCount, count, reason: 'третья — не раньше минуты');
+    tunnel.debugAgeSessionRotation(const Duration(seconds: 40));
+    await tick();
+    expect(await rotated(), isTrue);
+    expect(tunnel.debugSessionRotationStreak, 3);
+
+    // Локации ответили — счёт пауз с нуля.
+    final again = await startWorkingTunnel();
+    core.groupDelays = {'out-0': 40, 'out-1': 55, 'out-2': 70};
+    await waitUntil(() => tunnel.isConnected);
+    await tunnel.debugRunLatencyProbe();
+    expect(tunnel.debugSessionRotationStreak, 0);
+    await again.close(force: true);
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 150)));
 
   test('после закрытия приложения пинг виден сразу, а не «измеряю…»; '
       'числа старше часа — нет', () async {

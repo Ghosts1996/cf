@@ -2186,14 +2186,17 @@ class TunnelService {
       // следующую сессию они идут в конец и не занимают места живых. Только
       // после двух промахов подряд и только если ответил хоть кто-то.
       if (raw.isNotEmpty) {
+        _noteSessionAnswered();
         unawaited(_markLocationsDead(_sessionOutboundRemarks.where(
             (r) => !raw.containsKey(r) && (_latencyMisses[r] ?? 0) >= 2)));
       }
       // Результат замера в журнал: если ядро не достучалось ни до одной
       // локации, это первое, что стоит увидеть при разборе.
-      unawaited(AppLogService.instance.log(
-          'Задержка через туннель: '
-          '${smoothed.entries.map((e) => '${e.key} — ${e.value} мс').join('; ')}'));
+      unawaited(AppLogService.instance.log(smoothed.isEmpty
+          ? 'Задержка через туннель: ни одна из '
+              '${_sessionOutboundRemarks.length} локаций сессии не ответила'
+          : 'Задержка через туннель: '
+              '${smoothed.entries.map((e) => '${e.key} — ${e.value} мс').join('; ')}'));
       await _recoverIfActiveOutboundIsDead(raw);
       // Переходить — только на тех, кто ответил именно сейчас.
       await _preferFasterIfAuto({
@@ -2375,6 +2378,7 @@ class TunnelService {
       }
       if (!stillOurs()) return;
       if (measured.isNotEmpty) {
+        _noteSessionAnswered();
         latencyByRemark.value = {...latencyByRemark.value, ...measured};
         _latencyAt = DateTime.now();
       }
@@ -2485,7 +2489,46 @@ class TunnelService {
   }
 
   DateTime? _lastSessionRotationAt;
-  static const _sessionRotationGap = Duration(minutes: 10);
+
+  /// Сколько раз подряд сессию пересобирали, а в ней так никто и не ответил.
+  /// Сбрасывается первым же ответом любой локации.
+  int _sessionRotationStreak = 0;
+
+  /// Пауза перед следующей пересборкой — нарастает с каждой безуспешной.
+  ///
+  /// Раньше пауза была одна — десять минут. Журнал 07.11: первая пересборка
+  /// собрала новую дюжину, но первой в ней снова оказался мост, до которого
+  /// с этого Wi-Fi не открывался даже TCP, — и следующие десять минут
+  /// приложение на каждую проверку отвечало «пересобирал недавно — жду», а
+  /// человек сидел без интернета. Теперь вторая попытка — через 20 секунд,
+  /// дальше минута, три и десять: подписку из тридцати локаций приложение
+  /// перебирает за пару минут, а на настоящем обрыве не крутит
+  /// переподключения без конца.
+  static const _sessionRotationBackoff = [
+    Duration(seconds: 20),
+    Duration(minutes: 1),
+    Duration(minutes: 3),
+    Duration(minutes: 10),
+  ];
+
+  Duration get _sessionRotationGap => _sessionRotationBackoff[
+      (_sessionRotationStreak - 1).clamp(0, _sessionRotationBackoff.length - 1)];
+
+  /// Хоть одна локация сессии ответила — пересборки снова разрешены сразу.
+  void _noteSessionAnswered() {
+    _sessionRotationStreak = 0;
+  }
+
+  /// Сдвигает отметку последней пересборки в прошлое — только для тестов:
+  /// ждать настоящие минуты стенд не может.
+  @visibleForTesting
+  void debugAgeSessionRotation(Duration by) {
+    final last = _lastSessionRotationAt;
+    if (last != null) _lastSessionRotationAt = last.subtract(by);
+  }
+
+  @visibleForTesting
+  int get debugSessionRotationStreak => _sessionRotationStreak;
 
   /// Ни одна локация сессии не ответила на замер.
   ///
@@ -2509,12 +2552,16 @@ class TunnelService {
     }
     final now = DateTime.now();
     final last = _lastSessionRotationAt;
-    if (last != null && now.difference(last) < _sessionRotationGap) {
-      unawaited(AppLogService.instance.log(
-          'Интернет у телефона есть, а локации сессии молчат; сессию уже '
-          'пересобирал недавно — жду',
-          level: AppLogLevel.warning));
-      return;
+    if (last != null && _sessionRotationStreak > 0) {
+      final wait = _sessionRotationGap - now.difference(last);
+      if (wait > Duration.zero) {
+        unawaited(AppLogService.instance.log(
+            'Интернет у телефона есть, а локации сессии молчат; сессию '
+            'пересобирал ${now.difference(last).inSeconds} с назад — '
+            'следующая попытка через ${wait.inSeconds + 1} с',
+            level: AppLogLevel.warning));
+        return;
+      }
     }
     final connectionString = _lastConnectionString;
     if (connectionString == null || !isConnected) return;
@@ -2537,13 +2584,15 @@ class TunnelService {
     }
     if (_sessionGeneration != generation || !isConnected) return;
     if (again.isNotEmpty) {
+      _noteSessionAnswered();
       latencyByRemark.value = {...latencyByRemark.value, ...again};
       _latencyAt = DateTime.now();
       await _recoverIfActiveOutboundIsDead(again, immediate: true);
       return;
     }
     if (_connectInProgress || _switchInProgress || _probeInProgress) return;
-    _lastSessionRotationAt = now;
+    _lastSessionRotationAt = DateTime.now();
+    _sessionRotationStreak++;
     unawaited(AppLogService.instance.log(
         'Интернет у телефона есть, а ни одна из ${remarks.length} локаций '
         'сессии не отвечает — похоже, оператор их режет. Пересобираю сессию '
@@ -4720,6 +4769,109 @@ class TunnelService {
   Future<void> debugClearDeadMarks(Iterable<String> alive) =>
       _clearDeadMarks(alive);
 
+  /// Открывается ли TCP до адреса сервера прямо сейчас, из текущей сети.
+  ///
+  /// Подменяется в тестах. Запросы самого приложения идут мимо туннеля
+  /// (приложение исключено из VPN), а при подключении туннель ещё не поднят.
+  @visibleForTesting
+  late Future<bool> Function(String host, int port) endpointReachableProbe =
+      _tcpReachable;
+
+  static const _reachProbeTimeout = Duration(milliseconds: 1500);
+
+  static Future<bool> _tcpReachable(String host, int port) async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect(host, port, timeout: _reachProbeTimeout);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
+  /// Прямая проверка адресов локаций перед подключением.
+  ///
+  /// Журнал 07.11: замер, по которому выбиралась «самая быстрая», был снят
+  /// в другой сети (мобильный интернет), а телефон уже сидел на Wi-Fi, с
+  /// которого до моста 212.15.49.92:9443 не открывался даже TCP. Приложение
+  /// всё равно ставило его первым — и все соединения по 15 секунд висели на
+  /// «context deadline exceeded». Теперь перед сборкой сессии все адреса
+  /// подписки разом получают TCP-стук (полторы секунды на всё): кто не
+  /// открылся — уходит в конец, первой идёт доступная.
+  ///
+  /// Возвращает адреса «host:port», до которых TCP НЕ открылся. Пусто —
+  /// либо открылись все, либо не открылся никто (нет сети, Always-on VPN
+  /// без исключения приложения) — тогда проверка ничего не говорит, и
+  /// порядок не трогаем.
+  ///
+  /// [mustKnow] — адреса, порядок которых решает начало сессии: как только
+  /// по ним всё ясно, дольше не ждём (обычно ответ за десятки миллисекунд,
+  /// а полторы секунды уходят только на действительно закрытые адреса).
+  Future<Set<String>> _unreachableEndpoints(
+      List<_ParsedVless> profiles, List<_ParsedVless> mustKnow) async {
+    String key(_ParsedVless p) => '${p.host}:${p.port}';
+    final keys = <String>{for (final p in profiles) key(p)};
+    if (keys.length < 2) return const {};
+    final result = <String, bool>{};
+    final done = Completer<void>();
+    final need = {for (final p in mustKnow) key(p)};
+    void check() {
+      if (done.isCompleted) return;
+      if (result.length == keys.length) {
+        done.complete();
+        return;
+      }
+      // Начало сессии уже определилось: все нужные ответили, и среди них
+      // есть хоть одна доступная.
+      if (need.isNotEmpty &&
+          need.every(result.containsKey) &&
+          need.any((k) => result[k] == true)) {
+        done.complete();
+      }
+    }
+
+    for (final k in keys) {
+      final i = k.lastIndexOf(':');
+      final host = k.substring(0, i);
+      final port = int.tryParse(k.substring(i + 1)) ?? 443;
+      unawaited(endpointReachableProbe(host, port)
+          .timeout(_reachProbeTimeout + const Duration(milliseconds: 300),
+              onTimeout: () => false)
+          .catchError((_) => false)
+          .then((ok) {
+        result[k] = ok;
+        check();
+      }));
+    }
+    await done.future.timeout(
+        _reachProbeTimeout + const Duration(milliseconds: 400),
+        onTimeout: () {});
+    // Не ответившие за отведённое время — для этой сети всё равно что
+    // закрытые: соединение через них дольше полутора секунд и не откроется.
+    final closed = {
+      for (final k in keys)
+        if (result[k] == false) k,
+    };
+    final open = keys.where((k) => result[k] == true).length;
+    if (open == 0) return const {};
+    final pendingAsClosed = need.where((k) => !result.containsKey(k));
+    closed.addAll(pendingAsClosed);
+    if (closed.isNotEmpty) {
+      final names = [
+        for (final p in profiles)
+          if (closed.contains(key(p))) p.remark,
+      ];
+      unawaited(AppLogService.instance.log(
+          'С этой сети не открываются адреса ${names.length} из '
+          '${profiles.length} локаций — ставлю их в конец: '
+          '${names.take(8).join(', ')}${names.length > 8 ? ' …' : ''}',
+          level: AppLogLevel.warning));
+    }
+    return closed;
+  }
+
   /// Порядок перебора локаций при подключении.
   ///
   /// Выбрал страну сам — идём в неё, замеры тут никого не интересуют. Не
@@ -4778,36 +4930,57 @@ class TunnelService {
     // «Мобильных интернетов» с несовпадающими ключами. Выбранная оказывалась
     // медленной — и переключаться было некуда: живые Швеция и Италия в
     // дюжину сессии не попадали.
-    final indexed = [
-      for (var i = 0; i < profiles.length; i++) (p: profiles[i], i: i),
-    ]..sort((a, b) {
-        final da = isDead(a.p) ? 1 : 0;
-        final db = isDead(b.p) ? 1 : 0;
-        if (da != db) return da - db;
-        final byRank = rank(a.p).compareTo(rank(b.p));
-        if (byRank != 0) return byRank;
-        return a.i.compareTo(b.i);
-      });
-    final sorted = [for (final e in indexed) e.p];
+    List<_ParsedVless> sortBy(bool Function(_ParsedVless) closed) {
+      // Ступени: живые и доступные → замолчавшие, но доступные (отметка
+      // живёт час, а сеть могла смениться) → закрытые из этой сети.
+      int tier(_ParsedVless p) => (closed(p) ? 2 : 0) + (isDead(p) ? 1 : 0);
+      final indexed = [
+        for (var i = 0; i < profiles.length; i++) (p: profiles[i], i: i),
+      ]..sort((a, b) {
+          final ta = tier(a.p);
+          final tb = tier(b.p);
+          if (ta != tb) return ta - tb;
+          final byRank = rank(a.p).compareTo(rank(b.p));
+          if (byRank != 0) return byRank;
+          return a.i.compareTo(b.i);
+        });
+      return [for (final e in indexed) e.p];
+    }
+
     final preferred = _matchProfile(profiles, preferredHostName);
+    // Сначала порядок без проверки — по нему видно, какие адреса решают
+    // начало сессии; ждать стоит только их.
+    final draft = sortBy((_) => false);
+    final head = <_ParsedVless>[
+      if (preferred != null) preferred,
+      ...draft.take(_maxSessionAlternates + 1),
+    ];
+    final closedKeys = await _unreachableEndpoints(profiles, head);
+    bool isClosed(_ParsedVless p) => closedKeys.contains('${p.host}:${p.port}');
+    final sorted = closedKeys.isEmpty ? draft : sortBy(isClosed);
 
     if (chosenManually && preferred != null) {
-      if (!isDead(preferred)) {
+      if (!isDead(preferred) && !isClosed(preferred)) {
         return [preferred, ...sorted.where((p) => !identical(p, preferred))];
       }
       revisit = preferred;
       unawaited(AppLogService.instance.log(
-          'Выбранная локация "${preferred.remark}" недавно перестала '
-          'отвечать — подключаюсь к живой. Как только она снова ответит, '
-          'подключение опять пойдёт в неё.',
+          isClosed(preferred)
+              ? 'Выбранная локация "${preferred.remark}" не открывается из '
+                  'этой сети — подключаюсь к доступной, а выбранная остаётся '
+                  'в сессии второй: ответит — переключусь на неё.'
+              : 'Выбранная локация "${preferred.remark}" недавно перестала '
+                  'отвечать — подключаюсь к живой. Как только она снова '
+                  'ответит, подключение опять пойдёт в неё.',
           level: AppLogLevel.warning));
       return withRevisit(sorted);
     }
 
     if (latency.isEmpty) {
       // Замеров ещё нет — врать про «самую быструю» нечем: начинаем с
-      // последней локации, на которой были (если она не замолчала).
-      if (preferred != null && !isDead(preferred)) {
+      // последней локации, на которой были (если она не замолчала и
+      // открывается из этой сети).
+      if (preferred != null && !isDead(preferred) && !isClosed(preferred)) {
         return [preferred, ...sorted.where((p) => !identical(p, preferred))];
       }
       return sorted;
@@ -4927,6 +5100,7 @@ class TunnelService {
     }
     if (!stillOurs()) return;
     if (measured.isNotEmpty) {
+      _noteSessionAnswered();
       latencyByRemark.value = {...latencyByRemark.value, ...measured};
       _latencyAt = DateTime.now();
     }

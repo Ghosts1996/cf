@@ -24,6 +24,8 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     // LocalPrefs держит значения в памяти — отметки прошлых тестов стираем.
     await LocalPrefs.instance.setString(PrefKeys.deadLocationsJson, '');
+    // Адреса выдуманные — по умолчанию считаем, что открываются все.
+    TunnelService.instance.endpointReachableProbe = (_, __) async => true;
   });
 
   Future<List<String>> order({required bool chosenManually, String? preferred}) async {
@@ -156,6 +158,53 @@ void main() {
     test('пустой ввод или нули — null', () {
       expect(TunnelService.pickPreferredLive(const {}), isNull);
       expect(TunnelService.pickPreferredLive({'🇷🇺 Россия': 0}), isNull);
+    });
+  });
+
+  group('адрес не открывается из текущей сети', () {
+    // Журнал 07.11: «самой быстрой» по замеру из мобильной сети был мост
+    // 212.15.49.92:9443, а с Wi-Fi до него не открывался даже TCP.
+    test('самая быстрая по старому замеру закрыта — первой идёт доступная',
+        () async {
+      TunnelService.instance.endpointReachableProbe =
+          (host, _) async => host != 'de.example.com';
+      expect(await order(chosenManually: false), ['США', 'Япония', 'Германия']);
+    });
+
+    test('выбранная вручную закрыта — первой доступная, выбранная второй',
+        () async {
+      TunnelService.instance.endpointReachableProbe =
+          (host, _) async => host != 'jp.example.com';
+      final result = await order(chosenManually: true, preferred: 'Япония');
+      expect(result, ['Германия', 'Япония', 'США']);
+    });
+
+    test('не открылся никто (нет сети) — проверка ничего не говорит, порядок '
+        'прежний', () async {
+      TunnelService.instance.endpointReachableProbe = (_, __) async => false;
+      expect(await order(chosenManually: false), ['Германия', 'США', 'Япония']);
+    });
+
+    test('адрес молчит дольше полутора секунд — для этой сети он закрыт, '
+        'подключение не ждёт его дольше', () async {
+      TunnelService.instance.endpointReachableProbe = (host, _) async {
+        if (host == 'de.example.com') {
+          await Future<void>.delayed(const Duration(seconds: 10));
+        }
+        return true;
+      };
+      final sw = Stopwatch()..start();
+      final result = await order(chosenManually: false);
+      sw.stop();
+      expect(result.first, 'США');
+      expect(sw.elapsed, lessThan(const Duration(seconds: 3)));
+    });
+
+    test('все открылись быстро — ждать полторы секунды не нужно', () async {
+      final sw = Stopwatch()..start();
+      await order(chosenManually: false);
+      sw.stop();
+      expect(sw.elapsed, lessThan(const Duration(milliseconds: 800)));
     });
   });
 }
