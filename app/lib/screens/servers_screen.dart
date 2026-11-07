@@ -9,6 +9,7 @@ import '../services/api_client.dart';
 import '../state/selected_server.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/latency_label.dart';
 import '../services/locale_service.dart';
 import '../services/location_names.dart';
 
@@ -110,6 +111,76 @@ class _ServersScreenState extends State<ServersScreen> {
       return a.compareTo(b);
     });
     return [for (final i in order) hosts[i]];
+  }
+
+  /// Неотвечающие локации свёрнуты в один пункт внизу списка: внешние ноды
+  /// подписки часто мертвы, и раньше они заливали экран красным «нет ответа» —
+  /// выглядело так, будто «вечно все серверы оффлайн», хотя рабочие были.
+  bool _showQuiet = false;
+  int _quietCount = 0;
+  static final Object _quietToggleMarker = Object();
+
+  /// Локации для списка: рабочие и ещё не измеренные — сразу, не отвечающие
+  /// (а также «нет в подписке» и неподдерживаемые) — под пунктом
+  /// «Не отвечают сейчас», если только живых нет вовсе (тогда видно всё).
+  List<dynamic> get _hostEntries {
+    final sorted = _hostsSortedByPing ?? const <dynamic>[];
+    final connectedId = _tunnel.isConnected
+        ? _hostIdForConnectedName(_tunnel.connectedServerName.value)
+        : null;
+    String idOf(dynamic h) =>
+        (h as Map<String, dynamic>)['host_name'] as String? ?? '';
+    final split = splitQuietHosts<dynamic>(
+      sorted,
+      quiet: (h) => _sortRankFor(h).group >= 2,
+      pinned: (h) {
+        final id = idOf(h);
+        return id.isNotEmpty &&
+            (id == _selectedId || id == connectedId || _favorites.contains(id));
+      },
+    );
+    _quietCount = split.hidden.length;
+    if (split.hidden.isEmpty) return split.shown;
+    return [
+      ...split.shown,
+      _quietToggleMarker,
+      if (_showQuiet) ...split.hidden,
+    ];
+  }
+
+  Widget _quietToggleRow() {
+    final label = _showQuiet
+        ? tr('Скрыть неотвечающие')
+        : '${tr('Не отвечают сейчас')} · $_quietCount';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () => setState(() => _showQuiet = !_showQuiet),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              const Icon(Icons.wifi_off_rounded, size: 16, color: AppColors.textDim),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(label,
+                    style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textDim)),
+              ),
+              Icon(
+                  _showQuiet
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                  size: 20,
+                  color: AppColors.textDim),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   /// Вес локации для сортировки. Считается ровно из того же, что показано на
@@ -1628,7 +1699,8 @@ class _ServersScreenState extends State<ServersScreen> {
                     style: const TextStyle(color: AppColors.textDim)),
               ),
             if (_allHosts != null)
-              ..._hostsSortedByPing!.map((s) {
+              ..._hostEntries.map((s) {
+                if (identical(s, _quietToggleMarker)) return _quietToggleRow();
                 final host = s as Map<String, dynamic>;
                 final id = host['host_name'] as String? ?? '';
                 final name = id.isEmpty ? tr('Без названия') : id;

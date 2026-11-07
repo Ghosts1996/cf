@@ -8,6 +8,7 @@ import '../widgets/update_banner.dart';
 import '../services/api_client.dart';
 import '../services/local_prefs.dart';
 import '../services/tunnel_service.dart';
+import '../services/latency_label.dart';
 import '../services/update_installer.dart';
 import '../services/update_service.dart';
 import '../services/vpn_notification_service.dart';
@@ -173,9 +174,17 @@ class _ConnectScreenState extends State<ConnectScreen>
     });
     // Тикаем чаще, чем проверка ключа, но не каждую секунду — это
     // TCP-connect до реального VLESS-узла.
-    _latencyTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    _latencyTimer = Timer.periodic(const Duration(seconds: 15), (t) {
       if (!_appVisible) return; // число на экране, которого сейчас не видно
-      if (_tunnel.isConnected && !_latencyChecking) _measureLatency();
+      if (_latencyChecking || _connecting) return;
+      if (_tunnel.isConnected) {
+        _measureLatency();
+      } else if (t.tick % 4 == 0 && !_tunnel.isBusy) {
+        // VPN выключен: раз в минуту перепроверяем выбранный сервер. Раньше
+        // при выключенном VPN замер делался один раз — после неудачи (сеть
+        // моргнула) подпись так и оставалась без числа до перезапуска.
+        _measureLatency();
+      }
     });
     _connectivitySub =
         Connectivity().onConnectivityChanged.listen(_onConnectivityChanged);
@@ -791,34 +800,27 @@ class _ConnectScreenState extends State<ConnectScreen>
     return '${(mb / 1024).toStringAsFixed(2)} GB';
   }
 
+  ({int? ms, String text, LatencyTone tone}) get _latencyState => mainLatencyLabel(
+        checking: _latencyChecking,
+        probed: _latencyProbed,
+        ms: _latencyMs,
+        connected: _tunnel.isConnected,
+        hasKey: (_effectiveConnectionString ?? '').isNotEmpty,
+      );
+
+  /// Подпись под кольцом. Логика — в [mainLatencyLabel] (там же тесты):
+  /// раньше при выключенном VPN несостоявшийся замер оставлял «проверка
+  /// соединения…» навсегда.
   String get _latencyLabel {
-    if (_latencyChecking && _latencyMs == null) return tr('проверка соединения…');
-    // Ноль и отрицательное — это не замер, а его отсутствие: иначе значение
-    // попадает в ветку `< 80` и выводится как "0 мс · отличный сигнал". Второй
-    // рубеж: сам источник уже отфильтрован в _measureLatency().
-    // «Сервер не отвечает на проверку задержки» под именем страны на главном
-    // экране пугало людей на ровном месте: туннель поднят, трафик идёт, а
-    // подпись сообщает об отказе. Не ответил замер — значит числа просто нет,
-    // так и пишем. Настоящий отказ виден по счётчикам трафика и по журналу.
-    if (_latencyMs != null && _latencyMs! <= 0) {
-      return _tunnel.isConnected
-          ? tr('соединение активно')
-          : tr('проверка соединения…');
-    }
-    if (_latencyMs == null) {
-      if (!_latencyProbed) return tr('проверка соединения…');
-      return _tunnel.isConnected
-          ? tr('соединение активно')
-          : tr('проверка соединения…');
-    }
-    // Пороги рассчитаны на настоящие миллисекунды. При поднятом туннеле это
-    // URLTest ядра с «единой задержкой»: один круговой путь через уже поднятый
-    // VLESS-канал, до Европы это 40-100 мс — те же числа, что показывает
-    // Hiddify. До подключения — рукопожатие с сервером, оно того же порядка.
-    if (_latencyMs! < 120) return '$_latencyMs ${tr('мс · отличный сигнал')}';
-    if (_latencyMs! < 300) return '$_latencyMs ${tr('мс · стабильно')}';
-    return '$_latencyMs ${tr('мс · медленно')}';
+    final st = _latencyState;
+    return st.ms != null ? '${st.ms} ${tr(st.text)}' : tr(st.text);
   }
+
+  Color get _latencyColor => switch (_latencyState.tone) {
+        LatencyTone.good => AppColors.success,
+        LatencyTone.warn => AppColors.warning,
+        LatencyTone.dim => AppColors.textDim,
+      };
 
   @override
   Widget build(BuildContext context) {
@@ -974,9 +976,7 @@ class _ConnectScreenState extends State<ConnectScreen>
               code: _codeFromName(label),
               name: label,
               pingLabel: _latencyLabel,
-              pingColor: (!_latencyChecking && _latencyMs != null && _latencyMs! < 200)
-                  ? AppColors.success
-                  : AppColors.textDim,
+              pingColor: _latencyColor,
               trailing: const Icon(Icons.chevron_right_rounded, color: AppColors.textDim, size: 18),
               onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ServersScreen())),
             );

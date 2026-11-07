@@ -400,4 +400,8 @@ const Map<String, String> translationsEn = {
   'Нет активного ключа с подпиской — нечего проверять.': 'No active key with a subscription — nothing to check.',
   'Сначала отключитесь от VPN — реальная проверка на время поднимает и гасит тестовое соединение тем же движком.':
       'Disconnect from the VPN first — the real check temporarily brings up and tears down a test connection using the same engine.',
+  'нет активного ключа': 'no active key',
+  'не ответил · подключу к рабочему': 'no response · will connect to a working one',
+  'Скрыть неотвечающие': 'Hide unresponsive',
+  'Не отвечают сейчас': 'Not responding now',
 };
