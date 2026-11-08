@@ -5995,6 +5995,24 @@ class TunnelService {
   /// Группа, по которой ядро меряет задержку. В маршрутизации не участвует.
   static const _latencyGroupTag = 'latency';
 
+  /// Группа-outbound «свои серверы» — через неё уводим Google/Gemini/нейросети,
+  /// потому что у наших серверов есть WARP (чистый выход, без капчи), а у чужих
+  /// нод — нет. См. построение в _buildSingBoxConfig.
+  static const _cleanAiTag = 'clean-ai';
+
+  /// Домены, которым нужен чистый выход (на наш WARP-сервер): Google целиком
+  /// (вход в аккаунт accounts.google.com и капча google.com/sorry тоже тут),
+  /// нейросети и Discord — все они режут IP дата-центров. Список согласован
+  /// с WARP-маршрутом на самих серверах (node_setup.sh).
+  static const _cleanExitDomains = [
+    'google.com', 'gstatic.com', 'googleapis.com', 'googleusercontent.com',
+    'ggpht.com', 'withgoogle.com',
+    'claude.ai', 'claude.com', 'anthropic.com',
+    'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com',
+    'perplexity.ai', 'x.ai', 'grok.com', 'copilot.microsoft.com',
+    'discord.com', 'discordapp.com', 'discord.gg',
+  ];
+
   /// Адрес проверки — тот же, что в настройках Hiddify. Обычный HTTP: лишнее
   /// TLS-рукопожатие поверх туннеля добавило бы к замеру целый круговой путь.
   static const _latencyTestUrl = 'http://cp.cloudflare.com/';
@@ -6982,15 +7000,21 @@ class TunnelService {
     // out-0, то есть тот же сервер, что и был.
     final useSelector = alternates.isNotEmpty;
     final outbounds = <Map<String, dynamic>>[];
+    // Теги наших серверов (vpnonline_own=1) — у них WARP. На них уводим
+    // Google/Gemini/нейросети, даже если выбрана чужая нода (см. ниже).
+    final ownTags = <String>[];
     if (!useSelector) {
       outbounds.add(buildProxyOutbound(p, 'proxy'));
+      if (p.isOwn) ownTags.add('proxy');
     } else {
       final memberTags = <String>['out-0'];
       outbounds.add(buildProxyOutbound(p, 'out-0'));
+      if (p.isOwn) ownTags.add('out-0');
       for (var i = 0; i < alternates.length; i++) {
         final tag = 'out-${i + 1}';
         memberTags.add(tag);
         outbounds.add(buildProxyOutbound(alternates[i], tag));
+        if (alternates[i].isOwn) ownTags.add(tag);
       }
       outbounds.add(<String, dynamic>{
         'type': 'selector',
@@ -6999,6 +7023,36 @@ class TunnelService {
         'default': 'out-0',
         'interrupt_exist_connections': false,
       });
+    }
+    // Google/Gemini/нейросети/Discord уводим на наш сервер (у него WARP —
+    // чистый выход), даже когда пользователь выбрал чужую ноду с грязным IP:
+    // так пропадает капча «подозрительный трафик». Если своих серверов в
+    // сессии нет — ничего не добавляем, трафик идёт как обычно. Когда свой
+    // сервер один и это сам proxy — отдельная группа не нужна.
+    final needCleanAi = ownTags.isNotEmpty && !(ownTags.length == 1 && ownTags.first == 'proxy');
+    if (needCleanAi) {
+      outbounds.add(<String, dynamic>{
+        'type': 'urltest',
+        'tag': _cleanAiTag,
+        'outbounds': ownTags,
+        'url': _latencyTestUrl,
+        'interval': '1h',
+        'tolerance': 50,
+        'idle_timeout': '3h',
+      });
+      final rule = <String, dynamic>{
+        'domain_suffix': _cleanExitDomains,
+        'action': 'route',
+        'outbound': _cleanAiTag,
+      };
+      // Перед широким правилом tls_fragment (оно гонит весь TCP в proxy),
+      // иначе Google ушёл бы в выбранную локацию раньше, чем на наш сервер.
+      final at = routeRules.indexWhere((r) => r['tls_fragment'] == true);
+      if (at >= 0) {
+        routeRules.insert(at, rule);
+      } else {
+        routeRules.add(rule);
+      }
     }
     // Группа `urltest` существует только ради честного замера задержки — в
     // маршрутизации она не участвует, трафик по-прежнему идёт через `proxy`.
@@ -8384,8 +8438,14 @@ class _ParsedVless {
     this.vlessEncryption,
     this.pqv,
     this.grpcAuthority,
+    this.isOwn = false,
     required this.remark,
   });
+
+  /// `vpnonline_own=1` в ссылке: это НАШ сервер (с WARP для Google/Gemini),
+  /// а не подмешанная чужая нода. По нему Google/Gemini уводим на свой сервер
+  /// даже когда пользователь выбрал чужую локацию (у неё грязный IP и капча).
+  final bool isOwn;
 
   /// `pqv` из ссылки: ключ проверки подписи сервера Reality (ML-DSA-65).
   /// Понимает только Xray.
@@ -8498,6 +8558,7 @@ class _ParsedVless {
         vlessEncryption: vlessEncryption,
         pqv: pqv,
         grpcAuthority: grpcAuthority,
+        isOwn: isOwn,
         remark: newRemark,
       );
 
@@ -8830,6 +8891,7 @@ class _ParsedVless {
         vlessEncryption: q['encryption'],
         pqv: q['pqv'],
         grpcAuthority: q['authority'],
+        isOwn: q['vpnonline_own'] == '1',
         remark: remark,
       );
     } catch (_) {
