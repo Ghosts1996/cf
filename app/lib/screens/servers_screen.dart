@@ -124,20 +124,28 @@ class _ServersScreenState extends State<ServersScreen> {
   /// (а также «нет в подписке» и неподдерживаемые) — под пунктом
   /// «Не отвечают сейчас», если только живых нет вовсе (тогда видно всё).
   List<dynamic> get _hostEntries {
-    final sorted = _hostsSortedByPing ?? const <dynamic>[];
+    final sortedAll = _hostsSortedByPing ?? const <dynamic>[];
     final connectedId = _tunnel.isConnected
         ? _hostIdForConnectedName(_tunnel.connectedServerName.value)
         : null;
     String idOf(dynamic h) =>
         (h as Map<String, dynamic>)['host_name'] as String? ?? '';
+    bool pinnedOf(dynamic h) {
+      final id = idOf(h);
+      return id.isNotEmpty &&
+          (id == _selectedId || id == connectedId || _favorites.contains(id));
+    }
+
+    // Схлопываем точные дубли имени страны («🇩🇪 Германия» с нескольких
+    // панелей): пользователь выбирает локацию по имени, поэтому четыре
+    // одинаковые карточки — это одна локация и лишний повтор флага. Список
+    // уже по пингу, значит остаётся самая быстрая. Выбранную/подключённую не
+    // прячем. Это только отображение: замеры и выбор работают по всем панелям.
+    final sorted = dedupByName<dynamic>(sortedAll, nameOf: idOf, keep: pinnedOf);
     final split = splitQuietHosts<dynamic>(
       sorted,
       quiet: (h) => _sortRankFor(h).group >= 2,
-      pinned: (h) {
-        final id = idOf(h);
-        return id.isNotEmpty &&
-            (id == _selectedId || id == connectedId || _favorites.contains(id));
-      },
+      pinned: pinnedOf,
     );
     _quietCount = split.hidden.length;
     if (split.hidden.isEmpty) return split.shown;
