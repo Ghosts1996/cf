@@ -2600,6 +2600,10 @@ class TunnelService {
         level: AppLogLevel.warning));
     await _markLocationsDead(remarks);
     final preferred = _lastPreferredHostName;
+    // Вся сессия замолчала при живом интернете — это почерк «белого списка»
+    // оператора: обычные серверы режут, а обходные («Авто БС», «LTE Обход»)
+    // ещё проходят. Пересобираем сессию, поставив обходные локации впереди.
+    _preferBypassNext = true;
     _switchInProgress = true;
     try {
       await disconnect();
@@ -4779,6 +4783,30 @@ class TunnelService {
 
   static const _reachProbeTimeout = Duration(milliseconds: 1500);
 
+  /// Локация, которая создана, чтобы пробивать «белые списки» оператора:
+  /// «Авто БС …», «LTE Обход», «Глушилки». Их ставим первыми, когда обычные
+  /// серверы оператор отрезал (вся сессия замолчала при живом интернете).
+  static final RegExp _bypassWord = RegExp(r'обход|глушил|бел[ыо]|lte',
+      caseSensitive: false);
+  static final RegExp _bypassBS = RegExp(r'(^|[^а-яё])бс([^а-яё]|$)');
+  static bool isBypassLocation(String remark) {
+    final low = remark.toLowerCase();
+    return _bypassWord.hasMatch(low) || _bypassBS.hasMatch(low);
+  }
+
+  /// Насколько медленнее своего чистого сервера допускаем вести по умолчанию,
+  /// лишь бы не на общий «Авто БС …» узел. Общие узлы делят тысячи людей —
+  /// с них Google/Gemini и банки ловят «подозрительный трафик» и капчу, да и
+  /// рвутся такие узлы чаще. 45 мс на глаз неотличимы, репутация адреса важнее.
+  static const int _cleanExitMarginMs = 45;
+
+  /// Следующая сборка сессии должна начаться с обходных локаций (включается
+  /// при пересборке молчащей сессии — когда оператор режет обычные серверы).
+  bool _preferBypassNext = false;
+
+  @visibleForTesting
+  set debugPreferBypassNext(bool v) => _preferBypassNext = v;
+
   static Future<bool> _tcpReachable(String host, int port) async {
     Socket? socket;
     try {
@@ -4884,6 +4912,10 @@ class TunnelService {
   ) async {
     final chosenManually = await LocalPrefs.instance
         .getBool(PrefKeys.serverChosenManually, fallback: false);
+    // Одноразовый приоритет обходных локаций (ставится при пересборке молчащей
+    // сессии — когда оператор режет обычные серверы «белыми списками»).
+    final preferBypass = _preferBypassNext;
+    _preferBypassNext = false;
     // Локации, с которых приложение недавно само уходило, потому что они
     // замолчали. Начинать с такой — значит снова дать пользователю
     // пятнадцать секунд «подключено, а интернета нет», пока самовосстановление
@@ -4940,11 +4972,40 @@ class TunnelService {
           final ta = tier(a.p);
           final tb = tier(b.p);
           if (ta != tb) return ta - tb;
+          // Молчащую сессию пересобираем с обходных локаций впереди: оператор
+          // режет обычные серверы «белым списком», а «Авто БС / LTE Обход»
+          // ходят там, где обычный VLESS уже не проходит.
+          if (preferBypass) {
+            final ba = isBypassLocation(a.p.remark) ? 0 : 1;
+            final bb = isBypassLocation(b.p.remark) ? 0 : 1;
+            if (ba != bb) return ba - bb;
+          }
           final byRank = rank(a.p).compareTo(rank(b.p));
           if (byRank != 0) return byRank;
           return a.i.compareTo(b.i);
         });
       return [for (final e in indexed) e.p];
+    }
+
+    // Авто-режим без ручного выбора ведём по умолчанию на свой чистый сервер,
+    // а не на общий «Авто БС …» узел: даже когда общий чуть быстрее, именно
+    // с него Google/Gemini и банки показывают «подозрительный трафик» и капчу
+    // (их адреса делят тысячи людей). Обходные узлы остаются в сессии и
+    // подхватятся, когда оператор отрежет обычные серверы (preferBypass).
+    List<_ParsedVless> preferCleanHead(List<_ParsedVless> list) {
+      if (preferBypass || list.length < 2) return list;
+      final lead = list.first;
+      if (!isBypassLocation(lead.remark)) return list;
+      final cleanIdx = list.indexWhere(
+          (p) => !isBypassLocation(p.remark) && !isDead(p));
+      if (cleanIdx <= 0) return list;
+      final clean = list[cleanIdx];
+      if (rank(clean) - rank(lead) > _cleanExitMarginMs) return list;
+      unawaited(AppLogService.instance.log(
+          'Веду на свой сервер "${clean.remark}" (${rank(clean)} мс) вместо '
+          'общего "${lead.remark}" (${rank(lead)} мс): с общих узлов Google и '
+          'банки ловят «подозрительный трафик»'));
+      return [clean, ...list.where((p) => !identical(p, clean))];
     }
 
     final preferred = _matchProfile(profiles, preferredHostName);
@@ -4985,10 +5046,11 @@ class TunnelService {
       }
       return sorted;
     }
+    final auto = preferCleanHead(sorted);
     unawaited(AppLogService.instance.log(
         'Локация не выбрана вручную — подключаемся к самой быстрой по '
-        'последнему замеру: "${sorted.first.remark}" (${rank(sorted.first)} мс)'));
-    return sorted;
+        'последнему замеру: "${auto.first.remark}" (${rank(auto.first)} мс)'));
+    return auto;
   }
 
   /// Порядок локаций, в котором подключение будет их перебирать — только для

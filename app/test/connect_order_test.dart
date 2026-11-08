@@ -207,4 +207,65 @@ void main() {
       expect(sw.elapsed, lessThan(const Duration(milliseconds: 800)));
     });
   });
+
+  group('обход «белых списков» и чистый выход', () {
+    // Чехия/Германия — свои серверы; «Авто БС …» — общий обходной узел,
+    // который делят тысячи людей (с него Google/Gemini ловят капчу).
+    const sub =
+        'vless://11111111-1111-1111-1111-111111111111@de.example.com:443'
+            '?type=tcp&security=tls&sni=example.com#🇩🇪 Германия\n'
+        'vless://22222222-2222-2222-2222-222222222222@se.example.com:443'
+            '?type=tcp&security=tls&sni=example.com#🇸🇪 Авто БС Швеция 1 сервер\n'
+        'vless://33333333-3333-3333-3333-333333333333@us.example.com:443'
+            '?type=tcp&security=tls&sni=example.com#🇺🇸 США';
+
+    Future<List<String>> autoOrder(Map<String, int> lat,
+        {bool preferBypass = false}) async {
+      await LocalPrefs.instance
+          .setString(PrefKeys.cachedLatencyJson, jsonEncode(lat));
+      await LocalPrefs.instance.setBool(PrefKeys.serverChosenManually, false);
+      if (preferBypass) TunnelService.instance.debugPreferBypassNext = true;
+      return TunnelService.instance.debugOrderProfilesForConnect(sub, null);
+    }
+
+    test('обходные локации распознаются по названию', () {
+      expect(
+          TunnelService.isBypassLocation('🇸🇪 Авто БС Швеция 1 сервер'), isTrue);
+      expect(
+          TunnelService.isBypassLocation('🇩🇪 Германия • БС (НОВОЕ)'), isTrue);
+      expect(TunnelService.isBypassLocation('LTE Обход'), isTrue);
+      expect(TunnelService.isBypassLocation('🇳🇱 Белые списки №3'), isTrue);
+      expect(TunnelService.isBypassLocation('🇩🇪 Германия'), isFalse);
+      expect(TunnelService.isBypassLocation('🇺🇸 США'), isFalse);
+    });
+
+    test('авто-режим ведёт на свой чистый сервер, когда общий узел быстрее '
+        'лишь ненамного', () async {
+      final result = await autoOrder(
+          {'🇩🇪 Германия': 80, '🇸🇪 Авто БС Швеция 1 сервер': 60, '🇺🇸 США': 200});
+      expect(result.first, '🇩🇪 Германия');
+    });
+
+    test('общий узел намного быстрее своего — остаёмся на нём', () async {
+      final result = await autoOrder(
+          {'🇩🇪 Германия': 200, '🇸🇪 Авто БС Швеция 1 сервер': 60, '🇺🇸 США': 300});
+      expect(result.first, '🇸🇪 Авто БС Швеция 1 сервер');
+    });
+
+    test('пересборка молчащей сессии — обходные локации впереди', () async {
+      final result = await autoOrder(
+          {'🇩🇪 Германия': 80, '🇸🇪 Авто БС Швеция 1 сервер': 200, '🇺🇸 США': 90},
+          preferBypass: true);
+      expect(result.first, '🇸🇪 Авто БС Швеция 1 сервер');
+    });
+
+    test('приоритет обхода одноразовый — следующий порядок обычный', () async {
+      await autoOrder(
+          {'🇩🇪 Германия': 80, '🇸🇪 Авто БС Швеция 1 сервер': 200, '🇺🇸 США': 90},
+          preferBypass: true);
+      final result = await autoOrder(
+          {'🇩🇪 Германия': 80, '🇸🇪 Авто БС Швеция 1 сервер': 200, '🇺🇸 США': 90});
+      expect(result.first, '🇩🇪 Германия');
+    });
+  });
 }
