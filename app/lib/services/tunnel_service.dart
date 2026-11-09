@@ -3918,6 +3918,8 @@ class TunnelService {
         bypassedMap.entries.where((e) => e.value).map((e) => e.key).toList();
     final bypassLan =
         await LocalPrefs.instance.getBool(PrefKeys.bypassLan, fallback: false);
+    final ruDirect =
+        await LocalPrefs.instance.getBool(PrefKeys.ruDirect, fallback: true);
     final muxEnabled = await LocalPrefs.instance
         .getBool(PrefKeys.muxEnabled, fallback: false);
     final muxProtocol =
@@ -4183,6 +4185,7 @@ class TunnelService {
               dnsProvider: dnsProvider,
               customDns: customDns,
               bypassLan: bypassLan,
+              ruDirect: ruDirect,
               muxEnabled: muxEnabled,
               muxProtocol: muxProtocol,
               fakeIpDns: fakeIpDns,
@@ -6623,6 +6626,8 @@ class TunnelService {
     // приложения (PrefKeys.excludeAppFromTunnel).
     List<String> extraExcludedPackages = const <String>[],
     bool bypassLan = false,
+    // Российские сайты — напрямую, мимо туннеля (см. PrefKeys.ruDirect).
+    bool ruDirect = false,
     bool muxEnabled = false,
     String muxProtocol = 'h2mux',
     bool fakeIpDns = false,
@@ -6930,6 +6935,14 @@ class TunnelService {
           'action': 'predefined',
           'rcode': 'NXDOMAIN',
         },
+      // Российские домены резолвит DNS провайдера — он даёт ближайшие
+      // российские адреса, по которым соединение и пойдёт мимо туннеля.
+      if (ruDirect && !proxyOnly && !fakeIpDns)
+        {
+          'domain_suffix': _ruDirectDomains,
+          'action': 'route',
+          'server': 'dns-local',
+        },
       if (fakeIpDns)
         {
           'query_type': ['A', 'AAAA'],
@@ -6956,6 +6969,11 @@ class TunnelService {
       // ресурсов в сети самого VPN-сервера.
       if (bypassLan)
         {'ip_is_private': true, 'action': 'route', 'outbound': 'direct'},
+      // Российские сайты — напрямую, мимо туннеля. Домен ядро знает из DNS
+      // или сниффинга SNI. Российские рекламные домены (mc.yandex.ru и т. п.)
+      // всё равно отклоняются: на уровне DNS — раньше этого правила.
+      if (ruDirect && !proxyOnly)
+        {'domain_suffix': _ruDirectDomains, 'action': 'route', 'outbound': 'direct'},
       // DNS-правила выше ловят не всё: приложение может спросить адрес через
       // DoH/DoT мимо нашего DNS или ходить по IP, а часть Android-телефонов
       // с «Частным DNS» вообще не шлёт обычных DNS-запросов. Домен таких
@@ -7304,6 +7322,7 @@ class TunnelService {
     bool dpiBypass = false,
     bool fakeIpDns = false,
     bool bypassLan = false,
+    bool ruDirect = false,
     bool ipv6Enabled = false,
     bool tlsFragmentSupported = false,
     bool unifiedDelaySupported = false,
@@ -7340,6 +7359,7 @@ class TunnelService {
       dnsProvider: dnsProvider,
       customDns: customDns,
       bypassLan: bypassLan,
+      ruDirect: ruDirect,
       muxEnabled: muxEnabled,
       muxProtocol: muxProtocol,
       fakeIpDns: fakeIpDns,
@@ -7366,6 +7386,18 @@ class TunnelService {
   /// Ядро однажды отвергло конфиг со списком рекламы — в этом запуске
   /// приложения больше его не предлагаем.
   bool _adBlockRuleSetRejected = false;
+
+  /// Домены, которые при «Российские сайты напрямую» идут мимо туннеля.
+  static const _ruDirectDomains = [
+    'ru', 'su', 'xn--p1ai', 'xn--d1acj3b', 'moscow', 'tatar',
+    'yandex.net', 'yandex.com', 'yastatic.net', 'yandex.by', 'yandex.kz',
+    'vk.com', 'vk.me', 'vkuser.net', 'userapi.com', 'vk-cdn.net', 'vkuseraudio.net',
+    'mycdn.me', 'ok.me', 'mail.ru', 'max.ru',
+    'sberbank.com', 'sber.ru', 'tbank.ru', 'tinkoff.ru', 'tinkoff.com', 'vtb.com',
+    'alfabank.com', 'gazprombank.com', 'raiffeisen.ru', 'wildberries.by',
+    'ozon.com', 'ozonusercontent.com', 'avito.st', 'kaspersky.com', 'drweb.com',
+    'gosuslugi.ru', 'nalog.gov.ru', 'mos.ru', 'rutube.ru', 'kinopoisk.ru',
+  ];
 
   static const _adBlockDomains = [
     'doubleclick.net',

@@ -32,6 +32,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
   bool _dnsProtection = true;
   bool _blockAds = true;
   bool _bypassLan = false;
+  bool _ruDirect = true;
   bool _muxEnabled = true;
   String _muxProtocol = 'smux';
   bool _fakeIpDns = true;
@@ -74,6 +75,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
       _prefs.getBool(PrefKeys.bypassLan, fallback: false),
       _prefs.getBool(PrefKeys.muxEnabled, fallback: false),
       _prefs.getBool(PrefKeys.fakeIpDns, fallback: false),
+      _prefs.getBool(PrefKeys.ruDirect, fallback: true),
     ]);
     final savedMuxProtocol = await _prefs.getString(PrefKeys.muxProtocol);
     final savedLogRetentionDays = await AppLogService.instance.getRetentionDays();
@@ -87,6 +89,7 @@ class _SecurityScreenState extends State<SecurityScreen> {
       _bypassLan = results[5] as bool;
       _muxEnabled = results[6] as bool;
       _fakeIpDns = results[7] as bool;
+      _ruDirect = results[8] as bool;
       _muxProtocol = (savedMuxProtocol != null && _muxProtocolLabels.containsKey(savedMuxProtocol))
           ? savedMuxProtocol
           : 'smux';
@@ -179,6 +182,12 @@ class _SecurityScreenState extends State<SecurityScreen> {
     if (v == null) return;
     setState(() => _muxProtocol = v);
     await _prefs.setString(PrefKeys.muxProtocol, v);
+    _notifyReconnectNeeded();
+  }
+
+  Future<void> _setRuDirect(bool v) async {
+    setState(() => _ruDirect = v);
+    await _prefs.setBool(PrefKeys.ruDirect, v);
     _notifyReconnectNeeded();
   }
 
@@ -351,6 +360,15 @@ class _SecurityScreenState extends State<SecurityScreen> {
                             ? tr('Устройства в LAN (роутер, принтер, NAS) доступны напрямую')
                             : tr('LAN тоже идёт через VPN — доступ к сети сервера'),
                         trailing: NeonToggle(value: _bypassLan, onChanged: _setBypassLan),
+                      ),
+                      const Divider(height: 20),
+                      _Row(
+                        icon: Icons.alt_route_rounded,
+                        title: tr('Российские сайты напрямую'),
+                        subtitle: _ruDirect
+                            ? tr('Банки, Госуслуги, .ru и .рф — мимо VPN: быстрее и без блокировок по IP')
+                            : tr('Весь трафик идёт через VPN'),
+                        trailing: NeonToggle(value: _ruDirect, onChanged: _setRuDirect),
                       ),
                       const Divider(height: 20),
                       _Row(
