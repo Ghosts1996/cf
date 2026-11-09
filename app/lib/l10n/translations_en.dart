@@ -215,6 +215,8 @@ const Map<String, String> translationsEn = {
   // ── support_screen.dart ─────────────────────────────────────────────────
   'Не удалось открыть ссылку:': 'Could not open the link:',
   'Сайт': 'Website',
+  'Бот': 'Bot',
+  'Поддержка': 'Support',
   'Бот Telegram': 'Telegram bot',
   'Бот MAX': 'MAX bot',
   'Бот тех. поддержки': 'Support bot',

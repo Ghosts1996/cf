@@ -16,6 +16,7 @@ import '../services/locale_service.dart';
 import '../state/selected_server.dart';
 import 'plans_screen.dart';
 import 'servers_screen.dart';
+import 'support_screen.dart' show websiteUrl, telegramBotUrl, supportBotUrl;
 
 /// Экран подключения.
 ///
@@ -998,6 +999,9 @@ class _ConnectScreenState extends State<ConnectScreen>
               ),
             ],
           ),
+          const SizedBox(height: 10),
+          // Быстрые ссылки: бот (оплата, ключи), сайт и техподдержка — в одно касание с главного экрана.
+          const _QuickLinks(),
           const SizedBox(height: 16),
           if (!hasKey && !connected && !_loadingKey)
             SizedBox(
@@ -1197,4 +1201,68 @@ class _RingPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _RingPainter oldDelegate) =>
       oldDelegate.progress != progress || oldDelegate.color != color || oldDelegate.glow != glow;
+}
+
+/// Три кнопки под статистикой: «Бот», «Сайт», «Поддержка» — открывают Telegram/браузер.
+class _QuickLinks extends StatelessWidget {
+  const _QuickLinks();
+
+  Future<void> _open(BuildContext context, String url) async {
+    var opened = false;
+    try {
+      opened = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    } catch (_) {
+      opened = false;
+    }
+    if (!opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        appSnack('${tr('Не удалось открыть ссылку:')} $url', error: true),
+      );
+    }
+  }
+
+  Widget _btn(BuildContext context, IconData icon, String label, String url) {
+    return Expanded(
+      child: Material(
+        color: AppColors.bgCard,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: () => _open(context, url),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 16, color: AppColors.violetGlow),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(label,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12.5, color: AppColors.text, fontWeight: FontWeight.w600)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        _btn(context, Icons.smart_toy_rounded, tr('Бот'), telegramBotUrl),
+        const SizedBox(width: 10),
+        _btn(context, Icons.language_rounded, tr('Сайт'), websiteUrl),
+        const SizedBox(width: 10),
+        _btn(context, Icons.support_agent_rounded, tr('Поддержка'), supportBotUrl),
+      ],
+    );
+  }
 }
