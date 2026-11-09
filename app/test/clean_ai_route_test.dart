@@ -77,4 +77,14 @@ void main() {
     expect(clean.isNotEmpty, isTrue);
     expect(clean['outbounds'], ['out-0', 'out-1']);
   });
+
+  test('нейросети через приложение: QUIC отклоняется, записи ECH (HTTPS/SVCB) '
+      'не отдаются — сервер видит настоящий домен и пускает через WARP', () {
+    final c = build(uri('own.example.com', 'Чехия', own: true), const []);
+    expect(rules(c).any((r) => r['network'] == 'udp' && r['port'] == 443 && r['action'] == 'reject'),
+        isTrue, reason: 'нет правила против QUIC');
+    final dns = ((c['dns'] as Map)['rules'] as List).cast<Map>();
+    expect(dns.any((r) => (r['query_type'] as List?)?.contains('HTTPS') == true && r['action'] == 'predefined'),
+        isTrue, reason: 'нет правила против ECH');
+  });
 }

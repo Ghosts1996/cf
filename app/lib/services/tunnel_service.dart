@@ -6937,6 +6937,16 @@ class TunnelService {
         },
       // Российские домены резолвит DNS провайдера — он даёт ближайшие
       // российские адреса, по которым соединение и пойдёт мимо туннеля.
+      // HTTPS/SVCB-записи (типы 65/64) отвечаем пустыми: из них браузер берёт
+      // ключ ECH и прячет настоящий домен сайта. Тогда сервер VPN видит не
+      // claude.ai / chatgpt.com, а «cloudflare-ech.com», и не пускает нейросети
+      // через «чистый» выход (WARP) — сайт отвечает «недоступно в вашей
+      // стране». В Happ (ядро Xray) таких записей нет — поэтому там работало.
+      {
+        'query_type': ['HTTPS', 'SVCB'],
+        'action': 'predefined',
+        'rcode': 'NOERROR',
+      },
       if (ruDirect && !proxyOnly && !fakeIpDns)
         {
           'domain_suffix': _ruDirectDomains,
@@ -6958,6 +6968,12 @@ class TunnelService {
       // правил ниже — сниффинг SNI из TLS ClientHello.
       {'action': 'sniff'},
       {'protocol': 'dns', 'action': 'hijack-dns'},
+      // QUIC (HTTP/3, UDP 443) отклоняем — браузер и приложения сразу
+      // переходят на обычный HTTPS по TCP, как в Happ (ядро Xray делает так же
+      // с VLESS Vision). По TCP сервер надёжно видит домен и пускает Gemini,
+      // ChatGPT и Claude через «чистый» выход; QUIC через Vision-серверы не
+      // проходит, и Google-сервисы подвисали в ожидании.
+      {'network': 'udp', 'port': 443, 'action': 'reject'},
       // geoip:'private' здесь использовать нельзя: база GeoIP объявлена
       // устаревшей в sing-box 1.8.0 и удалена в 1.12.0 — отсюда ошибка
       // "geoip database is deprecated" и разрыв соединения на всех серверах.
