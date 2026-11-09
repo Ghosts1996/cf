@@ -68,14 +68,14 @@ void main() {
     expect(cleanAt < fragAt, isTrue, reason: 'clean-ai должно идти раньше tls_fragment');
   });
 
-  test('все локации — свои: Google всё равно на clean-ai из всех своих', () {
+  test('выбран свой сервер — нейросети идут через него же (у него WARP), без '
+      'отдельной группы: иначе до замера группа брала первый, возможно недоступный сервер', () {
     final c = build(
       uri('own1.example.com', 'Германия', own: true),
       [uri('own2.example.com', 'Чехия', own: true)],
     );
-    final clean = outs(c).firstWhere((o) => o['tag'] == 'clean-ai', orElse: () => {});
-    expect(clean.isNotEmpty, isTrue);
-    expect(clean['outbounds'], ['out-0', 'out-1']);
+    expect(outs(c).any((o) => o['tag'] == 'clean-ai'), isFalse);
+    expect(rules(c).any((r) => r['outbound'] == 'clean-ai'), isFalse);
   });
 
   test('нейросети через приложение: QUIC отклоняется, записи ECH (HTTPS/SVCB) '
