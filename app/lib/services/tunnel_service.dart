@@ -7435,10 +7435,7 @@ class TunnelService {
         // агентом Dart часть панелей не распознаёт клиента как подписочный.
         final res = await http.get(
           Uri.parse(source),
-          headers: const {
-            'User-Agent': 'VPNonLine/1.0 (sing-box-client; compatible)',
-            'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
-          },
+          headers: await _subscriptionHeaders(),
         ).timeout(Duration(seconds: 12));
         if (res.statusCode >= 400) {
           throw TunnelException(
@@ -7514,6 +7511,20 @@ class TunnelService {
     } catch (_) {}
   }
 
+  /// Заголовки запроса подписки. x-hwid — постоянный случайный id установки
+  /// (как у Happ/v2RayTun): сервер по нему ограничивает пробный период одним
+  /// на устройство. Ошибка чтения id не мешает загрузке подписки.
+  Future<Map<String, String>> _subscriptionHeaders() async {
+    final h = <String, String>{
+      'User-Agent': 'VPNonLine/1.0 (sing-box-client; compatible)',
+      'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
+    };
+    try {
+      h['x-hwid'] = await LocalPrefs.instance.installId();
+    } catch (_) {}
+    return h;
+  }
+
   /// Тихо обновляет сохранённую копию подписки. Ошибки не наружу: копия
   /// остаётся прежней, следующее подключение возьмёт её же.
   Future<void> _refreshSubscriptionInBackground(String source) async {
@@ -7522,10 +7533,7 @@ class TunnelService {
     try {
       final res = await http.get(
         Uri.parse(source),
-        headers: const {
-          'User-Agent': 'VPNonLine/1.0 (sing-box-client; compatible)',
-          'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
-        },
+        headers: await _subscriptionHeaders(),
       ).timeout(const Duration(seconds: 20));
       if (res.statusCode >= 400) return;
       final profiles = _parseSubscriptionBody(res.body);

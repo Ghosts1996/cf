@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -50,6 +51,20 @@ class LocalPrefs {
   Future<void> setInt(String key, int value) async {
     final sp = await _sp;
     await sp.setInt(key, value);
+  }
+
+  // ── постоянный идентификатор установки (заголовок x-hwid в запросах подписки) ──
+  /// Случайный, не содержит данных об устройстве; сервер VPN onLine по нему
+  /// видит, что пробный период с этого устройства уже брали (один на человека).
+  Future<String> installId() async {
+    final sp = await _sp;
+    var id = sp.getString('install_id');
+    if (id == null || id.length < 16) {
+      final r = Random.secure();
+      id = List.generate(16, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+      await sp.setString('install_id', id);
+    }
+    return id;
   }
 
   // ── generic string ────────────────────────────────────────────────────
