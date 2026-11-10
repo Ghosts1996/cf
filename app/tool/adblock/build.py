@@ -35,6 +35,8 @@ appsflyersdk.com adjust.com adjust.world mintegral.com mintegral.net
 rayjump.com mtgglobals.com pangle.io pangleglobal.com inmobi.com vungle.com
 liftoff.io chartboost.com fyber.com moloco.com bidmachine.io adsbigo.com
 startappservice.com adriver.ru buzzoola.com otm-r.com adhigh.net hybrid.ai
+mediasniper.ru smi2.ru smi2.net rubiconproject.com springserve.com aniview.com
+connatix.com videonow.ru
 '''.split()
 
 ALLOW = '''

@@ -7005,8 +7005,6 @@ class TunnelService {
       // Российские сайты — напрямую, мимо туннеля. Домен ядро знает из DNS
       // или сниффинга SNI. Российские рекламные домены (mc.yandex.ru и т. п.)
       // всё равно отклоняются: на уровне DNS — раньше этого правила.
-      if (ruDirect && !proxyOnly)
-        {'domain_suffix': _ruDirectDomains, 'action': 'route', 'outbound': 'direct'},
       // DNS-правила выше ловят не всё: приложение может спросить адрес через
       // DoH/DoT мимо нашего DNS или ходить по IP, а часть Android-телефонов
       // с «Частным DNS» вообще не шлёт обычных DNS-запросов. Домен таких
@@ -7017,6 +7015,12 @@ class TunnelService {
       if (blockAds) {'domain_suffix': _adBlockDomains, 'action': 'reject'},
       if (adBlockRuleSet)
         {'rule_set': [_adBlockRuleSetTag], 'action': 'reject'},
+      // Российские сайты напрямую — ПОСЛЕ блокировки рекламы. Раньше правило
+      // стояло выше, и при «Частном DNS» / DoH в браузере (наш DNS не
+      // спрашивают) реклама с .ru-доменов (adfox, adriver, an.yandex.ru —
+      // видеореклама в плеерах фильмов) уходила напрямую, мимо блокировки.
+      if (ruDirect && !proxyOnly)
+        {'domain_suffix': _ruDirectDomains, 'action': 'route', 'outbound': 'direct'},
       // Запасной вариант для ядра без фрагментации на outbound'е: правило
       // маршрутизации с булевым tls_fragment. Оно рвёт рукопожатия внутри
       // туннеля, а не наше собственное, и от блокировки по ClientHello не
@@ -7468,6 +7472,18 @@ class TunnelService {
     'amplitude.com',
     'appsflyer.com',
     'adjust.com',
+    // Видеореклама (VAST/преролы в плеерах фильмов и сериалов).
+    'imasdk.googleapis.com', 'adfox.ru', 'yandexadexchange.net',
+    'ads.mobile.yandex.net', 'adsdk.yandex.ru', 'ad.mail.ru', 'ads.vk.com',
+    'ad.vk.com', 'target.my.com', 'r.mradx.net', 'adriver.ru',
+    'betweendigital.com', 'buzzoola.com', 'otm-r.com', 'hybrid.ai',
+    'adhigh.net', 'videonow.ru', 'mediasniper.ru', 'smi2.ru', 'smi2.net',
+    'ssp.rambler.ru', 'rubiconproject.com', 'pubmatic.com', 'adnxs.com',
+    'spotxchange.com', 'springserve.com', 'aniview.com', 'connatix.com',
+    'teads.tv', 'vidazoo.com', 'adtelligent.com', 'innovid.com', 'moatads.com',
+    // Всплывающая реклама на сайтах с фильмами.
+    'exoclick.com', 'exosrv.com', 'propellerads.com', 'propellerclick.com',
+    'popads.net', 'clickadu.com', 'hilltopads.net', 'adsterra.com',
   ];
 
   Future<List<_ParsedVless>> _loadProfiles(String connectionString,

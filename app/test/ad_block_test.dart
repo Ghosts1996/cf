@@ -97,6 +97,23 @@ void main() {
       }
     });
 
+    test('реклама с .ru блокируется раньше, чем .ru уходит напрямую', () {
+      final c = _config();
+      final routeRules =
+          ((c['route'] as Map)['rules'] as List).cast<Map>();
+      final adIdx = routeRules.indexWhere((r) => r['rule_set'] != null);
+      final ruIdx = routeRules.indexWhere((r) =>
+          r['outbound'] == 'direct' &&
+          (r['domain_suffix'] as List?)?.contains('ru') == true);
+      expect(adIdx, greaterThanOrEqualTo(0));
+      if (ruIdx >= 0) expect(adIdx, lessThan(ruIdx));
+      expect(
+          routeRules.any((r) =>
+              r['action'] == 'reject' &&
+              (r['domain_suffix'] as List?)?.contains('adfox.ru') == true),
+          isTrue);
+    });
+
     test('без файла списка — короткий встроенный, без rule_set', () {
       final c = _config(path: null);
       final route = c['route'] as Map<String, dynamic>;
