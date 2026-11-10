@@ -33,6 +33,10 @@
          сторож состояния сверяет с ней экран «Подключено». Разрешение и так
          приходит из connectivity_plus, здесь объявлено явно. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Просьба не усыплять приложение (Doze / «оптимизация батареи»): иначе
+         Android и прошивки Xiaomi/Samsung/Huawei через несколько часов-дней
+         гасят VPN в фоне. Так же делают Happ и Hiddify. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <application
         android:label="VPNonLine"
         android:name="${applicationName}"

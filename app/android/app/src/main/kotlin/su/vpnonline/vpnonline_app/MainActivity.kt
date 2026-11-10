@@ -157,6 +157,31 @@ class MainActivity : FlutterActivity() {
                     // VPN перестанет подниматься.
                     "getPackageName" -> result.success(packageName)
                     "isVpnActive" -> result.success(isVpnActive())
+                    // Не усыпляет ли Android приложение в фоне (Doze).
+                    "isIgnoringBatteryOptimizations" -> result.success(
+                        Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                            (getSystemService(POWER_SERVICE) as PowerManager)
+                                .isIgnoringBatteryOptimizations(packageName)
+                    )
+                    // Системный диалог «Разрешить работу в фоне без ограничений?».
+                    "requestIgnoreBatteryOptimizations" -> {
+                        var ok = false
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            try {
+                                startActivity(
+                                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                        .setData(Uri.parse("package:$packageName"))
+                                )
+                                ok = true
+                            } catch (_: Exception) {
+                                try {
+                                    startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                                    ok = true
+                                } catch (_: Exception) {}
+                            }
+                        }
+                        result.success(ok)
+                    }
                     "hasVpnPermission" -> result.success(hasVpnPermission())
                     "updateVpnNotification" -> {
                         updateVpnNotification(call)

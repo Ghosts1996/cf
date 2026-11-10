@@ -225,6 +225,8 @@ class PrefKeys {
   /// Показывает ли телефон приложению его собственный VPN-интерфейс (видели
   /// хоть раз). См. TunnelService._vpnInterfaceTrusted.
   static const vpnInterfaceVisible = 'vpn.interface_visible';
+  /// Когда последний раз просили не усыплять приложение (мс с эпохи).
+  static const batteryAskedAt = 'vpn.battery_asked_at';
   static const splitTunnelBypass = 'split_tunnel.bypassed_packages';
   // 'exclude' — выбранные приложения идут в обход VPN, остальные через
   // туннель; 'include' — через VPN идут только выбранные. Читается в

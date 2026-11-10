@@ -832,6 +832,7 @@ class TunnelService {
       mapped = TunnelConnState.connecting;
     }
     _restartStateWatchdog(mapped == TunnelConnState.connected);
+    if (mapped == TunnelConnState.connected) unawaited(_askBatteryExemption());
 
     if (!_restoringConnectStartedAt) {
       if (mapped == TunnelConnState.connected && _connectStartedAt == null) {
@@ -1478,6 +1479,36 @@ class TunnelService {
       // Канал не ответил — не повод задерживать подключение.
     }
     return _fallbackSelfPackage;
+  }
+
+  /// Просит Android не усыплять приложение в фоне. Без этого режим Doze и
+  /// «умная экономия» Xiaomi/Samsung/Huawei через часы или дни гасят VPN —
+  /// главная причина обрывов при долгой работе. Спрашиваем после успешного
+  /// подключения, не чаще раза в 3 дня, пока пользователь не разрешит.
+  bool _batteryAskInFlight = false;
+  Future<void> _askBatteryExemption() async {
+    if (!Platform.isAndroid || _batteryAskInFlight || !_appInForeground) return;
+    _batteryAskInFlight = true;
+    try {
+      final ok = await _nativeStatsChannel
+          .invokeMethod<bool>('isIgnoringBatteryOptimizations')
+          .timeout(const Duration(seconds: 2));
+      if (ok != false) return;
+      final last = await LocalPrefs.instance.getInt(PrefKeys.batteryAskedAt);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - last < const Duration(days: 3).inMilliseconds) {
+        return;
+      }
+      await LocalPrefs.instance.setInt(PrefKeys.batteryAskedAt, now);
+      // Дать экрану «Подключено» показаться, а не открывать диалог поверх
+      // системного запроса VPN.
+      await Future<void>.delayed(const Duration(seconds: 2));
+      await _nativeStatsChannel.invokeMethod<bool>('requestIgnoreBatteryOptimizations');
+    } catch (_) {
+      // старая нативная часть или прошивка без диалога — не страшно
+    } finally {
+      _batteryAskInFlight = false;
+    }
   }
 
   /// Включает сторожа, пока на экране «Подключено», и гасит его в остальное
