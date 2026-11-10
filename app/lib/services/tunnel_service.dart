@@ -6875,6 +6875,14 @@ class TunnelService {
         ? customDns.trim()
         : (dnsProviders[dnsProvider] ?? '1.1.1.1');
 
+    // Нейросети — через Fake IP, как в Happ (там destOverride: fakedns).
+    // Тогда ядро отдаёт серверу VPN не IP-адрес, а сам домен (claude.ai,
+    // chatgpt.com…), и сервер гарантированно ведёт его через чистый выход
+    // (WARP) — даже если приложение шифрует имя сайта (ECH) или резолвит
+    // адрес мимо нас. С обычным DNS сервер видел только IP и имя из
+    // рукопожатия, и приложения ИИ писали «нет интернета» / «недоступно в
+    // вашей стране», а в Happ на том же сервере всё работало.
+    final aiFakeIp = !proxyOnly;
     final dnsServers = <Map<String, dynamic>>[
       {
         ..._dnsServerOptions(remoteDnsAddress),
@@ -6910,7 +6918,7 @@ class TunnelService {
       // диапазонов мгновенно, без запроса наружу, а настоящий домен ядро
       // подставляет обратно по своей таблице. Таблица обязана переживать
       // перезапуск ядра — см. experimental.cache_file ниже.
-      if (fakeIpDns)
+      if (fakeIpDns || aiFakeIp)
         {
           'type': 'fakeip',
           'tag': 'dns-fake',
@@ -6929,13 +6937,12 @@ class TunnelService {
       // ChatGPT при старте пишут «нет подключения к интернету», а в Happ
       // (без блокировки рекламы) всё открывается. Только A/AAAA: записи
       // HTTPS (ключи ECH) по-прежнему пустые — см. правило ниже.
-      if (blockAds)
-        {
-          'domain_suffix': _adAllowDomains,
-          'query_type': ['A', 'AAAA'],
-          'action': 'route',
-          'server': fakeIpDns ? 'dns-fake' : dnsFinalServer,
-        },
+      {
+        'domain_suffix': _adAllowDomains,
+        'query_type': ['A', 'AAAA'],
+        'action': 'route',
+        'server': (fakeIpDns || aiFakeIp) ? 'dns-fake' : dnsFinalServer,
+      },
       // Рекламный домен не резолвится вовсе: приложение сразу получает «нет
       // такого домена» и не ждёт соединения, которое всё равно будет
       // отклонено. Стоит первым — раньше Fake IP, иначе рекламный домен успел
@@ -7294,7 +7301,7 @@ class TunnelService {
       'experimental': {
         'cache_file': {
           'enabled': true,
-          if (fakeIpDns) 'store_fakeip': true,
+          if (fakeIpDns || aiFakeIp) 'store_fakeip': true,
           // Ядро запоминает выбранного участника группы `proxy` в этом файле
           // и при следующем старте восстанавливает его, не глядя на
           // `default`. А `out-3` в новой сессии — уже другой сервер: порядок

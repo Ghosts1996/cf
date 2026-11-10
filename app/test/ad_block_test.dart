@@ -114,6 +114,25 @@ void main() {
           isTrue);
     });
 
+    test('нейросети резолвятся через Fake IP — серверу уходит домен, как в Happ',
+        () {
+      for (final blockAds in [true, false]) {
+        final c = _config(blockAds: blockAds);
+        final dns = c['dns'] as Map;
+        expect((dns['servers'] as List).any((s) => (s as Map)['type'] == 'fakeip'),
+            isTrue);
+        final rule = (dns['rules'] as List).cast<Map>().firstWhere((r) =>
+            (r['domain_suffix'] as List?)?.contains('claude.ai') == true);
+        expect(rule['server'], 'dns-fake');
+        expect(rule['query_type'], ['A', 'AAAA']);
+      }
+      // В режиме прокси (без TUN) Fake IP не нужен: приложения и так шлют домен.
+      final p = _config(proxyOnly: true);
+      final rule = ((p['dns'] as Map)['rules'] as List).cast<Map>().firstWhere(
+          (r) => (r['domain_suffix'] as List?)?.contains('claude.ai') == true);
+      expect(rule['server'], isNot('dns-fake'));
+    });
+
     test('без файла списка — короткий встроенный, без rule_set', () {
       final c = _config(path: null);
       final route = c['route'] as Map<String, dynamic>;
