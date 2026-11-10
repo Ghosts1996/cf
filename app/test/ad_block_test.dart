@@ -141,7 +141,8 @@ void main() {
       expect(
           routeRules.any((r) =>
               (r as Map)['action'] == 'reject' &&
-              (r['domain_suffix'] as List).contains('doubleclick.net')),
+              (r['domain_suffix'] as List?)?.contains('doubleclick.net') ==
+                  true),
           isTrue);
       final dnsRules = (c['dns'] as Map)['rules'] as List;
       expect(dnsRules.any((r) => (r as Map)['rule_set'] != null), isFalse);
@@ -152,12 +153,17 @@ void main() {
       final c = _config(blockAds: false);
       final route = c['route'] as Map<String, dynamic>;
       expect(route.containsKey('rule_set'), isFalse);
+      // Отклонение QUIC (UDP 443) — не реклама, оно остаётся.
       expect(
-          (route['rules'] as List)
-              .any((r) => (r as Map)['action'] == 'reject'),
+          (route['rules'] as List).any((r) =>
+              (r as Map)['action'] == 'reject' &&
+              (r['domain_suffix'] != null || r['rule_set'] != null)),
           isFalse);
       final dns = c['dns'] as Map;
-      expect(dns['rules'], isNull);
+      expect(
+          ((dns['rules'] as List?) ?? const [])
+              .any((r) => (r as Map)['rcode'] == 'NXDOMAIN'),
+          isFalse);
     });
 
     test('конфиги для проверки настоящим ядром', () {
