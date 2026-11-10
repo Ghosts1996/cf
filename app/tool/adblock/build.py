@@ -46,6 +46,10 @@ fcm.googleapis.com firebaseinstallations.googleapis.com play.googleapis.com
 android.googleapis.com google.com youtube.com googlevideo.com ytimg.com
 yandex.ru ya.ru yandex.net vk.com userapi.com mail.ru my.com telegram.org
 t.me whatsapp.net whatsapp.com gosuslugi.ru sberbank.ru tbank.ru tinkoff.ru
+anthropic.com claude.ai claude.com openai.com chatgpt.com oaistatic.com
+oaiusercontent.com statsigapi.net statsigcdn.com statsig.com featureassets.org
+prodregistryv2.org featuregates.org sentry.io segment.io segment.com
+launchdarkly.com intercom.com intercom.io intercomcdn.com perplexity.ai
 '''.split()
 
 

@@ -6918,7 +6918,24 @@ class TunnelService {
           'inet6_range': 'fc00::/18',
         },
     ];
+    // Сервер, куда уходят «обычные» DNS-запросы (тот же, что 'final' ниже).
+    final dnsFinalServer = dnsProtection
+        ? 'dns-remote'
+        : (multiDnsSupported ? 'dns-direct-multi' : 'dns-direct');
     final dnsRules = <Map<String, dynamic>>[
+      // Нейросети и их служебные сервисы — никогда не под блокировкой рекламы.
+      // Большой список (HaGeZi) режет statsigapi.net, sentry.io,
+      // metrics.anthropic.com, cdn.segment.io: без них приложения Claude и
+      // ChatGPT при старте пишут «нет подключения к интернету», а в Happ
+      // (без блокировки рекламы) всё открывается. Только A/AAAA: записи
+      // HTTPS (ключи ECH) по-прежнему пустые — см. правило ниже.
+      if (blockAds)
+        {
+          'domain_suffix': _adAllowDomains,
+          'query_type': ['A', 'AAAA'],
+          'action': 'route',
+          'server': fakeIpDns ? 'dns-fake' : dnsFinalServer,
+        },
       // Рекламный домен не резолвится вовсе: приложение сразу получает «нет
       // такого домена» и не ждёт соединения, которое всё равно будет
       // отклонено. Стоит первым — раньше Fake IP, иначе рекламный домен успел
@@ -6994,6 +7011,9 @@ class TunnelService {
       // DoH/DoT мимо нашего DNS или ходить по IP, а часть Android-телефонов
       // с «Частным DNS» вообще не шлёт обычных DNS-запросов. Домен таких
       // соединений ядро узнаёт сниффингом (SNI) и отклоняет здесь.
+      // Нейросети и их служебные сервисы — мимо блокировки рекламы (см. DNS выше).
+      if (blockAds)
+        {'domain_suffix': _adAllowDomains, 'action': 'route', 'outbound': 'proxy'},
       if (blockAds) {'domain_suffix': _adBlockDomains, 'action': 'reject'},
       if (adBlockRuleSet)
         {'rule_set': [_adBlockRuleSetTag], 'action': 'reject'},
@@ -7084,9 +7104,11 @@ class TunnelService {
         'action': 'route',
         'outbound': _cleanAiTag,
       };
-      // Перед широким правилом tls_fragment (оно гонит весь TCP в proxy),
+      // Перед широким правилом tls_fragment (оно гонит весь TCP в proxy) и перед
+      // правилом «нейросети мимо блокировки рекламы» (оно ведёт в proxy),
       // иначе Google ушёл бы в выбранную локацию раньше, чем на наш сервер.
-      final at = routeRules.indexWhere((r) => r['tls_fragment'] == true);
+      final allowAt = routeRules.indexWhere((r) => identical(r['domain_suffix'], _adAllowDomains));
+      final at = allowAt >= 0 ? allowAt : routeRules.indexWhere((r) => r['tls_fragment'] == true);
       if (at >= 0) {
         routeRules.insert(at, rule);
       } else {
@@ -7418,6 +7440,18 @@ class TunnelService {
     'alfabank.com', 'gazprombank.com', 'raiffeisen.ru', 'wildberries.by',
     'ozon.com', 'ozonusercontent.com', 'avito.st', 'kaspersky.com', 'drweb.com',
     'gosuslugi.ru', 'nalog.gov.ru', 'mos.ru', 'rutube.ru', 'kinopoisk.ru',
+  ];
+
+  /// Нейросети и SDK, без которых их приложения не стартуют (флаги функций,
+  /// вход, поддержка, отчёты об ошибках). Списки рекламы их иногда режут.
+  static const _adAllowDomains = [
+    'anthropic.com', 'claude.ai', 'claude.com', 'claudeusercontent.com',
+    'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com',
+    'statsigapi.net', 'statsigcdn.com', 'statsig.com', 'featureassets.org',
+    'prodregistryv2.org', 'featuregates.org', 'sentry.io', 'segment.io',
+    'segment.com', 'launchdarkly.com', 'launchdarkly.us', 'intercom.com',
+    'intercom.io', 'intercomcdn.com', 'auth0.com', 'perplexity.ai', 'grok.com',
+    'x.ai', 'gemini.google.com', 'deepseek.com',
   ];
 
   static const _adBlockDomains = [

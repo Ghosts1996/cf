@@ -44,8 +44,8 @@ void main() {
       // Реклама — раньше Fake IP: иначе рекламный домен получил бы служебный
       // адрес и приложение пошло бы соединяться.
       final adIdx = dnsRules.indexWhere((r) => (r as Map)['rule_set'] != null);
-      final fakeIdx =
-          dnsRules.indexWhere((r) => (r as Map)['server'] == 'dns-fake');
+      final fakeIdx = dnsRules.indexWhere((r) =>
+          (r as Map)['server'] == 'dns-fake' && r['domain_suffix'] == null);
       expect(adIdx, greaterThanOrEqualTo(0));
       expect(fakeIdx, greaterThan(adIdx));
       expect(dnsRules[adIdx], {
@@ -67,6 +67,34 @@ void main() {
       final rejectIdx =
           routeRules.indexWhere((r) => (r as Map)['rule_set'] != null);
       expect(sniffIdx, lessThan(rejectIdx));
+    });
+
+    test('нейросети и их служебные сервисы не блокируются', () {
+      final c = _config();
+      final dnsRules = ((c['dns'] as Map)['rules'] as List).cast<Map>();
+      final routeRules =
+          ((c['route'] as Map)['rules'] as List).cast<Map>();
+      for (final d in [
+        'statsigapi.net',
+        'sentry.io',
+        'anthropic.com',
+        'chatgpt.com',
+        'segment.io',
+      ]) {
+        // Первое DNS-правило с этим доменом — разрешающее, раньше блокировки.
+        final allowDns = dnsRules.indexWhere((r) =>
+            (r['domain_suffix'] as List?)?.contains(d) == true &&
+            r['action'] == 'route');
+        final adDns = dnsRules.indexWhere((r) => r['rule_set'] != null);
+        expect(allowDns, greaterThanOrEqualTo(0), reason: d);
+        expect(allowDns, lessThan(adDns), reason: d);
+        final allowRoute = routeRules.indexWhere((r) =>
+            (r['domain_suffix'] as List?)?.contains(d) == true &&
+            r['action'] == 'route');
+        final adRoute = routeRules.indexWhere((r) => r['rule_set'] != null);
+        expect(allowRoute, greaterThanOrEqualTo(0), reason: d);
+        expect(allowRoute, lessThan(adRoute), reason: d);
+      }
     });
 
     test('без файла списка — короткий встроенный, без rule_set', () {
