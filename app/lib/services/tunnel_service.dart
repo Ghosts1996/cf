@@ -2106,6 +2106,15 @@ class TunnelService {
     _latencyProbeSkips = 0;
     _latencyProbeRunning = true;
     _lastLatencyProbeAt = DateTime.now();
+    // Замер живёт до двадцати секунд — дольше, чем сессия, если человек за
+    // это время выбрал локацию не из неё: туннель пересобирается с другим
+    // порядком outbound'ов. Журнал 11.11: старый замер дособирал ответы уже
+    // нового ядра под именами прежнего списка, записывал их как замер новой
+    // сессии — и все её локации без числа экран подписывал «не отвечает».
+    // Остальные места, где меряется сессия, сверяют её номер; здесь проверки
+    // не было.
+    final generation = _sessionGeneration;
+    bool stillOurs() => _sessionGeneration == generation && isConnected;
     try {
       // Один прогон за цикл. Раньше их было два подряд — ради устойчивости
       // числа на скачущей мобильной сети. С двумя десятками локаций в подписке
@@ -2120,12 +2129,16 @@ class TunnelService {
           // Число — на экран сразу, как ядро его отдало: прогон длится до 20
           // секунд, и ждать его конца, глядя на «проверяю…», незачем.
           onResult: (remark, delay) {
+            if (!stillOurs()) return;
             final samples = _latencySamples[remark];
             final best = samples == null || samples.isEmpty
                 ? delay
                 : samples.fold(delay, (a, b) => a < b ? a : b);
             latencyByRemark.value = {...latencyByRemark.value, remark: best};
           });
+      // Сессия за время замера сменилась или кончилась: числа относятся к
+      // прежнему списку локаций, к новой их прикладывать нельзя.
+      if (!stillOurs()) return;
 
       // Промахи считаем, только если ответил хоть кто-то: иначе это сеть
       // телефона, а не серверы.
@@ -2823,7 +2836,8 @@ class TunnelService {
   }) async {
     final remarks = _sessionOutboundRemarks;
     if (remarks.isEmpty || !isConnected) return const <String, int>{};
-    return _collectGroupDelays(remarks, timeout: timeout, onResult: onResult);
+    return _collectGroupDelays(remarks,
+        timeout: timeout, onResult: onResult, sessionBound: true);
   }
 
   /// Сам сбор задержек по группе `latency`: просит ядро прогнать URLTest и
@@ -2844,8 +2858,14 @@ class TunnelService {
     // прежние двенадцать секунд, и локации из неё объявлялись неработающими,
     // хотя ядро их даже не дотестировало.
     Duration? timeout,
+    // Сбор идёт по боевой сессии: [order] — её список локаций. Сессия
+    // сменилась или кончилась — теги `out-N` у ядра означают уже другие
+    // серверы, и слушать его дальше под прежними именами нельзя.
+    bool sessionBound = false,
   }) async {
     if (order.isEmpty) return const <String, int>{};
+    final generation = _sessionGeneration;
+    bool sessionGone() => sessionBound && _sessionGeneration != generation;
     // Окно считаем от числа узлов, а не берём фиксированным. Ядро проверяет
     // участников пачками по десять и на каждую даёт до пяти секунд; на трёх
     // десятках нод, которые сейчас приходят в подписке, прежние 25 секунд
@@ -2891,7 +2911,7 @@ class TunnelService {
 
     try {
       sub = _client.outboundGroupStream.listen((groups) {
-        if (groups is! List) return;
+        if (groups is! List || sessionGone()) return;
         for (final group in groups) {
           // Нас интересует только наша группа, а не любые другие, которые
           // ядро может отдавать.
@@ -2971,7 +2991,9 @@ class TunnelService {
       // отвечает».
       final cancellable = _nativeOwner == 'probe';
       cancelWatch = Timer.periodic(const Duration(milliseconds: 200), (t) {
-        if (cancellable && _probeCancelRequested) {
+        // Сессия кончилась — досиживать окно незачем: пока замер числится
+        // идущим, новая сессия свой первый замер не начнёт.
+        if ((cancellable && _probeCancelRequested) || sessionGone()) {
           t.cancel();
           finish();
         }
@@ -4817,6 +4839,17 @@ class TunnelService {
 
   static const _reachProbeTimeout = Duration(milliseconds: 1500);
 
+  /// Локация ходит только по UDP (Hysteria 2 — это QUIC). TCP-стук в её порт
+  /// ничего не говорит: порт слушает UDP, и TCP туда либо молчит, либо
+  /// попадает в соседний сервис. Журнал 11.11: «Чехия · Hysteria 2» попала в
+  /// «не открываются из этой сети» при открытых TCP-адресах того же сервера.
+  static bool _isUdpOnly(_ParsedVless p) => p.protocol == 'hysteria2';
+
+  /// Адрес локации для проверки доступности. У UDP-локации свой ключ: порт
+  /// 443/udp и 443/tcp одного сервера — разные двери.
+  static String _endpointKey(_ParsedVless p) =>
+      '${_isUdpOnly(p) ? 'udp:' : ''}${p.host}:${p.port}';
+
   /// Локация, которая создана, чтобы пробивать «белые списки» оператора:
   /// «Авто БС …», «LTE Обход», «Глушилки». Их ставим первыми, когда обычные
   /// серверы оператор отрезал (вся сессия замолчала при живом интернете).
@@ -4873,12 +4906,24 @@ class TunnelService {
   /// а полторы секунды уходят только на действительно закрытые адреса).
   Future<Set<String>> _unreachableEndpoints(
       List<_ParsedVless> profiles, List<_ParsedVless> mustKnow) async {
-    String key(_ParsedVless p) => '${p.host}:${p.port}';
-    final keys = <String>{for (final p in profiles) key(p)};
+    String key(_ParsedVless p) => _endpointKey(p);
+    // Стучимся только в TCP-адреса. Локацию поверх UDP судим по остальным
+    // адресам её сервера (см. _isUdpOnly).
+    final tcpKeysByHost = <String, Set<String>>{};
+    for (final p in profiles) {
+      if (_isUdpOnly(p)) continue;
+      tcpKeysByHost.putIfAbsent(p.host, () => <String>{}).add(key(p));
+    }
+    final keys = <String>{
+      for (final hostKeys in tcpKeysByHost.values) ...hostKeys,
+    };
     if (keys.length < 2) return const {};
     final result = <String, bool>{};
     final done = Completer<void>();
-    final need = {for (final p in mustKnow) key(p)};
+    final need = <String>{
+      for (final p in mustKnow)
+        if (_isUdpOnly(p)) ...?tcpKeysByHost[p.host] else key(p),
+    };
     void check() {
       if (done.isCompleted) return;
       if (result.length == keys.length) {
@@ -4920,6 +4965,15 @@ class TunnelService {
     if (open == 0) return const {};
     final pendingAsClosed = need.where((k) => !result.containsKey(k));
     closed.addAll(pendingAsClosed);
+    // Локация поверх UDP закрыта, только если у её сервера не открылся ни
+    // один TCP-адрес — тогда из этой сети не виден сам сервер. TCP-адресов
+    // у сервера нет вовсе — судить не по чему, порядок не трогаем.
+    closed.addAll([
+      for (final p in profiles)
+        if (_isUdpOnly(p) &&
+            (tcpKeysByHost[p.host]?.every(closed.contains) ?? false))
+          key(p),
+    ]);
     if (closed.isNotEmpty) {
       final names = [
         for (final p in profiles)
@@ -5051,7 +5105,7 @@ class TunnelService {
       ...draft.take(_maxSessionAlternates + 1),
     ];
     final closedKeys = await _unreachableEndpoints(profiles, head);
-    bool isClosed(_ParsedVless p) => closedKeys.contains('${p.host}:${p.port}');
+    bool isClosed(_ParsedVless p) => closedKeys.contains(_endpointKey(p));
     final sorted = closedKeys.isEmpty ? draft : sortBy(isClosed);
 
     if (chosenManually && preferred != null) {
