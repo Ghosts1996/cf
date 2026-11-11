@@ -704,6 +704,52 @@ void main() {
     expect(tunnel.sessionMeasured, isFalse);
   }, timeout: const Timeout(Duration(seconds: 60)));
 
+  test('замер прошлой сессии не выдаёт свои числа за новую: после смены '
+      'локации список не подписывается «не отвечает»', () async {
+    // Журнал 11.11: шёл замер, человек выбрал локацию не из сессии — туннель
+    // пересобрался с другим порядком. Старый замер дособрал ответы уже нового
+    // ядра под именами прежнего списка (out-0 был «Германия», стал «Латвия»),
+    // записал их как замер новой сессии — и все её локации без числа экран
+    // подписал «не отвечает» и убрал под «Не отвечают сейчас».
+    final server = await startWorkingTunnel();
+    addTearDown(() => server.close(force: true));
+    await tunnel.connect(_subscription);
+    tunnel.appInForeground = true;
+    tunnel.latencyByRemark.value = const <String, int>{};
+    // Ядро пока молчит — замер первой сессии ждёт ответов.
+    core.groupDelays = {};
+    var staleDone = false;
+    final stale = tunnel.debugRunLatencyProbe().then((_) => staleDone = true);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(staleDone, isFalse, reason: 'замер идёт');
+
+    // Пользователь выбрал другую локацию: разрыв и новая сессия.
+    await LocalPrefs.instance.setBool(PrefKeys.serverChosenManually, true);
+    await tunnel.disconnect();
+    expect(await waitUntil(() => staleDone, timeout: const Duration(seconds: 2)),
+        isTrue,
+        reason: 'сессия кончилась — её замер не досиживает окно и не держит '
+            'ядро занятым для новой');
+    await tunnel.connect(_subscription, preferredHostName: 'Латвия');
+    await stale;
+    // Новое ядро отчитывается о своих участниках: out-0 теперь «Латвия».
+    core.groupDelays = {'out-0': 30, 'out-1': 65535, 'out-2': 65535};
+    core.emitGroupSnapshot();
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(tunnel.sessionMeasured, isFalse,
+        reason: 'новая сессия ещё не мерилась — «не отвечает» писать рано');
+    expect(tunnel.latencyForHostName('Германия'), isNull,
+        reason: 'число «Латвии» не должно лечь на «Германию»');
+
+    // Свой замер новой сессии кладёт числа на свои имена.
+    core.groupDelays = {'out-0': 30, 'out-1': 44, 'out-2': 58};
+    await tunnel.debugRunLatencyProbe();
+    expect(tunnel.sessionMeasured, isTrue);
+    expect(tunnel.latencyForHostName('Латвия'), 30);
+    expect(tunnel.latencyForHostName('Германия'), 44);
+    await tunnel.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
   test('один пропущенный замер — ещё не «не отвечает»: число остаётся, '
       'отметка — только после второго промаха подряд', () async {
     // Журнал 30.10: второй замер разгона принёс ответы от четырёх локаций

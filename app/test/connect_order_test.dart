@@ -208,6 +208,68 @@ void main() {
     });
   });
 
+  group('Hysteria 2 ходит по UDP — TCP-стук в её порт ничего не значит', () {
+    // Журнал 11.11: «Чехия · Hysteria 2» записана в «не открываются из этой
+    // сети», хотя TCP-адреса того же сервера открывались. В её порт стучались
+    // по TCP, а слушает он только UDP — такой стук всегда молчит.
+    const sub =
+        'vless://11111111-1111-1111-1111-111111111111@cz.example.com:443'
+            '?type=tcp&security=tls&sni=example.com#Чехия\n'
+        'hysteria2://pass@cz.example.com:8443?sni=example.com&insecure=1'
+            '#Чехия · Hysteria 2\n'
+        'vless://22222222-2222-2222-2222-222222222222@fi.example.com:443'
+            '?type=tcp&security=tls&sni=example.com#Финляндия\n'
+        'hysteria2://pass@fi.example.com:8443?sni=example.com&insecure=1'
+            '#Финляндия · Hysteria 2\n'
+        'vless://33333333-3333-3333-3333-333333333333@de.example.com:443'
+            '?type=tcp&security=tls&sni=example.com#Германия';
+
+    // Финляндия закрыта целиком, а в UDP-порты Hysteria TCP не проходит ни у
+    // кого.
+    Future<bool> probe(String host, int port) async =>
+        host != 'fi.example.com' && port != 8443;
+
+    Future<List<String>> orderOf(String body, {String? preferred}) async {
+      await LocalPrefs.instance.setString(PrefKeys.cachedLatencyJson, '');
+      await LocalPrefs.instance
+          .setBool(PrefKeys.serverChosenManually, preferred != null);
+      return TunnelService.instance
+          .debugOrderProfilesForConnect(body, preferred);
+    }
+
+    test('сервер открыт, TCP в порт Hysteria — нет: локация не закрыта и при '
+        'ручном выборе идёт первой', () async {
+      TunnelService.instance.endpointReachableProbe = probe;
+      final result = await orderOf(sub, preferred: 'Чехия · Hysteria 2');
+      expect(result.first, 'Чехия · Hysteria 2');
+    });
+
+    test('сервер закрыт целиком — его Hysteria уходит в конец вместе с ним',
+        () async {
+      TunnelService.instance.endpointReachableProbe = probe;
+      expect(await orderOf(sub), [
+        'Чехия',
+        'Чехия · Hysteria 2',
+        'Германия',
+        'Финляндия',
+        'Финляндия · Hysteria 2',
+      ]);
+    });
+
+    test('у сервера только Hysteria — судить не по чему, место не меняется',
+        () async {
+      const alone = 'hysteria2://pass@hy.example.com:443?sni=example.com'
+          '&insecure=1#Только Hysteria\n'
+          'vless://11111111-1111-1111-1111-111111111111@cz.example.com:443'
+          '?type=tcp&security=tls&sni=example.com#Чехия\n'
+          'vless://33333333-3333-3333-3333-333333333333@de.example.com:443'
+          '?type=tcp&security=tls&sni=example.com#Германия';
+      TunnelService.instance.endpointReachableProbe =
+          (host, _) async => host != 'hy.example.com';
+      expect(await orderOf(alone), ['Только Hysteria', 'Чехия', 'Германия']);
+    });
+  });
+
   group('обход «белых списков» и чистый выход', () {
     // Чехия/Германия — свои серверы; «Авто БС …» — общий обходной узел,
     // который делят тысячи людей (с него Google/Gemini ловят капчу).
